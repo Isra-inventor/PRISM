@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Dict, List, Optional
+
+from typing_extensions import Literal  # typing.Literal needs Python 3.8+
 
 from pydantic import BaseModel
 
@@ -43,15 +45,15 @@ class ColumnProposal(BaseModel):
 class AIProposalBatch(BaseModel):
     """Structured-output schema handed to the LLM."""
 
-    columns: list[ColumnProposal]
+    columns: List[ColumnProposal]
 
 
 class ColumnRole(BaseModel):
     index: int
     column: str
     role: str
-    confidence: float | None = None
-    evidence: str | None = None
+    confidence: Optional[float] = None
+    evidence: Optional[str] = None
 
 
 class UploadResponse(BaseModel):
@@ -61,14 +63,14 @@ class UploadResponse(BaseModel):
     encoding: str
     n_rows: int
     n_columns: int
-    header: list[str]
-    preview_rows: list[list[str]]
-    warnings: list[str]
+    header: List[str]
+    preview_rows: List[List[str]]
+    warnings: List[str]
     method: Literal["signature", "ai", "manual"]
-    detection: dict | None
-    ai: dict | None
-    columns: list[ColumnRole]
-    roles_vocabulary: list[str]
+    detection: Optional[dict]
+    ai: Optional[dict]
+    columns: List[ColumnRole]
+    roles_vocabulary: List[str]
 
 
 class ConfirmedColumn(BaseModel):
@@ -78,7 +80,7 @@ class ConfirmedColumn(BaseModel):
 
 
 class ConfirmRequest(BaseModel):
-    columns: list[ConfirmedColumn]
+    columns: List[ConfirmedColumn]
 
 
 class StructureSummary(BaseModel):
@@ -90,14 +92,14 @@ class StructureSummary(BaseModel):
     omics_type: str
     layout: str
     layout_description: str
-    sample_count: int | None
-    feature_count: int | None
+    sample_count: Optional[int]
+    feature_count: Optional[int]
     feature_id: str
     n_rows: int
     n_columns: int
-    role_counts: dict[str, int]
-    design_factors: list[dict]
-    warnings: list[str]
-    columns: list[dict]
+    role_counts: Dict[str, int]
+    design_factors: List[dict]
+    warnings: List[str]
+    columns: List[dict]
     changes_from_proposal: int
     log_file: str

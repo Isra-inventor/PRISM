@@ -1,6 +1,14 @@
-fastapi>=0.110
-uvicorn>=0.29
-python-multipart>=0.0.9
-anthropic>=1.0
-pydantic>=2.6
-pytest>=8   # tests only
+# Works on Python 3.7 and newer. Python 3.7 gets the last releases that still
+# support it; newer Pythons get current releases.
+fastapi>=0.100,<0.104; python_version < "3.8"
+fastapi>=0.110; python_version >= "3.8"
+uvicorn>=0.22; python_version < "3.8"
+uvicorn>=0.29; python_version >= "3.8"
+python-multipart>=0.0.6,<0.0.9; python_version < "3.8"
+python-multipart>=0.0.9; python_version >= "3.8"
+pydantic>=2.4,<2.6; python_version < "3.8"
+pydantic>=2.6; python_version >= "3.8"
+anthropic>=0.20,<0.30; python_version < "3.8"
+anthropic>=0.40; python_version >= "3.8"
+typing_extensions>=4.7
+pytest>=7   # tests only

@@ -10,22 +10,39 @@ normalization, imputation and recommendations are out of scope for this build.
 
 ## Run it
 
-```bash
-python -m venv .venv && source .venv/bin/activate
+Works with **Python 3.7 or newer**. `requirements.txt` picks versions that match your Python.
+Run these commands from the project's top folder (the one that contains `backend/`).
+
+**Windows (PowerShell)**
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
 pip install -r requirements.txt
-export ANTHROPIC_API_KEY=sk-ant-...    # optional, see below
-uvicorn backend.main:app --reload
+python -m uvicorn backend.main:app --reload
+```
+
+**macOS / Linux**
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+python -m uvicorn backend.main:app --reload
 ```
 
 Open <http://127.0.0.1:8000>. The home page is at `/`, and the tool is at `/tool.html`.
 FastAPI serves both the API and the static frontend, so you only run one command.
+`python main.py` does **not** work, because the backend is a package and has to be started through uvicorn as shown.
 
 The 3D prism on the home page loads three.js from `cdn.jsdelivr.net`. The page needs internet access for
 the prism. Without it, the typographic hero still works. The fonts (Quicksand, Inter) are self-hosted in `frontend/fonts/`.
 
 ### Where to put the API key
 
-The AI fallback reads **`ANTHROPIC_API_KEY`** from the server's environment. The key is never hardcoded
+The AI fallback reads **`ANTHROPIC_API_KEY`** from the server's environment. Set it in the same
+terminal before you start the server: `$env:ANTHROPIC_API_KEY="sk-ant-..."` in PowerShell, or
+`export ANTHROPIC_API_KEY=sk-ant-...` on macOS/Linux. The key is never hardcoded
 and never sent to the browser. You can export it in your shell or put it in your process manager's environment.
 Optional settings:
 

@@ -54,6 +54,30 @@ values that support the role). Return exactly one entry per column, in the \
 order given."""
 
 
+# JSON schema for structured outputs: exactly one object shape per column.
+OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "columns": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "column": {"type": "string"},
+                    "proposed_role": {"type": "string", "enum": list(ROLES) + [UNRESOLVED]},
+                    "confidence": {"type": "number"},
+                    "evidence": {"type": "string"},
+                },
+                "required": ["column", "proposed_role", "confidence", "evidence"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["columns"],
+    "additionalProperties": False,
+}
+
+
 def _column_profile(idx: int, rows: list[list[str]]) -> dict:
     cells = [r[idx] if idx < len(r) else "" for r in rows]
     present = [c for c in cells if not is_missing_token(c)]
@@ -141,12 +165,14 @@ def propose_roles(header: list[str], rows: list[list[str]], n_rows_total: int) -
         prompt = build_prompt(header, rows, chunk, n_rows_total)
         call_log = {"columns": [header[i] for i in chunk], "prompt": prompt}
         try:
-            response = client.messages.parse(
+            # Structured outputs via output_config; passed through extra_body so
+            # this also works with the older SDK releases that support Python 3.7.
+            response = client.messages.create(
                 model=model,
                 max_tokens=16000,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": prompt}],
-                output_format=AIProposalBatch,
+                extra_body={"output_config": {"format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}}},
             )
         except anthropic.APIStatusError as e:
             why = f"AI call failed (HTTP {e.status_code}). Assign this role manually."
@@ -161,15 +187,22 @@ def propose_roles(header: list[str], rows: list[list[str]], n_rows_total: int) -
             columns += [_unresolved(i, header[i], why) for i in chunk]
             continue
 
+        raw = "".join(b.text for b in response.content if b.type == "text")
         call_log["stop_reason"] = response.stop_reason
-        call_log["raw_output"] = "".join(b.text for b in response.content if b.type == "text")
+        call_log["raw_output"] = raw
         calls.append(call_log)
 
-        if response.stop_reason != "end_turn" or response.parsed_output is None:
+        parsed = None
+        if response.stop_reason == "end_turn":
+            try:
+                parsed = AIProposalBatch.model_validate_json(raw)
+            except ValueError:
+                parsed = None
+        if parsed is None:
             why = f"AI response unusable (stop_reason={response.stop_reason}). Assign this role manually."
             columns += [_unresolved(i, header[i], why) for i in chunk]
             continue
-        columns += _reconcile(header, chunk, response.parsed_output)
+        columns += _reconcile(header, chunk, parsed)
 
     failed = sum(1 for c in calls if "error" in c)
     status = "ok" if failed == 0 else ("failed" if failed == len(calls) else "partial")
