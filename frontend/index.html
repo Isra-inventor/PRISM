@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PRISM</title>
+  <meta name="description" content="PRISM — Preprocessing and Reasoning for Informed Statistical Methodology. Decision support for omics preprocessing.">
+  <link rel="preload" href="fonts/quicksand-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="style.css">
+  <script type="importmap">
+    { "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    } }
+  </script>
+</head>
+<body>
+  <header class="nav">
+    <a class="brand" href="index.html">prism<span>.</span></a>
+    <nav class="nav-links">
+      <a href="#top" class="active">Home</a>
+      <a href="#about">About</a>
+      <a href="tool.html">Tool</a>
+      <a href="#read">Read</a>
+      <a href="#contact">Contact Us</a>
+    </nav>
+    <a class="btn btn-light btn-sm nav-cta" href="tool.html">Open tool</a>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <canvas id="prism-canvas" aria-label="Interactive 3D glass prism. Drag to rotate."></canvas>
+      <h1 class="hero-title">PRISM</h1>
+      <p class="hero-sub"><b>P</b>reprocessing and <b>R</b>easoning for <b>I</b>nformed <b>S</b>tatistical <b>M</b>ethodology</p>
+      <span class="hero-hint">Drag to rotate</span>
+
+      <div class="hero-bottom">
+        <div class="hero-left">
+          <div class="pills"><span class="pill">Proteomics</span><span class="pill">Metabolomics</span></div>
+          <p>Decision support for omics preprocessing. PRISM first works out what your data is, then reasons about what to do with it — instead of forcing every dataset through the same fixed pipeline.</p>
+          <div class="hero-actions">
+            <a class="btn btn-dark" href="tool.html">Upload a dataset</a>
+            <a class="link-arrow" href="#read">How it works &nbsp;→</a>
+          </div>
+        </div>
+        <div class="stats">
+          <div class="stat"><strong>5</strong><span>Known export<br>signatures</span></div>
+          <div class="stat"><strong>8</strong><span>Column roles,<br>fixed vocabulary</span></div>
+          <div class="stat"><strong>0</strong><span>Values changed<br>at Step 0</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="strip">
+      <div class="eyebrow">Recognized without AI</div>
+      <div class="formats">
+        <span><i></i>MaxQuant</span>
+        <span><i></i>DIA-NN</span>
+        <span><i></i>Spectronaut</span>
+        <span><i></i>FragPipe</span>
+        <span><i></i>XCMS / MZmine</span>
+      </div>
+    </section>
+
+    <section class="statement" id="statement">
+      <div class="wrap">
+        <h2>We make preprocessing reasoned, transparent and reproducible <span class="ghost">— from the first upload to the last transformation.</span></h2>
+      </div>
+    </section>
+
+    <section class="section" id="about">
+      <div class="wrap">
+        <div class="section-head">
+          <h2>Detection × reasoning: <span class="ghost">one framework, no silent decisions</span></h2>
+          <p>Omics tables arrive in dozens of shapes. PRISM identifies the structure deterministically wherever it can, asks an AI only when it can't, and never acts on a guess without your confirmation.</p>
+        </div>
+        <div class="principles">
+          <div class="principle"><span class="num">01</span><h3>Deterministic first</h3><p>Known exports are matched by exact column signatures. A match is certain, so no language model is ever called for it.</p></div>
+          <div class="principle"><span class="num">02</span><h3>AI proposes, you decide</h3><p>For unknown layouts, every AI-proposed column role is shown with its confidence and evidence, and must be confirmed or corrected.</p></div>
+          <div class="principle"><span class="num">03</span><h3>Nothing is transformed</h3><p>Recognition only labels structure. No value is filtered, imputed, normalized or rewritten at this stage.</p></div>
+          <div class="principle"><span class="num">04</span><h3>Everything is logged</h3><p>Each proposal and each confirmation is timestamped with the original and final value, so a session can be fully reconstructed.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="read">
+      <div class="wrap">
+        <div class="section-head">
+          <h2>The pipeline <span class="ghost">starts with knowing your data</span></h2>
+          <p>Step 0 is live. Later phases build on a structure you have explicitly confirmed; they are shown here for context only.</p>
+        </div>
+        <div class="pipeline">
+          <div class="phase active">
+            <span class="tag">Step 0 · Available</span>
+            <h3>Data input &amp; recognition</h3>
+            <p>Upload a quantified CSV/TSV. PRISM detects the platform, labels each column's role and asks you to confirm.</p>
+            <a class="btn btn-light btn-sm" href="tool.html">Start</a>
+          </div>
+          <div class="phase"><span class="tag">Step 1 · Planned</span><h3>Statistical audit</h3><p>Characterize the confirmed data before touching it.</p></div>
+          <div class="phase"><span class="tag">Step 2 · Planned</span><h3>Reasoned recommendations</h3><p>Preprocessing choices justified by what the audit found.</p></div>
+          <div class="phase"><span class="tag">Step 3 · Planned</span><h3>Reproducible record</h3><p>A complete, replayable account of every decision.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="contact">
+      <div class="wrap contact">
+        <h2>Get in touch</h2>
+        <div>
+          <p style="color:var(--text-dim);max-width:380px;margin:0 0 18px;font-size:14px">Questions, file formats we should recognize, or datasets that trip up detection — open an issue on the project repository.</p>
+          <a class="btn btn-light" href="https://github.com/isra-inventor/prism/issues" target="_blank" rel="noopener">Open an issue</a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap"><span>PRISM · Step 0 — Data Input &amp; Recognition</span><span>Proteomics · Metabolomics</span></div>
+  </footer>
+
+  <script type="module" src="home.js"></script>
+</body>
+</html>

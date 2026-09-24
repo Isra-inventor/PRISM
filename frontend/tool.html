@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PRISM Recognition Tool</title>
+  <meta name="description" content="PRISM Step 0 — upload a quantified omics table and confirm its structure.">
+  <link rel="preload" href="fonts/quicksand-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="nav">
+    <a class="brand" href="index.html">prism<span>.</span></a>
+    <nav class="nav-links">
+      <a href="index.html">Home</a>
+      <a href="index.html#about">About</a>
+      <a href="tool.html" class="active">Tool</a>
+      <a href="index.html#read">Read</a>
+      <a href="index.html#contact">Contact Us</a>
+    </nav>
+    <button class="btn btn-sm nav-cta hidden" id="restart" type="button">New upload</button>
+  </header>
+
+  <main class="tool-main">
+    <div class="wrap">
+      <div class="tool-head">
+        <div>
+          <div class="eyebrow">Step 0 · Data input &amp; recognition</div>
+          <h1>Recognize <span class="ghost">your data</span></h1>
+          <p>Upload a quantified table. PRISM identifies its structure — which column is what — and asks you to confirm. No value is changed at this step.</p>
+        </div>
+        <span class="pill" id="ai-status">Checking AI fallback…</span>
+      </div>
+
+      <ol class="steps" id="steps" style="list-style:none;padding:0">
+        <li class="step current" data-step="1"><b>01</b><span>Upload</span></li>
+        <li class="step" data-step="2"><b>02</b><span>Preview</span></li>
+        <li class="step" data-step="3"><b>03</b><span>Structure</span></li>
+        <li class="step" data-step="4"><b>04</b><span>Confirmed</span></li>
+      </ol>
+
+      <!-- 1. Upload -->
+      <section class="panel" id="panel-upload">
+        <div class="panel-head"><h2>Upload a quantified table</h2><span class="meta">.csv · .tsv · .txt (tab-separated)</span></div>
+        <div class="panel-body">
+          <label class="dropzone" id="dropzone" for="file-input">
+            <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
+            <span class="big">Drop a CSV / TSV file, or click to choose</span>
+            <span class="small">Export a protein, peptide or feature table from your analysis software first. Raw spectra and vendor files are not processed.</span>
+            <span class="formats-note">
+              <span class="pill">MaxQuant</span><span class="pill">DIA-NN</span><span class="pill">Spectronaut</span><span class="pill">FragPipe</span><span class="pill">XCMS / MZmine</span><span class="pill">any other table → AI-assisted</span>
+            </span>
+          </label>
+          <input type="file" id="file-input" accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values" hidden>
+          <div class="loading hidden" id="upload-loading"><span class="spinner"></span><span id="loading-text">Reading file…</span></div>
+          <div class="alert alert-error hidden" id="upload-error" role="alert"></div>
+        </div>
+      </section>
+
+      <!-- 2. Preview -->
+      <section class="panel hidden" id="panel-preview">
+        <div class="panel-head"><h2>Data preview</h2><span class="meta" id="preview-meta"></span></div>
+        <div class="panel-body">
+          <div class="table-scroll"><table class="preview" id="preview-table"></table></div>
+          <div class="alert alert-warn hidden" id="file-warnings"></div>
+        </div>
+      </section>
+
+      <!-- 3. Structure -->
+      <section class="panel hidden" id="panel-structure">
+        <div class="panel-head"><h2>Structure</h2><span class="meta" id="structure-meta"></span></div>
+        <div class="panel-body" id="structure-body"></div>
+        <div class="confirm-bar">
+          <p id="confirm-note"></p>
+          <button class="btn btn-light" id="confirm-btn" type="button">Confirm structure</button>
+        </div>
+        <div class="panel-body hidden" id="confirm-error-wrap" style="padding-top:0"><div class="alert alert-error" id="confirm-error" role="alert"></div></div>
+      </section>
+
+      <!-- 4. Summary -->
+      <section class="panel hidden" id="panel-summary">
+        <div class="panel-head"><h2>Recognized structure</h2><span class="meta" id="summary-meta"></span></div>
+        <div class="panel-body" id="summary-body"></div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="wrap"><span>PRISM · Step 0 — Data Input &amp; Recognition</span><span>Nothing is transformed at this stage.</span></div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
