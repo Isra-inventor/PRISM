@@ -54,7 +54,7 @@
     $("ai-status").textContent = h.ai_available ? `AI fallback: ${h.ai_model}` : "AI fallback off · manual mapping";
     $("ai-status").title = h.ai_available
       ? "Used only when no known format signature matches."
-      : "Set ANTHROPIC_API_KEY on the server to enable AI-assisted proposals.";
+      : "Set GEMINI_API_KEY (in .env or the server environment) to enable AI-assisted proposals.";
   }).catch(() => { $("ai-status").textContent = "Backend unreachable"; });
 
   // ------------------------------------------------------------ upload

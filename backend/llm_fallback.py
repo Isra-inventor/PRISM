@@ -12,12 +12,16 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
+import urllib.request
 from collections import defaultdict, deque
 
 from .format_detect import is_missing_token, looks_numeric
 from .models import ROLES, UNRESOLVED, AIProposalBatch
 
-DEFAULT_MODEL = "claude-opus-5"
+DEFAULT_MODEL = "gemini-2.5-flash"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+REQUEST_TIMEOUT_S = 120
 SAMPLE_ROWS = 15
 MAX_CELL_CHARS = 40
 COLUMNS_PER_CALL = 120
@@ -54,28 +58,61 @@ values that support the role). Return exactly one entry per column, in the \
 order given."""
 
 
-# JSON schema for structured outputs: exactly one object shape per column.
-OUTPUT_SCHEMA = {
-    "type": "object",
+# Gemini structured-output schema (OpenAPI subset). One object per column.
+RESPONSE_SCHEMA = {
+    "type": "OBJECT",
     "properties": {
         "columns": {
-            "type": "array",
+            "type": "ARRAY",
             "items": {
-                "type": "object",
+                "type": "OBJECT",
                 "properties": {
-                    "column": {"type": "string"},
-                    "proposed_role": {"type": "string", "enum": list(ROLES) + [UNRESOLVED]},
-                    "confidence": {"type": "number"},
-                    "evidence": {"type": "string"},
+                    "column": {"type": "STRING"},
+                    "proposed_role": {"type": "STRING", "enum": list(ROLES) + [UNRESOLVED]},
+                    "confidence": {"type": "NUMBER"},
+                    "evidence": {"type": "STRING"},
                 },
                 "required": ["column", "proposed_role", "confidence", "evidence"],
-                "additionalProperties": False,
+                "propertyOrdering": ["column", "proposed_role", "confidence", "evidence"],
             },
         }
     },
     "required": ["columns"],
-    "additionalProperties": False,
 }
+
+
+def api_key():
+    return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
+
+def call_gemini(model, key, system, prompt):
+    """One generateContent call over plain HTTPS (stdlib only, Python 3.7+).
+    Returns (raw_text, finish_reason). Raises urllib.error.HTTPError / URLError."""
+    body = {
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": RESPONSE_SCHEMA,
+            "temperature": 0,
+        },
+    }
+    req = urllib.request.Request(
+        GEMINI_URL.format(model=model),
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": key},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_S) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    candidates = data.get("candidates") or []
+    if not candidates:
+        reason = (data.get("promptFeedback") or {}).get("blockReason", "NO_CANDIDATES")
+        return "", reason
+    cand = candidates[0]
+    parts = (cand.get("content") or {}).get("parts") or []
+    text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+    return text, cand.get("finishReason", "UNKNOWN")
 
 
 def _column_profile(idx: int, rows: list[list[str]]) -> dict:
@@ -150,56 +187,46 @@ def propose_roles(header: list[str], rows: list[list[str]], n_rows_total: int) -
     model = os.environ.get("PRISM_LLM_MODEL", DEFAULT_MODEL)
     all_indices = list(range(len(header)))
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        why = "AI fallback unavailable (ANTHROPIC_API_KEY is not set). Assign this role manually."
+    key = api_key()
+    if not key:
+        why = "AI fallback unavailable (GEMINI_API_KEY is not set). Assign this role manually."
         return {"status": "unavailable", "model": None, "error": why, "calls": [],
                 "columns": [_unresolved(i, header[i], why) for i in all_indices]}
 
-    import anthropic
-
-    client = anthropic.Anthropic()
-    columns: list[dict] = []
-    calls: list[dict] = []
+    columns = []
+    calls = []
     for start in range(0, len(all_indices), COLUMNS_PER_CALL):
         chunk = all_indices[start:start + COLUMNS_PER_CALL]
         prompt = build_prompt(header, rows, chunk, n_rows_total)
         call_log = {"columns": [header[i] for i in chunk], "prompt": prompt}
         try:
-            # Structured outputs via output_config; passed through extra_body so
-            # this also works with the older SDK releases that support Python 3.7.
-            response = client.messages.create(
-                model=model,
-                max_tokens=16000,
-                system=SYSTEM_PROMPT,
-                messages=[{"role": "user", "content": prompt}],
-                extra_body={"output_config": {"format": {"type": "json_schema", "schema": OUTPUT_SCHEMA}}},
-            )
-        except anthropic.APIStatusError as e:
-            why = f"AI call failed (HTTP {e.status_code}). Assign this role manually."
-            call_log["error"] = str(e)
+            raw, finish = call_gemini(model, key, SYSTEM_PROMPT, prompt)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:500]
+            why = f"AI call failed (HTTP {e.code}). Assign this role manually."
+            call_log["error"] = f"HTTP {e.code}: {detail}"
             calls.append(call_log)
             columns += [_unresolved(i, header[i], why) for i in chunk]
             continue
-        except anthropic.APIConnectionError as e:
+        except (urllib.error.URLError, OSError, ValueError) as e:
             why = "AI call failed (could not reach the API). Assign this role manually."
-            call_log["error"] = str(e)
+            call_log["error"] = repr(e)
             calls.append(call_log)
             columns += [_unresolved(i, header[i], why) for i in chunk]
             continue
 
-        raw = "".join(b.text for b in response.content if b.type == "text")
-        call_log["stop_reason"] = response.stop_reason
+        call_log["finish_reason"] = finish
         call_log["raw_output"] = raw
         calls.append(call_log)
 
         parsed = None
-        if response.stop_reason == "end_turn":
+        if finish == "STOP":
             try:
                 parsed = AIProposalBatch.model_validate_json(raw)
             except ValueError:
                 parsed = None
         if parsed is None:
-            why = f"AI response unusable (stop_reason={response.stop_reason}). Assign this role manually."
+            why = f"AI response unusable (finish_reason={finish}). Assign this role manually."
             columns += [_unresolved(i, header[i], why) for i in chunk]
             continue
         columns += _reconcile(header, chunk, parsed)

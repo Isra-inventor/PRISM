@@ -38,21 +38,25 @@ FastAPI serves both the API and the static frontend, so you only run one command
 The 3D prism on the home page loads three.js from `cdn.jsdelivr.net`. The page needs internet access for
 the prism. Without it, the typographic hero still works. The fonts (Quicksand, Inter) are self-hosted in `frontend/fonts/`.
 
-### Where to put the API key
+### Where to put the API key (Gemini)
 
-The AI fallback reads **`ANTHROPIC_API_KEY`** from the server's environment. Set it in the same
-terminal before you start the server: `$env:ANTHROPIC_API_KEY="sk-ant-..."` in PowerShell, or
-`export ANTHROPIC_API_KEY=sk-ant-...` on macOS/Linux. The key is never hardcoded
-and never sent to the browser. You can export it in your shell or put it in your process manager's environment.
-Optional settings:
+The AI fallback uses Google Gemini. Get a key at <https://aistudio.google.com/apikey>, then either:
+
+- **Recommended:** copy `.env.example` to `.env` in the project folder and paste your key after `GEMINI_API_KEY=`.
+  `.env` is git-ignored, so the key is never committed. The server reads it at startup.
+- **Or** set it in the terminal before starting the server: `$env:GEMINI_API_KEY="..."` in PowerShell, or
+  `export GEMINI_API_KEY=...` on macOS/Linux.
+
+Never paste the key into the code. It stays on the server and is never sent to the browser.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | – | Turns on AI-assisted column proposals |
-| `PRISM_LLM_MODEL` | `claude-opus-5` | Model used for proposals |
+| `GEMINI_API_KEY` | – | Turns on AI-assisted column proposals (`GOOGLE_API_KEY` also works) |
+| `PRISM_LLM_MODEL` | `gemini-2.5-flash` | Gemini model used for proposals |
 | `PRISM_LOG_DIR` | `backend/logs` | Where session logs are written |
 | `PRISM_MAX_UPLOAD_MB` | `250` | Upload size limit |
 
+The Gemini call uses plain HTTPS from the Python standard library, so there is no extra SDK to install.
 If no key is set, uploads that match a known signature still work. For every other file, all
 columns come back `unresolved` and you assign each role by hand.
 
@@ -65,7 +69,7 @@ columns come back `unresolved` and you assign each role by hand.
    `SIGNATURES` table (MaxQuant, DIA-NN, Spectronaut, FragPipe, and generic mz/rt feature tables).
    A signature matches only when **all** of its required columns are present, with no fuzzy matching.
    On a match, value and feature-ID columns are resolved by fixed rules and **no AI is called**.
-3. **AI fallback** (`backend/llm_fallback.py`). This step runs only when nothing matched. The model gets the header and the first 15
+3. **AI fallback** (`backend/llm_fallback.py`, Gemini). This step runs only when nothing matched. The model gets the header and the first 15
    rows (cells cut at 40 characters). It must return `{column, proposed_role, confidence, evidence}` for each column,
    using the fixed role vocabulary (`sample_id`, `subject_id`, `timepoint`, `batch`,
    `group_or_outcome`, `feature_value`, `feature_annotation`, `ignore`) or `unresolved`.

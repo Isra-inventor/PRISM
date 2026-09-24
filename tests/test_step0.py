@@ -102,7 +102,8 @@ def test_reconcile_never_defaults_unresolved():
 
 
 def test_no_api_key_means_manual(client, monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     d = upload(client, "cohort_metabolites_wide.csv").json()
     assert d["method"] == "manual"
     assert all(c["role"] == "unresolved" for c in d["columns"])
@@ -156,3 +157,28 @@ def test_values_are_not_modified(client):
     d = upload(client, "xcms_feature_table.csv").json()
     first = raw[1].split(",")
     assert d["preview_rows"][0] == first
+
+
+def test_gemini_call_is_parsed_strictly(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    answer = {"columns": [
+        {"column": "a", "proposed_role": "sample_id", "confidence": 0.93, "evidence": "unique ids"},
+        {"column": "b", "proposed_role": "unresolved", "confidence": 0.3, "evidence": "unclear"},
+    ]}
+    seen = {}
+
+    def fake_call(model, key, system, prompt):
+        seen.update(model=model, key=key)
+        return json.dumps(answer), "STOP"
+
+    monkeypatch.setattr(llm_fallback, "call_gemini", fake_call)
+    r = llm_fallback.propose_roles(["a", "b", "c"], [["S1", "?", "x"]], 1)
+    assert r["status"] == "ok" and seen["key"] == "test-key"
+    assert [c["role"] for c in r["columns"]] == ["sample_id", "unresolved", "unresolved"]
+
+
+def test_gemini_truncated_answer_is_unresolved(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(llm_fallback, "call_gemini", lambda *a: ('{"columns": [', "MAX_TOKENS"))
+    r = llm_fallback.propose_roles(["a"], [["S1"]], 1)
+    assert r["columns"][0]["role"] == "unresolved"

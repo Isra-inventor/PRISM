@@ -1,3 +1,4 @@
+# The Gemini call uses only the standard library (no SDK needed).
 # Works on Python 3.7 and newer. Python 3.7 gets the last releases that still
 # support it; newer Pythons get current releases.
 fastapi>=0.100,<0.104; python_version < "3.8"
@@ -8,7 +9,5 @@ python-multipart>=0.0.6,<0.0.9; python_version < "3.8"
 python-multipart>=0.0.9; python_version >= "3.8"
 pydantic>=2.4,<2.6; python_version < "3.8"
 pydantic>=2.6; python_version >= "3.8"
-anthropic>=0.20,<0.30; python_version < "3.8"
-anthropic>=0.40; python_version >= "3.8"
 typing_extensions>=4.7
 pytest>=7   # tests only

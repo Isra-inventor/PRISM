@@ -42,6 +42,25 @@ WRONG_FORMAT_MESSAGE = (
 
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
+
+def _load_dotenv(path=Path(__file__).resolve().parent.parent / ".env"):
+    """Read KEY=VALUE lines from the project's .env (if any) into the environment.
+    Variables already set in the environment win. The .env file is git-ignored."""
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        if k.startswith("export "):
+            k = k[len("export "):].strip()
+        os.environ.setdefault(k, v.strip().strip('"').strip("'"))
+
+
+_load_dotenv()
+
 app = FastAPI(title="PRISM Step 0 - Data Input & Recognition")
 
 # In-memory session store (a restart clears it; the logs on disk persist).
@@ -204,7 +223,7 @@ def derive_structure(session: dict, roles: list[str]) -> dict:
 def health():
     return {
         "status": "ok",
-        "ai_available": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "ai_available": bool(llm_fallback.api_key()),
         "ai_model": os.environ.get("PRISM_LLM_MODEL", llm_fallback.DEFAULT_MODEL),
         "roles": list(ROLES),
         "signatures": {k: format_detect.PLATFORM_LABELS[k] for k in format_detect.SIGNATURES},
