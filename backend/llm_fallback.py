@@ -11,7 +11,9 @@ becomes "unresolved" -- it is never silently defaulted to a real role.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import time
 import urllib.error
 import urllib.request
 from collections import defaultdict, deque
@@ -19,9 +21,18 @@ from collections import defaultdict, deque
 from .format_detect import is_missing_token, looks_numeric
 from .models import ROLES, UNRESOLVED, AIProposalBatch
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+# Tried in order: if a model is overloaded (503), rate-limited (429) or retired
+# (404) PRISM moves on to the next one. Override with PRISM_LLM_MODEL, e.g.
+# PRISM_LLM_MODEL=gemini-3.6-flash or a comma-separated list.
+DEFAULT_MODELS = "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash"
+DEFAULT_MODEL = DEFAULT_MODELS.split(",")[0]
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 REQUEST_TIMEOUT_S = 120
+RETRY_STATUS = {429, 500, 502, 503, 504}   # transient: rate limit / overload
+RETRY_DELAYS_S = (2, 5)          # per model, before moving to the next one
+NEXT_MODEL_STATUS = {404, 429, 500, 502, 503, 504}
+
+log = logging.getLogger("prism.ai")
 SAMPLE_ROWS = 15
 MAX_CELL_CHARS = 40
 COLUMNS_PER_CALL = 120
@@ -83,6 +94,62 @@ RESPONSE_SCHEMA = {
 
 def api_key():
     return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+
+
+def _api_message(err):
+    """Pull Google's human-readable message out of an HTTPError body."""
+    body = err.read().decode("utf-8", "replace")
+    try:
+        return json.loads(body)["error"]["message"]
+    except (ValueError, KeyError, TypeError):
+        return body[:300] or str(err)
+
+
+class GeminiError(RuntimeError):
+    def __init__(self, msg, code=None):
+        super().__init__(msg)
+        self.code = code
+
+
+def model_list():
+    raw = os.environ.get("PRISM_LLM_MODEL") or DEFAULT_MODELS
+    return [m.strip() for m in raw.split(",") if m.strip()]
+
+
+def call_with_fallback(models, key, system, prompt):
+    """Try each model in turn. Returns (raw_text, finish_reason, model_used)."""
+    last = None
+    for model in models:
+        try:
+            raw, finish = call_gemini_with_retry(model, key, system, prompt)
+            return raw, finish, model
+        except GeminiError as e:
+            last = e
+            if e.code not in NEXT_MODEL_STATUS or model == models[-1]:
+                raise
+            log.warning("%s -- switching to next model", e)
+    raise last
+
+
+def call_gemini_with_retry(model, key, system, prompt):
+    """call_gemini, retrying transient errors (429/5xx, network) with backoff.
+    Raises RuntimeError with a readable message once retries are exhausted."""
+    for attempt in range(len(RETRY_DELAYS_S) + 1):
+        try:
+            return call_gemini(model, key, system, prompt)
+        except urllib.error.HTTPError as e:
+            code = e.code
+            msg = f"Gemini API error (HTTP {code}, model {model}): {_api_message(e)}"
+            retryable = code in RETRY_STATUS
+        except (urllib.error.URLError, OSError) as e:
+            code = None
+            msg = f"Could not reach the Gemini API: {getattr(e, 'reason', e)}"
+            retryable = True
+        if not retryable or attempt == len(RETRY_DELAYS_S):
+            raise GeminiError(msg, code)
+        delay = RETRY_DELAYS_S[attempt]
+        log.warning("%s -- retrying in %ss (attempt %s)", msg, delay, attempt + 2)
+        time.sleep(delay)
 
 
 def call_gemini(model, key, system, prompt):
@@ -184,7 +251,8 @@ def propose_roles(header: list[str], rows: list[list[str]], n_rows_total: int) -
     Returns {"status", "model", "columns", "calls", "error"}. On any failure
     every column comes back unresolved so the user assigns roles manually.
     """
-    model = os.environ.get("PRISM_LLM_MODEL", DEFAULT_MODEL)
+    models = model_list()
+    used = []
     all_indices = list(range(len(header)))
 
     key = api_key()
@@ -200,21 +268,18 @@ def propose_roles(header: list[str], rows: list[list[str]], n_rows_total: int) -
         prompt = build_prompt(header, rows, chunk, n_rows_total)
         call_log = {"columns": [header[i] for i in chunk], "prompt": prompt}
         try:
-            raw, finish = call_gemini(model, key, SYSTEM_PROMPT, prompt)
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "replace")[:500]
-            why = f"AI call failed (HTTP {e.code}). Assign this role manually."
-            call_log["error"] = f"HTTP {e.code}: {detail}"
+            raw, finish, model_used = call_with_fallback(models, key, SYSTEM_PROMPT, prompt)
+        except (RuntimeError, ValueError) as e:
+            msg = str(e)
+            log.error("AI fallback failed: %s", msg)
+            call_log["error"] = msg
             calls.append(call_log)
-            columns += [_unresolved(i, header[i], why) for i in chunk]
-            continue
-        except (urllib.error.URLError, OSError, ValueError) as e:
-            why = "AI call failed (could not reach the API). Assign this role manually."
-            call_log["error"] = repr(e)
-            calls.append(call_log)
-            columns += [_unresolved(i, header[i], why) for i in chunk]
+            columns += [_unresolved(i, header[i], f"{msg} -- assign this role manually.") for i in chunk]
             continue
 
+        call_log["model"] = model_used
+        if model_used not in used:
+            used.append(model_used)
         call_log["finish_reason"] = finish
         call_log["raw_output"] = raw
         calls.append(call_log)
@@ -227,11 +292,15 @@ def propose_roles(header: list[str], rows: list[list[str]], n_rows_total: int) -
                 parsed = None
         if parsed is None:
             why = f"AI response unusable (finish_reason={finish}). Assign this role manually."
+            log.error("AI fallback: unusable response (finish_reason=%s): %s", finish, raw[:300])
             columns += [_unresolved(i, header[i], why) for i in chunk]
             continue
         columns += _reconcile(header, chunk, parsed)
 
     failed = sum(1 for c in calls if "error" in c)
     status = "ok" if failed == 0 else ("failed" if failed == len(calls) else "partial")
-    error = None if failed == 0 else f"{failed} of {len(calls)} AI call(s) failed; affected columns are unresolved."
+    first_error = next((c["error"] for c in calls if "error" in c), None)
+    error = None if failed == 0 else (
+        f"{failed} of {len(calls)} AI call(s) failed; affected columns are unresolved. {first_error}")
+    model = ", ".join(used) if used else models[0]
     return {"status": status, "model": model, "error": error, "calls": calls, "columns": columns}

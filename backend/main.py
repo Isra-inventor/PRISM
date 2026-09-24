@@ -15,6 +15,7 @@ Every step is logged to backend/logs/<session_id>.jsonl.
 from __future__ import annotations
 
 import csv
+import logging
 import io
 import os
 import uuid
@@ -60,8 +61,12 @@ def _load_dotenv(path=Path(__file__).resolve().parent.parent / ".env"):
 
 
 _load_dotenv()
+logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s - %(message)s")
 
 app = FastAPI(title="PRISM Step 0 - Data Input & Recognition")
+logging.getLogger("prism").info(
+    "AI fallback: %s", "Gemini, models tried in order: " + ", ".join(llm_fallback.model_list())
+    if llm_fallback.api_key() else "off (GEMINI_API_KEY not set; put it in .env)")
 
 # In-memory session store (a restart clears it; the logs on disk persist).
 SESSIONS: "OrderedDict[str, dict]" = OrderedDict()
@@ -224,7 +229,7 @@ def health():
     return {
         "status": "ok",
         "ai_available": bool(llm_fallback.api_key()),
-        "ai_model": os.environ.get("PRISM_LLM_MODEL", llm_fallback.DEFAULT_MODEL),
+        "ai_model": llm_fallback.model_list()[0],
         "roles": list(ROLES),
         "signatures": {k: format_detect.PLATFORM_LABELS[k] for k in format_detect.SIGNATURES},
     }
@@ -278,7 +283,7 @@ async def upload(file: UploadFile = File(...)):
               "n_unresolved": sum(1 for c in columns if c["role"] == UNRESOLVED)}
         session["ai"] = ai
         log_event(session_id, "ai_proposal", {**ai, "proposals": columns, "calls": result["calls"]})
-        if result["status"] == "partial":
+        if result["error"] and result["status"] != "unavailable":
             warnings.append(result["error"])
 
     session.update(method=method, proposal=columns)

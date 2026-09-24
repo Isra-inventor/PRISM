@@ -182,3 +182,45 @@ def test_gemini_truncated_answer_is_unresolved(monkeypatch):
     monkeypatch.setattr(llm_fallback, "call_gemini", lambda *a: ('{"columns": [', "MAX_TOKENS"))
     r = llm_fallback.propose_roles(["a"], [["S1"]], 1)
     assert r["columns"][0]["role"] == "unresolved"
+
+
+def test_overloaded_model_falls_back_to_next(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    monkeypatch.setenv("PRISM_LLM_MODEL", "busy-model,ok-model")
+    answer = {"columns": [{"column": "a", "proposed_role": "sample_id", "confidence": 0.9, "evidence": "ids"}]}
+
+    def fake(model, key, system, prompt):
+        if model == "busy-model":
+            raise llm_fallback.GeminiError("Gemini API error (HTTP 503): high demand", 503)
+        return json.dumps(answer), "STOP"
+
+    monkeypatch.setattr(llm_fallback, "call_gemini_with_retry", fake)
+    r = llm_fallback.propose_roles(["a"], [["S1"]], 1)
+    assert r["status"] == "ok" and r["model"] == "ok-model"
+    assert r["columns"][0]["role"] == "sample_id"
+
+
+def test_bad_key_error_message_reaches_user(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "bad")
+    monkeypatch.setenv("PRISM_LLM_MODEL", "m1")
+
+    def fake(model, key, system, prompt):
+        raise llm_fallback.GeminiError("Gemini API error (HTTP 400, model m1): API key not valid.", 400)
+
+    monkeypatch.setattr(llm_fallback, "call_gemini_with_retry", fake)
+    r = llm_fallback.propose_roles(["a"], [["S1"]], 1)
+    assert r["status"] == "failed" and "API key not valid" in r["error"]
+    assert "API key not valid" in r["columns"][0]["evidence"]
+
+
+def test_retry_wrapper_raises_gemini_error(monkeypatch):
+    import io
+    import urllib.error
+
+    def boom(*a):
+        raise urllib.error.HTTPError("u", 400, "bad", {}, io.BytesIO(b'{"error": {"message": "API key not valid."}}'))
+
+    monkeypatch.setattr(llm_fallback, "call_gemini", boom)
+    with pytest.raises(llm_fallback.GeminiError) as ei:
+        llm_fallback.call_gemini_with_retry("m", "k", "s", "p")
+    assert ei.value.code == 400 and "API key not valid" in str(ei.value)
