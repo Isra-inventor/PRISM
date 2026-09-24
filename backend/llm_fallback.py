@@ -24,12 +24,19 @@ from .models import ROLES, UNRESOLVED, AIProposalBatch
 # Tried in order: if a model is overloaded (503), rate-limited (429) or retired
 # (404) PRISM moves on to the next one. Override with PRISM_LLM_MODEL, e.g.
 # PRISM_LLM_MODEL=gemini-3.6-flash or a comma-separated list.
-DEFAULT_MODELS = "gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash"
+DEFAULT_MODELS = ",".join([
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-flash-lite-latest",
+])
 DEFAULT_MODEL = DEFAULT_MODELS.split(",")[0]
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 REQUEST_TIMEOUT_S = 120
 RETRY_STATUS = {429, 500, 502, 503, 504}   # transient: rate limit / overload
-RETRY_DELAYS_S = (2, 5)          # per model, before moving to the next one
+RETRY_DELAYS_S = (2,)            # one quick retry per model, then the next model
 NEXT_MODEL_STATUS = {404, 429, 500, 502, 503, 504}
 
 log = logging.getLogger("prism.ai")

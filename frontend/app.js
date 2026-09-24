@@ -80,7 +80,7 @@
       input.value = "";
       return;
     }
-    $("loading-text").textContent = `Reading ${file.name} and checking known format signatures… (the AI fallback runs only if none match)`;
+    $("loading-text").textContent = `Reading ${file.name} and checking known format signatures… (the AI fallback runs only if none match and can take up to a minute)`;
     show("upload-loading");
     dz.style.pointerEvents = "none";
     try {

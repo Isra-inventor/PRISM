@@ -52,9 +52,13 @@ Never paste the key into the code. It stays on the server and is never sent to t
 | Variable | Default | Purpose |
 |---|---|---|
 | `GEMINI_API_KEY` | – | Turns on AI-assisted column proposals (`GOOGLE_API_KEY` also works) |
-| `PRISM_LLM_MODEL` | `gemini-3.8-flash,gemini-3.6-flash,gemini-3.5-flash` | Gemini models, tried in order. If one is overloaded (503), rate-limited (429) or retired (404), PRISM retries and then moves to the next |
+| `PRISM_LLM_MODEL` | see `DEFAULT_MODELS` in `backend/llm_fallback.py` | Gemini models, tried in order. If one is overloaded (503), rate-limited (429) or retired (404), PRISM retries and then moves to the next |
 | `PRISM_LOG_DIR` | `backend/logs` | Where session logs are written |
 | `PRISM_MAX_UPLOAD_MB` | `250` | Upload size limit |
+
+**Check that the AI works:** run `python -m backend.check_ai` in the project folder. It sends one tiny
+request to each model and prints what comes back (OK, overloaded, bad key, network or SSL problem).
+Gemini models are often briefly overloaded ("high demand", HTTP 503), which is why PRISM tries several.
 
 If the AI fails, the reason (for example "API key not valid" or "high demand") appears on the
 page and in the terminal where the server runs.
