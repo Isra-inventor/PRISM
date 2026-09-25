@@ -64,9 +64,10 @@ _load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s - %(message)s")
 
 app = FastAPI(title="PRISM Step 0 - Data Input & Recognition")
-logging.getLogger("prism").info(
-    "AI fallback: %s", "Gemini, models tried in order: " + ", ".join(llm_fallback.model_list())
-    if llm_fallback.api_key() else "off (GEMINI_API_KEY not set; put it in .env)")
+llm_fallback.say(
+    ("Gemini key found (" + llm_fallback.api_key()[:4] + "..., "
+     + str(len(llm_fallback.api_key())) + " chars); models tried in order: " + ", ".join(llm_fallback.model_list()))
+    if llm_fallback.api_key() else "AI fallback OFF: GEMINI_API_KEY not set (put it in .env next to README.md)")
 
 # In-memory session store (a restart clears it; the logs on disk persist).
 SESSIONS: "OrderedDict[str, dict]" = OrderedDict()

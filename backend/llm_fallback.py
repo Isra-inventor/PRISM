@@ -13,7 +13,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time
+import traceback
 import urllib.error
 import urllib.request
 from collections import defaultdict, deque
@@ -40,6 +42,12 @@ RETRY_DELAYS_S = (2,)            # one quick retry per model, then the next mode
 NEXT_MODEL_STATUS = {404, 429, 500, 502, 503, 504}
 
 log = logging.getLogger("prism.ai")
+
+
+def say(msg):
+    """Print an AI-fallback status line to the server terminal (always shown,
+    independent of any logging configuration)."""
+    print(f"[PRISM AI] {msg}", file=sys.stderr, flush=True)
 SAMPLE_ROWS = 15
 MAX_CELL_CHARS = 40
 COLUMNS_PER_CALL = 120
@@ -134,7 +142,7 @@ def call_with_fallback(models, key, system, prompt):
             last = e
             if e.code not in NEXT_MODEL_STATUS or model == models[-1]:
                 raise
-            log.warning("%s -- switching to next model", e)
+            say(f"{e} -> switching to next model")
     raise last
 
 
@@ -142,20 +150,23 @@ def call_gemini_with_retry(model, key, system, prompt):
     """call_gemini, retrying transient errors (429/5xx, network) with backoff.
     Raises RuntimeError with a readable message once retries are exhausted."""
     for attempt in range(len(RETRY_DELAYS_S) + 1):
+        say(f"calling {model} ...")
         try:
-            return call_gemini(model, key, system, prompt)
+            result = call_gemini(model, key, system, prompt)
+            say(f"{model} answered (finish_reason={result[1]})")
+            return result
         except urllib.error.HTTPError as e:
             code = e.code
             msg = f"Gemini API error (HTTP {code}, model {model}): {_api_message(e)}"
             retryable = code in RETRY_STATUS
         except (urllib.error.URLError, OSError) as e:
             code = None
-            msg = f"Could not reach the Gemini API: {getattr(e, 'reason', e)}"
+            msg = f"Could not reach the Gemini API ({type(e).__name__}): {getattr(e, 'reason', e)}"
             retryable = True
         if not retryable or attempt == len(RETRY_DELAYS_S):
             raise GeminiError(msg, code)
         delay = RETRY_DELAYS_S[attempt]
-        log.warning("%s -- retrying in %ss (attempt %s)", msg, delay, attempt + 2)
+        say(f"{msg} -> retrying in {delay}s")
         time.sleep(delay)
 
 
@@ -265,6 +276,8 @@ def propose_roles(header: list[str], rows: list[list[str]], n_rows_total: int) -
     key = api_key()
     if not key:
         why = "AI fallback unavailable (GEMINI_API_KEY is not set). Assign this role manually."
+        say("FAILED: GEMINI_API_KEY is not set. Put GEMINI_API_KEY=... in the .env file next to README.md "
+            "and restart the server.")
         return {"status": "unavailable", "model": None, "error": why, "calls": [],
                 "columns": [_unresolved(i, header[i], why) for i in all_indices]}
 
@@ -274,11 +287,14 @@ def propose_roles(header: list[str], rows: list[list[str]], n_rows_total: int) -
         chunk = all_indices[start:start + COLUMNS_PER_CALL]
         prompt = build_prompt(header, rows, chunk, n_rows_total)
         call_log = {"columns": [header[i] for i in chunk], "prompt": prompt}
+        say(f"asking Gemini about {len(chunk)} column(s); models to try: {', '.join(models)}")
         try:
             raw, finish, model_used = call_with_fallback(models, key, SYSTEM_PROMPT, prompt)
-        except (RuntimeError, ValueError) as e:
-            msg = str(e)
-            log.error("AI fallback failed: %s", msg)
+        except Exception as e:  # anything at all: report it, never crash the upload
+            msg = str(e) if isinstance(e, GeminiError) else f"Unexpected error: {type(e).__name__}: {e}"
+            say(f"FAILED: {msg}")
+            if not isinstance(e, GeminiError):
+                traceback.print_exc()
             call_log["error"] = msg
             calls.append(call_log)
             columns += [_unresolved(i, header[i], f"{msg} -- assign this role manually.") for i in chunk]
@@ -299,10 +315,11 @@ def propose_roles(header: list[str], rows: list[list[str]], n_rows_total: int) -
                 parsed = None
         if parsed is None:
             why = f"AI response unusable (finish_reason={finish}). Assign this role manually."
-            log.error("AI fallback: unusable response (finish_reason=%s): %s", finish, raw[:300])
+            say(f"FAILED: unusable response (finish_reason={finish}). Raw text: {raw[:500]!r}")
             columns += [_unresolved(i, header[i], why) for i in chunk]
             continue
         columns += _reconcile(header, chunk, parsed)
+        say(f"OK: {len(parsed.columns)} proposal(s) from {model_used}")
 
     failed = sum(1 for c in calls if "error" in c)
     status = "ok" if failed == 0 else ("failed" if failed == len(calls) else "partial")
