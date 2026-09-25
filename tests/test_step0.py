@@ -224,3 +224,22 @@ def test_retry_wrapper_raises_gemini_error(monkeypatch):
     with pytest.raises(llm_fallback.GeminiError) as ei:
         llm_fallback.call_gemini_with_retry("m", "k", "s", "p")
     assert ei.value.code == 400 and "API key not valid" in str(ei.value)
+
+
+def test_rate_limit_waits_as_google_asks(monkeypatch):
+    import io
+    import urllib.error
+    body = json.dumps({"error": {"message": "Quota exceeded", "details": [
+        {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "7s"}]}}).encode()
+    calls, slept = [], []
+
+    def fake(model, key, system, prompt):
+        calls.append(model)
+        if len(calls) == 1:
+            raise urllib.error.HTTPError("u", 429, "quota", {}, io.BytesIO(body))
+        return "{}", "STOP"
+
+    monkeypatch.setattr(llm_fallback, "call_gemini", fake)
+    monkeypatch.setattr(llm_fallback.time, "sleep", slept.append)
+    assert llm_fallback.call_gemini_with_retry("m", "k", "s", "p") == ("{}", "STOP")
+    assert calls == ["m", "m"] and slept == [8.0]

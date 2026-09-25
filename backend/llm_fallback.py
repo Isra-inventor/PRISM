@@ -14,11 +14,13 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import traceback
 import urllib.error
 import urllib.request
 from collections import defaultdict, deque
+from concurrent.futures import ThreadPoolExecutor
 
 from .format_detect import is_missing_token, looks_numeric
 from .models import ROLES, UNRESOLVED, AIProposalBatch
@@ -27,18 +29,19 @@ from .models import ROLES, UNRESOLVED, AIProposalBatch
 # (404) PRISM moves on to the next one. Override with PRISM_LLM_MODEL, e.g.
 # PRISM_LLM_MODEL=gemini-3.6-flash or a comma-separated list.
 DEFAULT_MODELS = ",".join([
-    "gemini-3.8-flash",
-    "gemini-3.5-flash",
-    "gemini-3-flash-preview",
-    "gemini-3.6-flash",
+    "gemini-flash-lite-latest",   # lite models: no thinking, answer in seconds
     "gemini-3.5-flash-lite",
-    "gemini-flash-lite-latest",
+    "gemini-3.5-flash",           # full flash models: often slow/overloaded
+    "gemini-3-flash-preview",
+    "gemini-3.8-flash",
 ])
 DEFAULT_MODEL = DEFAULT_MODELS.split(",")[0]
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-REQUEST_TIMEOUT_S = 120
+REQUEST_TIMEOUT_S = 60        # a slower model is abandoned for the next one
 RETRY_STATUS = {429, 500, 502, 503, 504}   # transient: rate limit / overload
 RETRY_DELAYS_S = (2,)            # one quick retry per model, then the next model
+MAX_RATE_LIMIT_WAITS = 3         # on 429, wait as long as Google asks (<= 35s), up to 3 times
+MAX_RATE_LIMIT_WAIT_S = 35
 NEXT_MODEL_STATUS = {404, 429, 500, 502, 503, 504}
 
 log = logging.getLogger("prism.ai")
@@ -50,7 +53,8 @@ def say(msg):
     print(f"[PRISM AI] {msg}", file=sys.stderr, flush=True)
 SAMPLE_ROWS = 15
 MAX_CELL_CHARS = 40
-COLUMNS_PER_CALL = 120
+COLUMNS_PER_CALL = 100       # fewer requests: free keys allow ~15/min per model
+PARALLEL_CALLS = 4          # wide tables: several column batches at once
 
 SYSTEM_PROMPT = f"""You label the columns of a quantified omics data table \
 (proteomics or metabolomics) that a scientist has uploaded. You do not \
@@ -79,7 +83,7 @@ a plausible-looking wrong role.
 
 For each column return: column (the exact column name as given), \
 proposed_role, confidence (0-1, your probability the role is correct), and \
-evidence (one short sentence citing the header text and/or the observed \
+evidence (at most 15 words citing the header text and/or the observed \
 values that support the role). Return exactly one entry per column, in the \
 order given."""
 
@@ -111,13 +115,25 @@ def api_key():
     return os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
 
-def _api_message(err):
-    """Pull Google's human-readable message out of an HTTPError body."""
+def _api_error(err):
+    """(message, retry_after_seconds_or_None) from a Gemini HTTPError body."""
     body = err.read().decode("utf-8", "replace")
     try:
-        return json.loads(body)["error"]["message"]
+        e = json.loads(body)["error"]
     except (ValueError, KeyError, TypeError):
-        return body[:300] or str(err)
+        return body[:300] or str(err), None
+    delay = None
+    for d in e.get("details") or []:
+        if str(d.get("@type", "")).endswith("RetryInfo"):
+            try:
+                delay = float(str(d.get("retryDelay", "")).rstrip("s"))
+            except ValueError:
+                pass
+    return e.get("message", body[:300]), delay
+
+
+def _api_message(err):
+    return _api_error(err)[0]
 
 
 class GeminiError(RuntimeError):
@@ -131,12 +147,35 @@ def model_list():
     return [m.strip() for m in raw.split(",") if m.strip()]
 
 
-def call_with_fallback(models, key, system, prompt):
+class ModelOrder:
+    """Shared, thread-safe model order: the last model that worked is tried
+    first by later batches, so a big table doesn't re-probe busy models."""
+
+    def __init__(self, models):
+        self._models = list(models)
+        self._lock = threading.Lock()
+
+    def current(self):
+        with self._lock:
+            return list(self._models)
+
+    def promote(self, model):
+        with self._lock:
+            if model in self._models:
+                self._models.remove(model)
+                self._models.insert(0, model)
+
+
+def call_with_fallback(models, key, system, prompt, order=None):
     """Try each model in turn. Returns (raw_text, finish_reason, model_used)."""
+    if order is not None:
+        models = order.current()
     last = None
     for model in models:
         try:
             raw, finish = call_gemini_with_retry(model, key, system, prompt)
+            if order is not None:
+                order.promote(model)
             return raw, finish, model
         except GeminiError as e:
             last = e
@@ -149,7 +188,9 @@ def call_with_fallback(models, key, system, prompt):
 def call_gemini_with_retry(model, key, system, prompt):
     """call_gemini, retrying transient errors (429/5xx, network) with backoff.
     Raises RuntimeError with a readable message once retries are exhausted."""
-    for attempt in range(len(RETRY_DELAYS_S) + 1):
+    rate_waits = 0
+    attempt = 0
+    while True:
         say(f"calling {model} ...")
         try:
             result = call_gemini(model, key, system, prompt)
@@ -157,15 +198,28 @@ def call_gemini_with_retry(model, key, system, prompt):
             return result
         except urllib.error.HTTPError as e:
             code = e.code
-            msg = f"Gemini API error (HTTP {code}, model {model}): {_api_message(e)}"
+            message, retry_after = _api_error(e)
+            msg = f"Gemini API error (HTTP {code}, model {model}): {message.splitlines()[0]}"
+            if code == 429 and retry_after is not None and rate_waits < MAX_RATE_LIMIT_WAITS \
+                    and retry_after <= MAX_RATE_LIMIT_WAIT_S:
+                rate_waits += 1
+                say(f"{model}: free-tier rate limit reached; Google asks to wait {retry_after:.0f}s -> waiting")
+                time.sleep(retry_after + 1)
+                continue
             retryable = code in RETRY_STATUS
         except (urllib.error.URLError, OSError) as e:
+            reason = getattr(e, "reason", e)
+            if isinstance(e, TimeoutError) or "timed out" in str(reason):
+                code = 504  # too slow right now: move straight on to the next model
+                msg = f"Gemini model {model} did not answer within {REQUEST_TIMEOUT_S}s"
+                raise GeminiError(msg, code)
             code = None
-            msg = f"Could not reach the Gemini API ({type(e).__name__}): {getattr(e, 'reason', e)}"
+            msg = f"Could not reach the Gemini API ({type(e).__name__}): {reason}"
             retryable = True
-        if not retryable or attempt == len(RETRY_DELAYS_S):
+        if not retryable or attempt >= len(RETRY_DELAYS_S):
             raise GeminiError(msg, code)
         delay = RETRY_DELAYS_S[attempt]
+        attempt += 1
         say(f"{msg} -> retrying in {delay}s")
         time.sleep(delay)
 
@@ -180,6 +234,7 @@ def call_gemini(model, key, system, prompt):
             "responseMimeType": "application/json",
             "responseSchema": RESPONSE_SCHEMA,
             "temperature": 0,
+            "maxOutputTokens": 32768,   # a full batch of proposals must fit
         },
     }
     req = urllib.request.Request(
@@ -281,32 +336,27 @@ def propose_roles(header: list[str], rows: list[list[str]], n_rows_total: int) -
         return {"status": "unavailable", "model": None, "error": why, "calls": [],
                 "columns": [_unresolved(i, header[i], why) for i in all_indices]}
 
-    columns = []
-    calls = []
-    for start in range(0, len(all_indices), COLUMNS_PER_CALL):
-        chunk = all_indices[start:start + COLUMNS_PER_CALL]
+    order = ModelOrder(models)
+    chunks = [all_indices[i:i + COLUMNS_PER_CALL] for i in range(0, len(all_indices), COLUMNS_PER_CALL)]
+    say(f"asking Gemini about {len(all_indices)} column(s) in {len(chunks)} batch(es); "
+        f"models to try: {', '.join(models)}")
+
+    def run_chunk(n, chunk):
+        """Returns (call_log, column proposals) for one batch of columns."""
+        tag = f"batch {n}/{len(chunks)}"
         prompt = build_prompt(header, rows, chunk, n_rows_total)
         call_log = {"columns": [header[i] for i in chunk], "prompt": prompt}
-        say(f"asking Gemini about {len(chunk)} column(s); models to try: {', '.join(models)}")
         try:
-            raw, finish, model_used = call_with_fallback(models, key, SYSTEM_PROMPT, prompt)
+            raw, finish, model_used = call_with_fallback(models, key, SYSTEM_PROMPT, prompt, order)
         except Exception as e:  # anything at all: report it, never crash the upload
             msg = str(e) if isinstance(e, GeminiError) else f"Unexpected error: {type(e).__name__}: {e}"
-            say(f"FAILED: {msg}")
+            say(f"{tag} FAILED: {msg}")
             if not isinstance(e, GeminiError):
                 traceback.print_exc()
             call_log["error"] = msg
-            calls.append(call_log)
-            columns += [_unresolved(i, header[i], f"{msg} -- assign this role manually.") for i in chunk]
-            continue
+            return call_log, [_unresolved(i, header[i], f"{msg} -- assign this role manually.") for i in chunk]
 
-        call_log["model"] = model_used
-        if model_used not in used:
-            used.append(model_used)
-        call_log["finish_reason"] = finish
-        call_log["raw_output"] = raw
-        calls.append(call_log)
-
+        call_log.update(model=model_used, finish_reason=finish, raw_output=raw)
         parsed = None
         if finish == "STOP":
             try:
@@ -314,12 +364,24 @@ def propose_roles(header: list[str], rows: list[list[str]], n_rows_total: int) -
             except ValueError:
                 parsed = None
         if parsed is None:
+            say(f"{tag} FAILED: unusable response from {model_used} (finish_reason={finish}). "
+                f"Raw text: {raw[:300]!r}")
+            call_log["error"] = f"unusable response (finish_reason={finish})"
             why = f"AI response unusable (finish_reason={finish}). Assign this role manually."
-            say(f"FAILED: unusable response (finish_reason={finish}). Raw text: {raw[:500]!r}")
-            columns += [_unresolved(i, header[i], why) for i in chunk]
-            continue
-        columns += _reconcile(header, chunk, parsed)
-        say(f"OK: {len(parsed.columns)} proposal(s) from {model_used}")
+            return call_log, [_unresolved(i, header[i], why) for i in chunk]
+        say(f"{tag} OK: {len(parsed.columns)} proposal(s) from {model_used}")
+        return call_log, _reconcile(header, chunk, parsed)
+
+    with ThreadPoolExecutor(max_workers=PARALLEL_CALLS) as pool:
+        results = list(pool.map(lambda nc: run_chunk(*nc), enumerate(chunks, 1)))
+
+    calls, columns, used = [], [], []
+    for call_log, cols in results:
+        calls.append(call_log)
+        columns += cols
+        m = call_log.get("model")
+        if m and m not in used:
+            used.append(m)
 
     failed = sum(1 for c in calls if "error" in c)
     status = "ok" if failed == 0 else ("failed" if failed == len(calls) else "partial")
