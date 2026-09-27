@@ -110,7 +110,7 @@ def test_no_api_key_means_manual(client, monkeypatch):
 
 
 def test_ai_flow_and_confirmation_log(client, monkeypatch, tmp_logs):
-    def fake(header, rows, n):
+    def fake(header, rows, n, on_progress=None):
         roles = {"sample_code": "sample_id", "patient_code": "subject_id", "visit": "timepoint",
                  "plate": "batch", "diagnosis": "group_or_outcome", "injection_order": "ignore",
                  "age": "group_or_outcome", "operator_note": "unresolved"}
@@ -256,3 +256,24 @@ def test_dotenv_windows_variants(tmp_path, monkeypatch, filename, data):
     (tmp_path / filename).write_bytes(data)
     main._load_dotenv(tmp_path / ".env")
     assert __import__("os").environ["GEMINI_API_KEY"] == "k123"
+
+
+def test_progress_is_reported_during_ai(client, monkeypatch):
+    seen = []
+
+    def fake(header, rows, n, on_progress=None):
+        for done in range(3):
+            on_progress(done, 2, f"batch {done}")
+            seen.append(dict(main.PROGRESS["p1"]))
+        return {"status": "ok", "model": "fake", "error": None, "calls": [],
+                "columns": [{"index": i, "column": h, "role": "feature_value", "confidence": 0.9,
+                             "evidence": "x"} for i, h in enumerate(header)]}
+
+    monkeypatch.setattr(llm_fallback, "propose_roles", fake)
+    r = client.post("/api/upload", data={"progress_id": "p1"},
+                    files={"file": ("x.csv", (EXAMPLES / "cohort_metabolites_wide.csv").read_bytes())})
+    assert r.status_code == 200
+    assert [s["percent"] for s in seen] == [10, 54, 99]
+    assert seen[1]["batches_done"] == 1 and seen[1]["batches_total"] == 2
+    p = client.get("/api/progress/p1").json()
+    assert p["stage"] == "done" and p["percent"] == 100 and p["log"]

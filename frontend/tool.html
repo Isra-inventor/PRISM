@@ -52,7 +52,19 @@
             </span>
           </label>
           <input type="file" id="file-input" accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values" hidden>
-          <div class="loading hidden" id="upload-loading"><span class="spinner"></span><span id="loading-text">Reading file…</span></div>
+          <div class="progress-panel hidden" id="upload-loading" role="status" aria-live="polite">
+            <div class="progress-top">
+              <span class="progress-stage"><span class="spinner"></span><span id="loading-text">Uploading…</span></span>
+              <span class="progress-pct" id="progress-pct">0%</span>
+            </div>
+            <div class="progress-track" aria-hidden="true"><i id="progress-bar"></i></div>
+            <div class="progress-meta">
+              <span id="progress-detail"></span>
+              <span><span id="progress-elapsed">0s elapsed</span> · <span id="progress-idle">active</span></span>
+            </div>
+            <div class="progress-stall hidden" id="progress-stall"></div>
+            <ol class="progress-log" id="progress-log"></ol>
+          </div>
           <div class="alert alert-error hidden" id="upload-error" role="alert"></div>
         </div>
       </section>

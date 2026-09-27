@@ -18,11 +18,14 @@ import csv
 import logging
 import io
 import os
+import threading
+import time
 import uuid
 from collections import Counter, OrderedDict
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from starlette.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -276,16 +279,83 @@ def health():
     }
 
 
+# ---------------------------------------------------------------- progress
+# Live status of each upload, polled by the page via GET /api/progress/{id}.
+PROGRESS: "OrderedDict[str, dict]" = OrderedDict()
+_PROGRESS_LOCK = threading.Lock()
+MAX_PROGRESS = 50
+AI_START_PCT, AI_END_PCT = 10, 99
+
+
+def set_progress(progress_id, **fields):
+    if not progress_id:
+        return
+    now = time.time()
+    with _PROGRESS_LOCK:
+        p = PROGRESS.get(progress_id)
+        if p is None:
+            p = PROGRESS[progress_id] = {"stage": "starting", "percent": 0, "message": "",
+                                         "batches_done": 0, "batches_total": 0, "log": [],
+                                         "started": now}
+            while len(PROGRESS) > MAX_PROGRESS:
+                PROGRESS.popitem(last=False)
+        p.update(fields)
+        p["updated"] = now
+        if fields.get("message"):
+            p["log"] = (p["log"] + [{"t": round(now - p["started"], 1), "msg": fields["message"]}])[-8:]
+
+
+def _ai_progress(progress_id):
+    def on_progress(done, total, message):
+        pct = AI_START_PCT + (AI_END_PCT - AI_START_PCT) * done / total if total else AI_START_PCT
+        set_progress(progress_id, stage="ai", percent=int(pct), batches_done=done,
+                     batches_total=total, message=message)
+    return on_progress
+
+
+@app.get("/api/progress/{progress_id}")
+def get_progress(progress_id: str):
+    with _PROGRESS_LOCK:
+        p = PROGRESS.get(progress_id)
+        if p is None:
+            raise HTTPException(404, "Unknown progress id.")
+        out = dict(p, log=list(p["log"]))
+    out["server_time"] = time.time()
+    out["elapsed_s"] = round(out["server_time"] - out["started"], 1)
+    out["idle_s"] = round(out["server_time"] - out["updated"], 1)
+    return out
+
+
 @app.post("/api/upload", response_model=UploadResponse)
-async def upload(file: UploadFile = File(...)):
+async def upload(file: UploadFile = File(...), progress_id: str = Form(None)):
+    set_progress(progress_id, stage="reading", percent=2, message="File received by the server")
     raw = await file.read(MAX_BYTES + 1)
+    filename = file.filename or "upload"
+    # The work (and especially the AI calls) runs in a worker thread so the
+    # server keeps answering progress requests meanwhile.
+    try:
+        result = await run_in_threadpool(process_upload, filename, raw, progress_id)
+    except HTTPException as e:
+        set_progress(progress_id, stage="error", message=str(e.detail))
+        raise
+    except Exception as e:
+        set_progress(progress_id, stage="error", message=f"{type(e).__name__}: {e}")
+        raise
+    set_progress(progress_id, stage="done", percent=100, message="Done")
+    return result
+
+
+def process_upload(filename, raw, progress_id=None):
     if len(raw) > MAX_BYTES:
         raise HTTPException(413, f"File is larger than {MAX_BYTES // (1024 * 1024)} MB.")
-    filename = file.filename or "upload"
+    set_progress(progress_id, stage="reading", percent=4, message="Parsing the table")
     try:
         table = parse_table(filename, raw)
     except InputError as e:
         raise HTTPException(415, str(e))
+    set_progress(progress_id, stage="detecting", percent=8,
+                 message=f"Parsed {len(table['rows'])} rows x {len(table['header'])} columns; "
+                         "checking known format signatures")
 
     session_id = uuid.uuid4().hex[:12]
     header, rows = table["header"], table["rows"]
@@ -317,7 +387,9 @@ async def upload(file: UploadFile = File(...)):
     else:
         # 2) AI fallback, proposals only.
         log_event(session_id, "signature_match", {"signature": None, "checked": list(format_detect.SIGNATURES)})
-        result = llm_fallback.propose_roles(header, rows, len(rows))
+        set_progress(progress_id, stage="ai", percent=AI_START_PCT,
+                     message="No known signature matched; asking the AI for column roles")
+        result = llm_fallback.propose_roles(header, rows, len(rows), on_progress=_ai_progress(progress_id))
         columns = result["columns"]
         method = "ai" if result["status"] in ("ok", "partial") else "manual"
         ai = {"status": result["status"], "model": result["model"], "error": result["error"],

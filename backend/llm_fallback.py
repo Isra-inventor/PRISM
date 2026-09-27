@@ -47,10 +47,17 @@ NEXT_MODEL_STATUS = {404, 429, 500, 502, 503, 504}
 log = logging.getLogger("prism.ai")
 
 
+_ctx = threading.local()   # per-thread progress reporter (set while a batch runs)
+
+
 def say(msg):
     """Print an AI-fallback status line to the server terminal (always shown,
-    independent of any logging configuration)."""
+    independent of any logging configuration) and forward it to the progress
+    reporter of the batch running on this thread, if any."""
     print(f"[PRISM AI] {msg}", file=sys.stderr, flush=True)
+    report = getattr(_ctx, "report", None)
+    if report is not None:
+        report(msg)
 SAMPLE_ROWS = 15
 MAX_CELL_CHARS = 40
 COLUMNS_PER_CALL = 100       # fewer requests: free keys allow ~15/min per model
@@ -318,8 +325,11 @@ def _reconcile(header: list[str], indices: list[int], batch: AIProposalBatch) ->
     return out
 
 
-def propose_roles(header: list[str], rows: list[list[str]], n_rows_total: int) -> dict:
+def propose_roles(header: list[str], rows: list[list[str]], n_rows_total: int, on_progress=None) -> dict:
     """Ask the LLM for column-role proposals.
+
+    on_progress(done_batches, total_batches, message) is called when the job
+    starts, for every status line of every batch, and when a batch finishes.
 
     Returns {"status", "model", "columns", "calls", "error"}. On any failure
     every column comes back unresolved so the user assigns roles manually.
@@ -340,10 +350,36 @@ def propose_roles(header: list[str], rows: list[list[str]], n_rows_total: int) -
     chunks = [all_indices[i:i + COLUMNS_PER_CALL] for i in range(0, len(all_indices), COLUMNS_PER_CALL)]
     say(f"asking Gemini about {len(all_indices)} column(s) in {len(chunks)} batch(es); "
         f"models to try: {', '.join(models)}")
+    progress_lock = threading.Lock()
+    done = [0]
+
+    def notify(message, finished_batch=False):
+        if on_progress is None:
+            return
+        with progress_lock:
+            if finished_batch:
+                done[0] += 1
+            n_done = done[0]
+        try:
+            on_progress(n_done, len(chunks), message)
+        except Exception:  # progress reporting must never break the AI step
+            traceback.print_exc()
+
+    notify(f"Sending {len(all_indices)} columns to Gemini in {len(chunks)} batch(es)")
 
     def run_chunk(n, chunk):
-        """Returns (call_log, column proposals) for one batch of columns."""
         tag = f"batch {n}/{len(chunks)}"
+        _ctx.report = lambda m: notify(m if m.startswith(tag) else f"{tag}: {m}")
+        try:
+            call_log, cols = _run_chunk(n, chunk, tag)
+        finally:
+            _ctx.report = None
+        failed = "error" in call_log
+        notify(f"{tag} {'failed' if failed else 'done'}", finished_batch=True)
+        return call_log, cols
+
+    def _run_chunk(n, chunk, tag):
+        """Returns (call_log, column proposals) for one batch of columns."""
         prompt = build_prompt(header, rows, chunk, n_rows_total)
         call_log = {"columns": [header[i] for i in chunk], "prompt": prompt}
         try:

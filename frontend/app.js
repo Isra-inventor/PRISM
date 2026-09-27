@@ -80,23 +80,123 @@
       input.value = "";
       return;
     }
-    $("loading-text").textContent = `Reading ${file.name} and checking known format signatures… (the AI fallback runs only if none match and can take up to a minute)`;
-    show("upload-loading");
     dz.style.pointerEvents = "none";
+    const progress = startProgress(file);
     try {
       const fd = new FormData();
       fd.append("file", file);
-      const res = await fetch(`${API}/api/upload`, { method: "POST", body: fd });
-      const body = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(body.detail || `Upload failed (HTTP ${res.status}).`);
+      fd.append("progress_id", progress.id);
+      const { status, body } = await postWithUploadProgress(`${API}/api/upload`, fd, progress.onUpload);
+      if (status < 200 || status >= 300) throw new Error(body.detail || `Upload failed (HTTP ${status}).`);
       onUploaded(body);
     } catch (err) {
       uploadError(err.message || String(err));
     } finally {
+      progress.stop();
       show("upload-loading", false);
       dz.style.pointerEvents = "";
       input.value = "";
     }
+  }
+
+  // ------------------------------------------------------------ progress
+  // Upload bytes are tracked by the browser; everything after that (parsing,
+  // detection, AI batches) is polled from GET /api/progress/{id} every second.
+  const STALL_WARN_S = 60;
+
+  function postWithUploadProgress(url, formData, onUpload) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", url);
+      xhr.upload.onprogress = (e) => { if (e.lengthComputable) onUpload(e.loaded / e.total); };
+      xhr.upload.onload = () => onUpload(1);
+      xhr.onload = () => {
+        let body = {};
+        try { body = JSON.parse(xhr.responseText); } catch (_) { /* non-JSON error */ }
+        resolve({ status: xhr.status, body });
+      };
+      xhr.onerror = () => reject(new Error("Network error: the server could not be reached. Is it still running?"));
+      xhr.send(formData);
+    });
+  }
+
+  function startProgress(file) {
+    const id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+      : `p${Date.now()}${Math.random().toString(16).slice(2)}`;
+    const started = Date.now();
+    let lastChange = Date.now(), lastKey = "", serverState = null, uploadFrac = 0, stopped = false;
+    const panel = $("upload-loading");
+    panel.classList.remove("stalled");
+    show("upload-loading");
+    $("progress-log").replaceChildren();
+    show("progress-stall", false);
+    panel.scrollIntoView({ behavior: "smooth", block: "center" });
+
+    const fmtS = (s) => (s < 60 ? `${Math.round(s)}s` : `${Math.floor(s / 60)}m ${String(Math.round(s % 60)).padStart(2, "0")}s`);
+
+    function render() {
+      const elapsed = (Date.now() - started) / 1000;
+      const idle = (Date.now() - lastChange) / 1000;
+      let pct, label, detail = "";
+      if (!serverState || uploadFrac < 1) {
+        pct = Math.round(uploadFrac * 2);  // sending the file = first 2%
+        label = `Uploading ${file.name} (${Math.round(uploadFrac * 100)}%)`;
+        detail = `${(file.size / 1048576).toFixed(1)} MB`;
+      } else {
+        pct = serverState.percent;
+        label = { reading: "Reading the file", detecting: "Checking known format signatures",
+                  ai: "AI is proposing column roles", done: "Done", error: "Stopped with an error" }[serverState.stage] || serverState.stage;
+        if (serverState.batches_total) {
+          detail = `${serverState.batches_done} of ${serverState.batches_total} batch${serverState.batches_total > 1 ? "es" : ""} of columns done`;
+        }
+      }
+      $("loading-text").textContent = label;
+      $("progress-pct").textContent = `${pct}%`;
+      $("progress-bar").style.width = `${pct}%`;
+      $("progress-detail").textContent = detail;
+      $("progress-elapsed").textContent = `${fmtS(elapsed)} elapsed`;
+      const idleEl = $("progress-idle");
+      idleEl.textContent = idle < 3 ? "active" : `last update ${fmtS(idle)} ago`;
+      const stalled = idle >= STALL_WARN_S;
+      idleEl.classList.toggle("warn", stalled);
+      panel.classList.toggle("stalled", stalled);
+      if (stalled) {
+        $("progress-stall").textContent = uploadFrac < 1
+          ? "The upload itself is not advancing. Check your connection and that the server is still running."
+          : `No progress for ${fmtS(idle)}. This is the tool or the AI service, not your data: `
+            + "look at the [PRISM AI] lines in the server terminal to see what it is waiting for.";
+      }
+      show("progress-stall", stalled);
+    }
+
+    function setLog(entries) {
+      $("progress-log").replaceChildren(...entries.map((e) =>
+        el("li", { title: e.msg }, el("b", { text: `${fmtS(e.t)}` }), e.msg)));
+      const ol = $("progress-log"); ol.scrollTop = ol.scrollHeight;
+    }
+
+    async function poll() {
+      if (stopped) return;
+      try {
+        const r = await fetch(`${API}/api/progress/${id}`, { cache: "no-store" });
+        if (r.ok) {
+          const p = await r.json();
+          const key = `${p.stage}|${p.percent}|${p.batches_done}|${p.log.length ? p.log[p.log.length - 1].t : ""}`;
+          if (key !== lastKey) { lastKey = key; lastChange = Date.now(); setLog(p.log); }
+          serverState = p;
+        }
+      } catch (_) { /* server busy or restarting: keep polling */ }
+      if (!stopped) setTimeout(poll, 1000);
+    }
+
+    const ticker = setInterval(render, 500);
+    render();
+    setTimeout(poll, 300);
+    return {
+      id,
+      onUpload(frac) { uploadFrac = frac; lastChange = Date.now(); render(); },
+      stop() { stopped = true; clearInterval(ticker); },
+    };
   }
 
   function reset() {

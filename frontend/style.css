@@ -217,6 +217,20 @@ button, select, input { font: inherit; color: inherit; }
 .alert-warn { border-color: #3a3a3a; background: #111; color: var(--text-dim); }
 .alert ul { margin: 6px 0 0; padding-left: 18px; }
 
+.progress-panel { margin-top: 18px; border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 16px 18px; background: #0b0b0b; }
+.progress-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.progress-stage { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.progress-pct { font-family: var(--font-mono); font-size: 22px; font-weight: 300; }
+.progress-track { height: 4px; background: #1c1c1c; border-radius: 2px; overflow: hidden; margin: 12px 0 10px; }
+.progress-track i { display: block; height: 100%; width: 0; background: #fff; transition: width .4s ease; }
+.progress-panel.stalled .progress-track i { background: var(--accent); }
+.progress-meta { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--text-dim); }
+.progress-meta #progress-idle.warn { color: var(--accent); }
+.progress-stall { margin-top: 12px; font-size: 12px; color: #ffd2ad; border-left: 2px solid var(--accent); padding-left: 10px; }
+.progress-log { list-style: none; margin: 12px 0 0; padding: 10px 0 0; border-top: 1px solid var(--line); font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); max-height: 150px; overflow: auto; }
+.progress-log li { padding: 2px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.progress-log li:last-child { color: var(--text-dim); }
+.progress-log b { font-weight: 400; color: var(--text-faint); display: inline-block; min-width: 52px; }
 .loading { display: flex; align-items: center; gap: 12px; color: var(--text-dim); font-size: 13px; padding: 16px 0 0; }
 .spinner { width: 14px; height: 14px; border: 1px solid #444; border-top-color: #fff; border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
