@@ -243,3 +243,16 @@ def test_rate_limit_waits_as_google_asks(monkeypatch):
     monkeypatch.setattr(llm_fallback.time, "sleep", slept.append)
     assert llm_fallback.call_gemini_with_retry("m", "k", "s", "p") == ("{}", "STOP")
     assert calls == ["m", "m"] and slept == [8.0]
+
+
+@pytest.mark.parametrize("filename,data", [
+    (".env", "﻿GEMINI_API_KEY=k123\r\n".encode("utf-8")),        # Notepad UTF-8 with BOM
+    (".env", "GEMINI_API_KEY=k123\r\n".encode("utf-16")),             # PowerShell '>' redirection
+    (".env", b'$env:GEMINI_API_KEY="k123"\n'),                         # pasted PowerShell line
+    (".env.txt", b"GEMINI_API_KEY = 'k123'\n"),                         # hidden .txt extension
+])
+def test_dotenv_windows_variants(tmp_path, monkeypatch, filename, data):
+    monkeypatch.setenv("GEMINI_API_KEY", "")  # an empty preset must not win
+    (tmp_path / filename).write_bytes(data)
+    main._load_dotenv(tmp_path / ".env")
+    assert __import__("os").environ["GEMINI_API_KEY"] == "k123"

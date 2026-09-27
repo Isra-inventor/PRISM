@@ -44,30 +44,70 @@ WRONG_FORMAT_MESSAGE = (
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 
-def _load_dotenv(path=Path(__file__).resolve().parent.parent / ".env"):
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+KEY_NAMES = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
+DOTENV_REPORT = []  # what the .env loader saw; printed at startup if no key is found
+
+
+def _read_text_any_encoding(path):
+    """.env files made on Windows may be UTF-8 with a BOM (Notepad) or UTF-16
+    (PowerShell '>' redirection). Handle all of them."""
+    raw = path.read_bytes()
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return raw.decode("utf-16")
+    if len(raw) > 1 and raw[1:2] == b"\x00":           # UTF-16-LE without BOM
+        return raw.decode("utf-16-le")
+    try:
+        return raw.decode("utf-8-sig")                  # strips a UTF-8 BOM
+    except UnicodeDecodeError:
+        return raw.decode("latin-1")
+
+
+def _load_dotenv(path=PROJECT_DIR / ".env"):
     """Read KEY=VALUE lines from the project's .env (if any) into the environment.
-    Variables already set in the environment win. The .env file is git-ignored."""
+    A non-empty variable already set in the environment wins. .env is git-ignored."""
+    DOTENV_REPORT.append(f"looked for {path} -> {'found' if path.exists() else 'NOT FOUND'}")
     if not path.exists():
-        return
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
+        # Windows hides extensions, so Notepad's ".env.txt" looks like ".env": accept it.
+        alt = path.with_name(".env.txt")
+        if not alt.exists():
+            return
+        DOTENV_REPORT.append(f"using {alt.name} instead")
+        path = alt
+    names = []
+    for line in _read_text_any_encoding(path).splitlines():
+        line = line.strip().lstrip("\ufeff")
         if not line or line.startswith("#") or "=" not in line:
             continue
         k, v = line.split("=", 1)
         k = k.strip()
-        if k.startswith("export "):
+        if k.lower().startswith("export "):
             k = k[len("export "):].strip()
-        os.environ.setdefault(k, v.strip().strip('"').strip("'"))
+        if k.lower().startswith("$env:"):              # PowerShell-style line pasted into .env
+            k = k[len("$env:"):]
+        v = v.strip().strip('"').strip("'").strip()
+        names.append(f"{k}{'' if v else ' (EMPTY)'}")
+        if v and not os.environ.get(k):
+            os.environ[k] = v
+    DOTENV_REPORT.append("variables in .env: " + (", ".join(names) if names else "none (file is empty?)"))
+    if not any(k.upper() in KEY_NAMES for k in (n.split(" ")[0] for n in names)):
+        DOTENV_REPORT.append("no line starting with GEMINI_API_KEY= (check the spelling)")
 
 
 _load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s - %(message)s")
 
 app = FastAPI(title="PRISM Step 0 - Data Input & Recognition")
-llm_fallback.say(
-    ("Gemini key found (" + llm_fallback.api_key()[:4] + "..., "
-     + str(len(llm_fallback.api_key())) + " chars); models tried in order: " + ", ".join(llm_fallback.model_list()))
-    if llm_fallback.api_key() else "AI fallback OFF: GEMINI_API_KEY not set (put it in .env next to README.md)")
+if llm_fallback.api_key():
+    _k = llm_fallback.api_key()
+    llm_fallback.say(f"Gemini key found ({_k[:4]}..., {len(_k)} chars); models tried in order: "
+                     + ", ".join(llm_fallback.model_list()))
+else:
+    llm_fallback.say("AI fallback OFF: GEMINI_API_KEY not set. What PRISM checked:")
+    for _line in DOTENV_REPORT:
+        llm_fallback.say("  - " + _line)
+    llm_fallback.say("  Fix: create a file named exactly .env in " + str(PROJECT_DIR)
+                     + " containing one line: GEMINI_API_KEY=your-key   (then restart the server)")
 
 # In-memory session store (a restart clears it; the logs on disk persist).
 SESSIONS: "OrderedDict[str, dict]" = OrderedDict()
