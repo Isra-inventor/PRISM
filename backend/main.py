@@ -1,303 +1,73 @@
-"""PRISM Step 0 -- Data Input & Recognition API.
+"""PRISM Step 0 -- General schema recognition + guided confirmation (API).
 
 Run from the repository root:
-    uvicorn backend.main:app --reload
+    python -m uvicorn backend.main:app --reload
 then open http://127.0.0.1:8000
 
-Pipeline for one upload:
-  1. accept CSV/TSV only; parse every cell as an unmodified string
-  2. deterministic signature matching (format_detect.py)
-  3. only if nothing matched: AI proposal (llm_fallback.py)
-  4. user confirms / corrects every column role -> recognized-structure summary
-Every step is logged to backend/logs/<session_id>.jsonl.
+Flow: upload (parse + profile + group, deterministic) -> propose (signature
+pre-fill, AI labels the groups, every claim validated) -> the wizard confirms
+each step -> finalize (schema.json + canonical tables). Everything is logged to
+backend/logs/<session_id>.jsonl.
 """
 
 from __future__ import annotations
 
-import csv
+import json
 import logging
-import io
 import os
 import threading
 import time
-import uuid
-from collections import Counter, OrderedDict
-from pathlib import Path
+from collections import OrderedDict
+from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from starlette.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
-from . import format_detect, llm_fallback
-from .models import ROLES, UNRESOLVED, ConfirmRequest, StructureSummary, UploadResponse
-from .session_log import log_event, log_path, now_iso
-
-MAX_BYTES = int(os.environ.get("PRISM_MAX_UPLOAD_MB", "250")) * 1024 * 1024
-PREVIEW_ROWS = 15
-MAX_SESSIONS = 20
-ACCEPTED_EXTENSIONS = {".csv", ".tsv", ".txt"}
-WRONG_FORMAT_MESSAGE = (
-    "PRISM accepts quantified tables only, as CSV or TSV (tab-separated .tsv / .txt). "
-    "Raw spectra and vendor/binary files (.raw, .d, .wiff, .mzML, .mzXML, .xlsx, ...) are "
-    "not processed. Export a quantified protein/peptide/feature table from your analysis "
-    "software (e.g. MaxQuant, DIA-NN, Spectronaut, FragPipe, XCMS, MZmine) and upload that."
-)
-
-FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
-
-
-PROJECT_DIR = Path(__file__).resolve().parent.parent
-KEY_NAMES = ("GEMINI_API_KEY", "GOOGLE_API_KEY")
-DOTENV_REPORT = []  # what the .env loader saw; printed at startup if no key is found
-
-
-def _read_text_any_encoding(path):
-    """.env files made on Windows may be UTF-8 with a BOM (Notepad) or UTF-16
-    (PowerShell '>' redirection). Handle all of them."""
-    raw = path.read_bytes()
-    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
-        return raw.decode("utf-16")
-    if len(raw) > 1 and raw[1:2] == b"\x00":           # UTF-16-LE without BOM
-        return raw.decode("utf-16-le")
-    try:
-        return raw.decode("utf-8-sig")                  # strips a UTF-8 BOM
-    except UnicodeDecodeError:
-        return raw.decode("latin-1")
-
-
-def _load_dotenv(path=PROJECT_DIR / ".env"):
-    """Read KEY=VALUE lines from the project's .env (if any) into the environment.
-    A non-empty variable already set in the environment wins. .env is git-ignored."""
-    DOTENV_REPORT.append(f"looked for {path} -> {'found' if path.exists() else 'NOT FOUND'}")
-    if not path.exists():
-        # Windows hides extensions, so Notepad's ".env.txt" looks like ".env": accept it.
-        alt = path.with_name(".env.txt")
-        if not alt.exists():
-            return
-        DOTENV_REPORT.append(f"using {alt.name} instead")
-        path = alt
-    names = []
-    for line in _read_text_any_encoding(path).splitlines():
-        line = line.strip().lstrip("\ufeff")
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        k = k.strip()
-        if k.lower().startswith("export "):
-            k = k[len("export "):].strip()
-        if k.lower().startswith("$env:"):              # PowerShell-style line pasted into .env
-            k = k[len("$env:"):]
-        v = v.strip().strip('"').strip("'").strip()
-        names.append(f"{k}{'' if v else ' (EMPTY)'}")
-        if v and not os.environ.get(k):
-            os.environ[k] = v
-    DOTENV_REPORT.append("variables in .env: " + (", ".join(names) if names else "none (file is empty?)"))
-    if not any(k.upper() in KEY_NAMES for k in (n.split(" ")[0] for n in names)):
-        DOTENV_REPORT.append("no line starting with GEMINI_API_KEY= (check the spelling)")
-
+from .envfile import DOTENV_REPORT, PROJECT_DIR, _load_dotenv
 
 _load_dotenv()
+
+from . import llm_providers as llm  # noqa: E402  (after .env is loaded)
+from . import outputs, workflow  # noqa: E402
+from .parsing import InputError  # noqa: E402
+from .schema import vocabulary_payload  # noqa: E402
+from .session_log import log_path  # noqa: E402
+
+MAX_BYTES = int(os.environ.get("PRISM_MAX_UPLOAD_MB", "200")) * 1024 * 1024
+PREVIEW_ROWS = 10
+FRONTEND_DIR = PROJECT_DIR / "frontend"
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s - %(message)s")
+app = FastAPI(title="PRISM Step 0 - Schema recognition")
 
-app = FastAPI(title="PRISM Step 0 - Data Input & Recognition")
-if llm_fallback.api_key():
-    _k = llm_fallback.api_key()
-    llm_fallback.say(f"Gemini key found ({_k[:4]}..., {len(_k)} chars); models tried in order: "
-                     + ", ".join(llm_fallback.model_list()))
+_ok, _why = llm.available()
+if _ok:
+    llm.say(f"AI provider: {llm.provider_name()}; models tried in order: {', '.join(llm.model_list())}")
 else:
-    llm_fallback.say("AI fallback OFF: GEMINI_API_KEY not set. What PRISM checked:")
+    llm.say(f"AI fallback OFF: {_why} The wizard works in manual mode. What PRISM checked:")
     for _line in DOTENV_REPORT:
-        llm_fallback.say("  - " + _line)
-    llm_fallback.say("  Fix: create a file named exactly .env in " + str(PROJECT_DIR)
-                     + " containing one line: GEMINI_API_KEY=your-key   (then restart the server)")
-
-# In-memory session store (a restart clears it; the logs on disk persist).
-SESSIONS: "OrderedDict[str, dict]" = OrderedDict()
-
-
-class InputError(Exception):
-    pass
-
-
-# ---------------------------------------------------------------- parsing
-
-def _pick_csv_delimiter(sample_lines: list[str]) -> str:
-    """Choose between comma, semicolon and tab for a .csv file: the candidate
-    that appears the same non-zero number of times on the most lines wins."""
-    best, best_score = ",", -1
-    for d in (",", ";", "\t"):
-        counts = [len(next(csv.reader([line], delimiter=d))) - 1 for line in sample_lines if line.strip()]
-        if not counts or counts[0] == 0:
-            continue
-        score = sum(1 for c in counts if c == counts[0]) * 1000 + counts[0]
-        if score > best_score:
-            best, best_score = d, score
-    return best
-
-
-def parse_table(filename: str, raw: bytes) -> dict:
-    ext = Path(filename).suffix.lower()
-    if ext not in ACCEPTED_EXTENSIONS:
-        raise InputError(f"'{filename}' is not a CSV/TSV file. " + WRONG_FORMAT_MESSAGE)
-    if not raw.strip():
-        raise InputError("The file is empty.")
-    if b"\x00" in raw[:8192]:
-        raise InputError(f"'{filename}' looks like a binary file. " + WRONG_FORMAT_MESSAGE)
-
-    for encoding in ("utf-8-sig", "latin-1"):
-        try:
-            text = raw.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            continue
-
-    first_lines = text.splitlines()[:20]
-    if ext == ".csv":
-        delimiter = _pick_csv_delimiter(first_lines)
-    else:
-        delimiter = "\t"
-        if "\t" not in first_lines[0]:
-            raise InputError(
-                f"'{filename}' has no tab characters in its header, so it is not a TSV table. "
-                + WRONG_FORMAT_MESSAGE)
-
-    # newline="" semantics: let the csv module handle quoted line breaks.
-    reader = csv.reader(io.StringIO(text, newline=""), delimiter=delimiter)
-    try:
-        header = next(reader)
-    except StopIteration:
-        raise InputError("The file has no header row.")
-    if len(header) < 2:
-        raise InputError(
-            "Only one column was found. Check that the file is comma-, semicolon- or tab-separated. "
-            + WRONG_FORMAT_MESSAGE)
-
-    rows, blank_lines = [], 0
-    for row in reader:
-        if not any(cell.strip() for cell in row):
-            blank_lines += 1  # skipped for counting only; no data row is altered
-            continue
-        rows.append(row)
-
-    warnings = []
-    ragged = sum(1 for r in rows if len(r) != len(header))
-    if ragged:
-        warnings.append(f"{ragged} row(s) have a different number of fields than the header ({len(header)}).")
-    dupes = [c for c, n in Counter(header).items() if n > 1]
-    if dupes:
-        warnings.append("Duplicate column names: " + ", ".join(repr(d) for d in dupes[:10]))
-    if any(not h.strip() for h in header):
-        warnings.append("Some columns have an empty header.")
-    if blank_lines:
-        warnings.append(f"{blank_lines} blank line(s) were not counted as data rows.")
-    if not rows:
-        warnings.append("The file has a header but no data rows.")
-
-    return {"header": header, "rows": rows, "delimiter": delimiter, "encoding": encoding, "warnings": warnings}
-
-
-# ---------------------------------------------------------------- structure
-
-def derive_structure(session: dict, roles: list[str]) -> dict:
-    """Describe layout and count samples/features from the confirmed roles.
-    Pure counting over the unmodified cells -- nothing is transformed."""
-    header, rows = session["header"], session["rows"]
-    detection = session.get("detection")
-
-    def col_values(i):
-        return [r[i].strip() for r in rows if i < len(r) and r[i].strip()]
-
-    idx_of = lambda role: [i for i, r in enumerate(roles) if r == role]
-    value_idx, sample_idx, annot_idx = idx_of("feature_value"), idx_of("sample_id"), idx_of("feature_annotation")
-
-    # Which column identifies a feature?
-    feature_id_idx = None
-    if detection and detection["feature_id_column"] in header:
-        cand = header.index(detection["feature_id_column"])
-        if roles[cand] == "feature_annotation":
-            feature_id_idx = cand
-    if feature_id_idx is None and annot_idx:
-        feature_id_idx = annot_idx[0]
-
-    if detection and detection["feature_id_column"] is None and detection["signature"] == "generic_feature_table":
-        feature_id = detection["feature_id_note"]
-    elif feature_id_idx is not None:
-        feature_id = f"'{header[feature_id_idx]}' column"
-    else:
-        feature_id = "none confirmed (features identified by position)"
-
-    if sample_idx:
-        sample_vals = col_values(sample_idx[0])
-        n_unique = len(set(sample_vals))
-        if n_unique == len(rows):
-            layout = "samples_as_rows"
-            desc = (f"Wide, one row per sample ('{header[sample_idx[0]]}'); "
-                    f"each feature_value column is one feature.")
-            samples, features = len(rows), len(value_idx)
-            if feature_id_idx is not None and feature_id_idx not in value_idx:
-                feature_id = "feature_value column headers"
-        else:
-            layout = "long"
-            desc = (f"Long, several rows per sample ('{header[sample_idx[0]]}' repeats); "
-                    "features counted as distinct identifiers.")
-            samples = n_unique
-            features = len(set(col_values(feature_id_idx))) if feature_id_idx is not None else None
-    else:
-        layout = "features_as_rows"
-        desc = "Wide, one row per feature; each feature_value column is one sample."
-        samples, features = len(value_idx), len(rows)
-
-    factors = []
-    for i, r in enumerate(roles):
-        if r in ("subject_id", "timepoint", "batch", "group_or_outcome"):
-            factors.append({"column": header[i], "role": r, "n_levels": len(set(col_values(i)))})
-
-    warnings = []
-    if not value_idx:
-        warnings.append("No column is labelled feature_value, so there are no measured values.")
-    if layout == "features_as_rows" and factors:
-        warnings.append(
-            "Design columns (subject/timepoint/batch/group) were labelled in a table with one row per "
-            "feature; in this layout they describe features, not samples. Sample metadata usually comes "
-            "from a separate sample sheet.")
-    return {"layout": layout, "layout_description": desc, "sample_count": samples,
-            "feature_count": features, "feature_id": feature_id, "design_factors": factors,
-            "warnings": warnings}
-
-
-# ---------------------------------------------------------------- API
-
-@app.get("/api/health")
-def health():
-    return {
-        "status": "ok",
-        "ai_available": bool(llm_fallback.api_key()),
-        "ai_model": llm_fallback.model_list()[0],
-        "roles": list(ROLES),
-        "signatures": {k: format_detect.PLATFORM_LABELS[k] for k in format_detect.SIGNATURES},
-    }
+        llm.say("  - " + _line)
 
 
 # ---------------------------------------------------------------- progress
-# Live status of each upload, polled by the page via GET /api/progress/{id}.
+
 PROGRESS: "OrderedDict[str, dict]" = OrderedDict()
 _PROGRESS_LOCK = threading.Lock()
-MAX_PROGRESS = 50
-AI_START_PCT, AI_END_PCT = 10, 99
 
 
-def set_progress(progress_id, **fields):
-    if not progress_id:
+def set_progress(pid, **fields):
+    if not pid:
         return
     now = time.time()
     with _PROGRESS_LOCK:
-        p = PROGRESS.get(progress_id)
+        p = PROGRESS.get(pid)
         if p is None:
-            p = PROGRESS[progress_id] = {"stage": "starting", "percent": 0, "message": "",
-                                         "batches_done": 0, "batches_total": 0, "log": [],
-                                         "started": now}
-            while len(PROGRESS) > MAX_PROGRESS:
+            p = PROGRESS[pid] = {"stage": "starting", "percent": 0, "message": "", "batches_done": 0,
+                                 "batches_total": 0, "log": [], "started": now}
+            while len(PROGRESS) > 50:
                 PROGRESS.popitem(last=False)
         p.update(fields)
         p["updated"] = now
@@ -305,182 +75,246 @@ def set_progress(progress_id, **fields):
             p["log"] = (p["log"] + [{"t": round(now - p["started"], 1), "msg": fields["message"]}])[-8:]
 
 
-def _ai_progress(progress_id):
-    def on_progress(done, total, message):
-        pct = AI_START_PCT + (AI_END_PCT - AI_START_PCT) * done / total if total else AI_START_PCT
-        set_progress(progress_id, stage="ai", percent=int(pct), batches_done=done,
-                     batches_total=total, message=message)
-    return on_progress
+def ai_progress(pid, start=10, end=99):
+    def cb(done, total, message):
+        pct = start + (end - start) * done / total if total else start
+        set_progress(pid, stage="ai", percent=int(pct), batches_done=done, batches_total=total, message=message)
+    return cb
 
 
-@app.get("/api/progress/{progress_id}")
-def get_progress(progress_id: str):
+@app.get("/api/progress/{pid}")
+def get_progress(pid: str):
     with _PROGRESS_LOCK:
-        p = PROGRESS.get(progress_id)
+        p = PROGRESS.get(pid)
         if p is None:
             raise HTTPException(404, "Unknown progress id.")
         out = dict(p, log=list(p["log"]))
-    out["server_time"] = time.time()
-    out["elapsed_s"] = round(out["server_time"] - out["started"], 1)
-    out["idle_s"] = round(out["server_time"] - out["updated"], 1)
+    out["elapsed_s"] = round(time.time() - out["started"], 1)
+    out["idle_s"] = round(time.time() - out["updated"], 1)
     return out
 
 
-@app.post("/api/upload", response_model=UploadResponse)
-async def upload(file: UploadFile = File(...), progress_id: str = Form(None)):
-    set_progress(progress_id, stage="reading", percent=2, message="File received by the server")
-    raw = await file.read(MAX_BYTES + 1)
-    filename = file.filename or "upload"
-    # The work (and especially the AI calls) runs in a worker thread so the
-    # server keeps answering progress requests meanwhile.
+async def run(pid, fn, *args):
     try:
-        result = await run_in_threadpool(process_upload, filename, raw, progress_id)
+        result = await run_in_threadpool(fn, *args)
     except HTTPException as e:
-        set_progress(progress_id, stage="error", message=str(e.detail))
+        set_progress(pid, stage="error", message=str(e.detail))
         raise
     except Exception as e:
-        set_progress(progress_id, stage="error", message=f"{type(e).__name__}: {e}")
+        set_progress(pid, stage="error", message=f"{type(e).__name__}: {e}")
         raise
-    set_progress(progress_id, stage="done", percent=100, message="Done")
+    set_progress(pid, stage="done", percent=100, message="Done")
     return result
 
 
-def process_upload(filename, raw, progress_id=None):
-    if len(raw) > MAX_BYTES:
-        raise HTTPException(413, f"File is larger than {MAX_BYTES // (1024 * 1024)} MB.")
-    set_progress(progress_id, stage="reading", percent=4, message="Parsing the table")
+def session_or_404(sid):
     try:
-        table = parse_table(filename, raw)
-    except InputError as e:
-        raise HTTPException(415, str(e))
-    set_progress(progress_id, stage="detecting", percent=8,
-                 message=f"Parsed {len(table['rows'])} rows x {len(table['header'])} columns; "
-                         "checking known format signatures")
-
-    session_id = uuid.uuid4().hex[:12]
-    header, rows = table["header"], table["rows"]
-    log_event(session_id, "upload", {
-        "filename": filename, "bytes": len(raw), "delimiter": table["delimiter"],
-        "encoding": table["encoding"], "n_rows": len(rows), "n_columns": len(header),
-        "header": header, "warnings": table["warnings"],
-    })
-
-    session = {"filename": filename, **table, "detection": None, "ai": None}
-    warnings = list(table["warnings"])
-
-    # 1) Deterministic detection first. A match is certain: no AI call.
-    det = format_detect.detect(header, rows)
-    if det is not None:
-        method = "signature"
-        detection = {
-            "signature": det.signature, "platform": det.platform, "omics_type": det.omics_type,
-            "feature_id_column": det.feature_id_column, "feature_id_note": det.feature_id_note,
-            "n_value_columns": len(det.value_column_indices), "layout": det.layout,
-            "also_matched": det.also_matched,
-        }
-        warnings += det.warnings
-        columns = [{"index": r["index"], "column": r["column"], "role": r["role"],
-                    "confidence": 1.0, "evidence": r["reason"]} for r in det.roles]
-        session["detection"] = detection
-        log_event(session_id, "signature_match", {**detection, "roles": columns, "warnings": det.warnings})
-        ai = None
-    else:
-        # 2) AI fallback, proposals only.
-        log_event(session_id, "signature_match", {"signature": None, "checked": list(format_detect.SIGNATURES)})
-        set_progress(progress_id, stage="ai", percent=AI_START_PCT,
-                     message="No known signature matched; asking the AI for column roles")
-        result = llm_fallback.propose_roles(header, rows, len(rows), on_progress=_ai_progress(progress_id))
-        columns = result["columns"]
-        method = "ai" if result["status"] in ("ok", "partial") else "manual"
-        ai = {"status": result["status"], "model": result["model"], "error": result["error"],
-              "n_unresolved": sum(1 for c in columns if c["role"] == UNRESOLVED)}
-        session["ai"] = ai
-        log_event(session_id, "ai_proposal", {**ai, "proposals": columns, "calls": result["calls"]})
-        if result["error"] and result["status"] != "unavailable":
-            warnings.append(result["error"])
-
-    session.update(method=method, proposal=columns)
-    SESSIONS[session_id] = session
-    while len(SESSIONS) > MAX_SESSIONS:
-        SESSIONS.popitem(last=False)
-
-    return UploadResponse(
-        session_id=session_id, filename=filename, delimiter=table["delimiter"],
-        encoding=table["encoding"], n_rows=len(rows), n_columns=len(header), header=header,
-        preview_rows=rows[:PREVIEW_ROWS], warnings=warnings, method=method,
-        detection=session["detection"], ai=ai, columns=columns, roles_vocabulary=list(ROLES),
-    )
-
-
-@app.post("/api/sessions/{session_id}/confirm", response_model=StructureSummary)
-def confirm(session_id: str, body: ConfirmRequest):
-    session = SESSIONS.get(session_id)
-    if session is None:
+        return workflow.get_session(sid)
+    except KeyError:
         raise HTTPException(404, "Unknown or expired session. Please upload the file again.")
-    header = session["header"]
-
-    by_index = {}
-    for c in body.columns:
-        if c.index in by_index:
-            raise HTTPException(422, f"Column index {c.index} appears more than once.")
-        if not (0 <= c.index < len(header)) or header[c.index] != c.column:
-            raise HTTPException(422, f"Column {c.index} ('{c.column}') does not match the uploaded file.")
-        by_index[c.index] = c.role
-    missing = [header[i] for i in range(len(header)) if i not in by_index]
-    if missing:
-        raise HTTPException(422, "Every column needs a confirmed role. Missing: " + ", ".join(missing[:10]))
-
-    roles = [by_index[i] for i in range(len(header))]
-    structure = derive_structure(session, roles)
-
-    decisions = []
-    for p, final in zip(session["proposal"], roles):
-        if p["role"] == UNRESOLVED:
-            decision = "assigned"
-        elif p["role"] == final:
-            decision = "accepted"
-        else:
-            decision = "corrected"
-        decisions.append({
-            "index": p["index"], "column": p["column"],
-            "proposed_role": p["role"], "proposed_confidence": p.get("confidence"),
-            "proposed_evidence": p.get("evidence"), "final_role": final, "decision": decision,
-        })
-    changes = sum(1 for d in decisions if d["decision"] != "accepted")
-
-    det = session["detection"]
-    if det:
-        platform, omics = det["platform"], det["omics_type"]
-    else:
-        platform, omics = "generic/AI-assisted" if session["method"] == "ai" else "generic/manual", "unspecified"
-
-    confirmed_at = now_iso()
-    summary = {
-        "session_id": session_id, "confirmed_at": confirmed_at, "filename": session["filename"],
-        "method": session["method"], "platform": platform, "omics_type": omics,
-        "layout": structure["layout"], "layout_description": structure["layout_description"],
-        "sample_count": structure["sample_count"], "feature_count": structure["feature_count"],
-        "feature_id": structure["feature_id"], "n_rows": len(session["rows"]), "n_columns": len(header),
-        "role_counts": {r: roles.count(r) for r in ROLES if roles.count(r)},
-        "design_factors": structure["design_factors"], "warnings": structure["warnings"],
-        "columns": [{"index": i, "column": header[i], "role": roles[i]} for i in range(len(header))],
-        "changes_from_proposal": changes, "log_file": str(log_path(session_id).name),
-    }
-    # Log before returning (design principle 4).
-    log_event(session_id, "confirmation", {"decisions": decisions, "summary": summary})
-    session["confirmed"] = summary
-    return StructureSummary(**summary)
 
 
-@app.get("/api/sessions/{session_id}/log")
-def session_log(session_id: str):
-    if not session_id.isalnum():
-        raise HTTPException(400, "Bad session id.")
-    path = log_path(session_id)
+# ---------------------------------------------------------------- read-only endpoints
+
+@app.get("/api/health")
+def health():
+    ok, why = llm.available()
+    return {"status": "ok", "ai_available": ok, "ai_unavailable_reason": None if ok else why,
+            "ai_provider": llm.provider_name(), "ai_models": llm.model_list() if ok else [],
+            "example_values_sent": os.environ.get("AI_SEND_EXAMPLE_VALUES", "true")}
+
+
+@app.get("/api/vocabulary")
+def vocabulary():
+    return vocabulary_payload()
+
+
+@app.get("/api/sessions/{sid}/log")
+def session_log(sid: str):
+    s = session_or_404(sid)
+    path = log_path(s.sid)
     if not path.exists():
         raise HTTPException(404, "No log for this session.")
-    import json
-    return JSONResponse([json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()])
+    return JSONResponse([json.loads(l) for l in path.read_text(encoding="utf-8").splitlines()])
+
+
+# ---------------------------------------------------------------- upload
+
+def _group_public(g):
+    return {k: g.get(k) for k in ("group_id", "columns", "indices", "n_columns", "kind", "origin", "pattern", "type",
+                                  "profile", "histogram", "sample_id_rule", "sample_names", "split_from",
+                                  "split_reasons")}
+
+
+def session_payload(s):
+    return {
+        "session_id": s.sid, "filename": s.filename, "sha256": s.sha,
+        "header": s.table["header"], "labels": s.cols.labels,
+        "preview_rows": s.table["rows"][:PREVIEW_ROWS],
+        "n_rows": len(s.table["rows"]), "n_columns": len(s.table["header"]),
+        "parse_report": s.table["parse_report"], "layout_hints": s.hints,
+        "groups": [_group_public(g) for g in s.groups],
+    }
+
+
+def _do_upload(filename, raw, pid):
+    if len(raw) > MAX_BYTES:
+        raise HTTPException(413, f"File is larger than {MAX_BYTES // (1024 * 1024)} MB.")
+    set_progress(pid, stage="reading", percent=4, message="Parsing the table")
+    try:
+        s = workflow.create_session(filename, raw)
+    except InputError as e:
+        raise HTTPException(415, str(e))
+    set_progress(pid, stage="detecting", percent=9, message=f"Profiled {len(s.table['header'])} columns into "
+                                                            f"{len(s.groups)} groups")
+    s.log("upload", {"filename": s.filename, "bytes": len(raw), "sha256": s.sha,
+                     "n_rows": len(s.table["rows"]), "n_columns": len(s.table["header"]),
+                     "header": s.table["header"]})
+    s.log("parse_report", s.table["parse_report"])
+    s.log("groups", {"groups": [{k: g.get(k) for k in ("group_id", "columns", "kind", "origin", "pattern")}
+                                for g in s.groups], "layout_hints": s.hints})
+    return session_payload(s)
+
+
+@app.post("/api/upload")
+async def upload(file: UploadFile = File(...), progress_id: Optional[str] = Form(None)):
+    set_progress(progress_id, stage="reading", percent=2, message="File received by the server")
+    raw = await file.read(MAX_BYTES + 1)
+    return await run(progress_id, _do_upload, file.filename or "upload", raw, progress_id)
+
+
+# ---------------------------------------------------------------- propose / steps
+
+class ProposeRequest(BaseModel):
+    session_id: str
+    ai: bool = True
+    progress_id: Optional[str] = None
+
+
+def _do_propose(req):
+    s = session_or_404(req.session_id)
+    with s.lock:
+        set_progress(req.progress_id, stage="ai", percent=10,
+                     message="Asking the AI to label the column groups" if req.ai else "Preparing manual mode")
+        workflow.build_draft(s, ai_on=req.ai, on_progress=ai_progress(req.progress_id))
+        return {"session": session_payload(s), "draft": workflow.public_draft(s), "digests": s.digests}
+
+
+@app.post("/api/propose")
+async def propose(req: ProposeRequest):
+    return await run(req.progress_id, _do_propose, req)
+
+
+class StepRequest(BaseModel):
+    session_id: str
+    step_id: str
+    decision: dict = {}
+    progress_id: Optional[str] = None
+
+
+def _do_step(req):
+    s = session_or_404(req.session_id)
+    with s.lock:
+        if s.draft is None:
+            raise HTTPException(409, "Run /api/propose first.")
+        try:
+            res = workflow.confirm_step(s, req.step_id, req.decision, on_progress=ai_progress(req.progress_id))
+        except workflow.StepError as e:
+            raise HTTPException(422, str(e))
+        res["session"] = session_payload(s) if res["reproposed"] else None
+        res["digests"] = s.digests if res["reproposed"] else None
+        return res
+
+
+@app.post("/api/confirm-step")
+async def confirm_step(req: StepRequest):
+    return await run(req.progress_id, _do_step, req)
+
+
+class ReconsiderRequest(BaseModel):
+    session_id: str
+    group_id: str
+    user_hint: str = ""
+    progress_id: Optional[str] = None
+
+
+def _do_reconsider(req):
+    s = session_or_404(req.session_id)
+    with s.lock:
+        try:
+            return workflow.reconsider(s, req.group_id, req.user_hint, on_progress=ai_progress(req.progress_id))
+        except workflow.StepError as e:
+            raise HTTPException(422, str(e))
+
+
+@app.post("/api/reconsider")
+async def reconsider(req: ReconsiderRequest):
+    return await run(req.progress_id, _do_reconsider, req)
+
+
+@app.post("/api/metadata-upload")
+async def metadata_upload(session_id: str = Form(...), file: UploadFile = File(...)):
+    s = session_or_404(session_id)
+    raw = await file.read(MAX_BYTES + 1)
+    if len(raw) > MAX_BYTES:
+        raise HTTPException(413, "Metadata file is too large.")
+
+    def work():
+        with s.lock:
+            try:
+                d = workflow.upload_metadata(s, file.filename or "metadata.csv", raw)
+            except InputError as e:
+                raise HTTPException(415, str(e))
+            (s.dir / "metadata_source.csv").write_bytes(raw)
+            return {"draft": d}
+    return await run_in_threadpool(work)
+
+
+# ---------------------------------------------------------------- finalize / export
+
+class FinalizeRequest(BaseModel):
+    session_id: str
+
+
+ARTIFACT_TYPES = {".json": "application/json", ".csv": "text/csv"}
+
+
+def _do_finalize(req):
+    s = session_or_404(req.session_id)
+    with s.lock:
+        try:
+            schema, artifacts, flags = outputs.build(s)
+        except outputs.OutputError as e:
+            raise HTTPException(422, str(e))
+        out = s.dir / "outputs"
+        out.mkdir(parents=True, exist_ok=True)
+        for name, text in artifacts.items():
+            (out / name).write_bytes(text.encode("utf-8"))  # exact bytes; no newline translation
+        (out / "schema.json").write_text(json.dumps(schema, indent=2, ensure_ascii=False), encoding="utf-8")
+        s.draft["steps"]["review"] = "confirmed"
+        s.draft["finalized"] = True
+        s.save()
+        names = ["schema.json"] + list(artifacts)
+        s.log("finalize", {"artifacts": names, "integrity_flags": flags, "schema": schema})
+        return {"schema": schema, "artifacts": names, "integrity_flags": flags}
+
+
+@app.post("/api/finalize")
+async def finalize(req: FinalizeRequest):
+    return await run_in_threadpool(_do_finalize, req)
+
+
+@app.get("/api/export/{sid}/{artifact}")
+def export(sid: str, artifact: str):
+    s = session_or_404(sid)
+    if "/" in artifact or "\\" in artifact or artifact.startswith("."):
+        raise HTTPException(400, "Bad artifact name.")
+    path = s.dir / "outputs" / artifact
+    if not path.exists():
+        raise HTTPException(404, "Not found. Finish the wizard first.")
+    ext = os.path.splitext(artifact)[1]
+    return Response(path.read_bytes(), media_type=ARTIFACT_TYPES.get(ext, "application/octet-stream"),
+                    headers={"Content-Disposition": f'attachment; filename="{s.sid}_{artifact}"'})
 
 
 @app.get("/tool")

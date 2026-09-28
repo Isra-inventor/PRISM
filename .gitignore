@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 .env
 backend/logs/*.jsonl
+backend/sessions/
+backend/cache/

@@ -1,0 +1,6 @@
+id;value;value;;note
+P1;1,5;12;NA;abc
+P2;2,25;0;N/A; padded 
+P3;;7;#N/A;x
+;;;;
+P4;3,0;Filtered;-;y
