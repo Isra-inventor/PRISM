@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PRISM Recognition Tool</title>
-  <meta name="description" content="PRISM Step 0 — upload a quantified omics table and confirm its structure.">
+  <meta name="description" content="PRISM Step 0 — upload a quantified omics table and confirm its structure step by step.">
   <link rel="preload" href="fonts/quicksand-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -27,72 +27,53 @@
         <div>
           <div class="eyebrow">Step 0 · Data input &amp; recognition</div>
           <h1>Recognize <span class="ghost">your data</span></h1>
-          <p>Upload a quantified table. PRISM identifies its structure — which column is what — and asks you to confirm. No value is changed at this step.</p>
+          <p>Upload a quantified table. PRISM works out its structure — which columns are features, measurements, samples and sample information — and walks you through confirming it. No value is changed.</p>
         </div>
-        <span class="pill" id="ai-status">Checking AI fallback…</span>
+        <div class="head-controls">
+          <label class="switch" title="When off, no AI is used: you label everything yourself, with hints computed from the data."><input type="checkbox" id="ai-toggle" checked> <span>AI suggestions</span></label>
+          <span class="pill" id="ai-status">Checking AI…</span>
+        </div>
       </div>
 
-      <ol class="steps" id="steps" style="list-style:none;padding:0">
-        <li class="step current" data-step="1"><b>01</b><span>Upload</span></li>
-        <li class="step" data-step="2"><b>02</b><span>Preview</span></li>
-        <li class="step" data-step="3"><b>03</b><span>Structure</span></li>
-        <li class="step" data-step="4"><b>04</b><span>Confirmed</span></li>
-      </ol>
-
-      <!-- 1. Upload -->
+      <!-- Upload -->
       <section class="panel" id="panel-upload">
-        <div class="panel-head"><h2>Upload a quantified table</h2><span class="meta">.csv · .tsv · .txt (tab-separated)</span></div>
+        <div class="panel-head"><h2>Upload a quantified table</h2><span class="meta">.csv · .tsv · .txt</span></div>
         <div class="panel-body">
           <label class="dropzone" id="dropzone" for="file-input">
             <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
             <span class="big">Drop a CSV / TSV file, or click to choose</span>
-            <span class="small">Export a protein, peptide or feature table from your analysis software first. Raw spectra and vendor files are not processed.</span>
+            <span class="small">Export a protein, peptide or feature table from your analysis software first. Samples may be in columns or in rows; clinical columns next to the measurements are fine. Raw spectra are not processed.</span>
             <span class="formats-note">
-              <span class="pill">MaxQuant</span><span class="pill">DIA-NN</span><span class="pill">Spectronaut</span><span class="pill">FragPipe</span><span class="pill">XCMS / MZmine</span><span class="pill">any other table → AI-assisted</span>
+              <span class="pill">MaxQuant</span><span class="pill">DIA-NN</span><span class="pill">Spectronaut</span><span class="pill">FragPipe</span><span class="pill">XCMS / MZmine</span><span class="pill">any other table</span>
             </span>
           </label>
-          <input type="file" id="file-input" accept=".csv,.tsv,.txt,text/csv,text/tab-separated-values" hidden>
-          <div class="progress-panel hidden" id="upload-loading" role="status" aria-live="polite">
-            <div class="progress-top">
-              <span class="progress-stage"><span class="spinner"></span><span id="loading-text">Uploading…</span></span>
-              <span class="progress-pct" id="progress-pct">0%</span>
-            </div>
-            <div class="progress-track" aria-hidden="true"><i id="progress-bar"></i></div>
-            <div class="progress-meta">
-              <span id="progress-detail"></span>
-              <span><span id="progress-elapsed">0s elapsed</span> · <span id="progress-idle">active</span></span>
-            </div>
-            <div class="progress-stall hidden" id="progress-stall"></div>
-            <ol class="progress-log" id="progress-log"></ol>
-          </div>
+          <input type="file" id="file-input" accept=".csv,.tsv,.txt,.tab,text/csv,text/tab-separated-values" hidden>
+          <div id="upload-progress-slot"></div>
           <div class="alert alert-error hidden" id="upload-error" role="alert"></div>
         </div>
       </section>
 
-      <!-- 2. Preview -->
-      <section class="panel hidden" id="panel-preview">
-        <div class="panel-head"><h2>Data preview</h2><span class="meta" id="preview-meta"></span></div>
-        <div class="panel-body">
-          <div class="table-scroll"><table class="preview" id="preview-table"></table></div>
-          <div class="alert alert-warn hidden" id="file-warnings"></div>
+      <!-- Wizard -->
+      <section id="workspace" class="hidden">
+        <div class="ws-top">
+          <div class="ws-file" id="ws-file"></div>
+          <div class="ws-file" id="ws-sig"></div>
         </div>
-      </section>
-
-      <!-- 3. Structure -->
-      <section class="panel hidden" id="panel-structure">
-        <div class="panel-head"><h2>Structure</h2><span class="meta" id="structure-meta"></span></div>
-        <div class="panel-body" id="structure-body"></div>
-        <div class="confirm-bar">
-          <p id="confirm-note"></p>
-          <button class="btn btn-light" id="confirm-btn" type="button">Confirm structure</button>
+        <ol class="stepper" id="stepper"></ol>
+        <div class="ws-grid" id="ws-grid">
+          <div class="preview-pane">
+            <div class="pv-scroll" id="pv-scroll"><table class="pv" id="pv"></table></div>
+            <div class="pv-meta"><span id="pv-meta"></span><span id="pv-note"></span></div>
+            <div class="legend" id="legend"></div>
+            <details class="saw" id="parse-notes"><summary>Parse report</summary><pre id="parse-pre"></pre></details>
+            <details class="saw" id="ai-saw"><summary>What the AI saw</summary><pre id="saw-pre"></pre></details>
+          </div>
+          <div class="guide-pane">
+            <div id="busy-slot"></div>
+            <div class="guide" id="guide" aria-live="polite"></div>
+          </div>
+          <svg class="callout" id="callout" aria-hidden="true"></svg>
         </div>
-        <div class="panel-body hidden" id="confirm-error-wrap" style="padding-top:0"><div class="alert alert-error" id="confirm-error" role="alert"></div></div>
-      </section>
-
-      <!-- 4. Summary -->
-      <section class="panel hidden" id="panel-summary">
-        <div class="panel-head"><h2>Recognized structure</h2><span class="meta" id="summary-meta"></span></div>
-        <div class="panel-body" id="summary-body"></div>
       </section>
     </div>
   </main>
@@ -100,6 +81,19 @@
   <footer class="footer">
     <div class="wrap"><span>PRISM · Step 0 — Data Input &amp; Recognition</span><span>Nothing is transformed at this stage.</span></div>
   </footer>
+
+  <template id="progress-template">
+    <div class="progress-panel" role="status" aria-live="polite">
+      <div class="progress-top">
+        <span class="progress-stage"><span class="spinner"></span><span class="p-label">Working…</span></span>
+        <span class="progress-pct">0%</span>
+      </div>
+      <div class="progress-track" aria-hidden="true"><i></i></div>
+      <div class="progress-meta"><span class="p-detail"></span><span><span class="p-elapsed">0s elapsed</span> · <span class="p-idle">active</span></span></div>
+      <div class="progress-stall hidden"></div>
+      <ol class="progress-log"></ol>
+    </div>
+  </template>
 
   <script src="app.js"></script>
 </body>

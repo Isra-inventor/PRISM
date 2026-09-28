@@ -1,12 +1,12 @@
-# PRISM — Step 0: Data Input & Recognition
+# PRISM — Step 0: Schema recognition and guided confirmation
 
 **P**reprocessing and **R**easoning for **I**nformed **S**tatistical **M**ethodology.
 
 PRISM helps you preprocess omics data (proteomics and metabolomics for now). It doesn't push every
 dataset through one fixed pipeline. It first works out what the data is, then reasons about what to do with it.
-This build covers **Step 0 only**: you upload a quantified table, PRISM identifies its structure,
-you confirm it, and the tool shows the confirmed structure. Missingness, PCA, batch detection,
-normalization, imputation and recommendations are out of scope for this build.
+This build is **Step 0 only**: you upload a quantified table, PRISM recognizes its structure, you confirm it
+step by step, and the result is written out as a schema plus canonical tables. Audits (missingness,
+PCA, batch, distributions), normalization, imputation, filtering and recommendations are later phases.
 
 ## Run it
 
@@ -31,105 +31,132 @@ pip install -r requirements.txt
 python -m uvicorn backend.main:app --reload
 ```
 
-Open <http://127.0.0.1:8000>. The home page is at `/`, and the tool is at `/tool.html`.
-FastAPI serves both the API and the static frontend, so you only run one command.
-`python main.py` does **not** work, because the backend is a package and has to be started through uvicorn as shown.
+Open <http://127.0.0.1:8000/tool.html>. The home page is at `/`.
+`python main.py` does **not** work: start the server through uvicorn as shown above.
 
-The 3D prism on the home page loads three.js from `cdn.jsdelivr.net`. The page needs internet access for
-the prism. Without it, the typographic hero still works. The fonts (Quicksand, Inter) are self-hosted in `frontend/fonts/`.
+To try it without your own data, upload any file from `tests/fixtures/`.
 
-### Where to put the API key (Gemini)
+## AI provider and key
 
-The AI fallback uses Google Gemini. Get a key at <https://aistudio.google.com/apikey>, then either:
+The AI only labels column groups. It never sees raw rows. You can switch it off in the page ("AI suggestions" toggle),
+and the wizard still works in manual mode with hints computed from the data.
 
-- **Recommended:** copy `.env.example` to `.env` in the project folder and paste your key after `GEMINI_API_KEY=`.
-  `.env` is git-ignored, so the key is never committed. The server reads it at startup.
-- **Or** set it in the terminal before starting the server: `$env:GEMINI_API_KEY="..."` in PowerShell, or
-  `export GEMINI_API_KEY=...` on macOS/Linux.
-
-Never paste the key into the code. It stays on the server and is never sent to the browser.
+Put the key in a file named **`.env`** next to this README (copy `.env.example`). `.env` is git-ignored.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `GEMINI_API_KEY` | – | Turns on AI-assisted column proposals (`GOOGLE_API_KEY` also works) |
-| `PRISM_LLM_MODEL` | see `DEFAULT_MODELS` in `backend/llm_fallback.py` | Gemini models, tried in order. If one is overloaded (503), rate-limited (429) or retired (404), PRISM retries and then moves to the next |
-| `PRISM_LOG_DIR` | `backend/logs` | Where session logs are written |
-| `PRISM_MAX_UPLOAD_MB` | `250` | Upload size limit |
+| `GEMINI_API_KEY` | – | Google Gemini key (default provider). Get one at <https://aistudio.google.com/apikey> |
+| `LLM_PROVIDER` | auto | `gemini`, `anthropic`, `openai` or `mock`. Auto picks whichever key is set |
+| `PRISM_LLM_MODEL` | provider default | Model name(s), comma-separated. For Gemini, several models are tried in order, because individual models are often briefly overloaded |
+| `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` | – | For those providers. Needs `pip install anthropic` / `pip install openai` |
+| `AI_SEND_EXAMPLE_VALUES` | `true` | When `false`, only column names and statistics are sent |
+| `PRISM_MAX_UPLOAD_MB` | `200` | Upload size limit |
 
-**Check that the AI works:** run `python -m backend.check_ai` in the project folder. It sends one tiny
-request to each model and prints what comes back (OK, overloaded, bad key, network or SSL problem).
-Gemini models are often briefly overloaded ("high demand", HTTP 503), which is why PRISM tries several.
+`LLM_PROVIDER=mock` gives an offline demo with canned, rule-based proposals. The tests use the same mock.
 
-If the AI fails, the reason (for example "API key not valid" or "high demand") appears on the
-page and in the terminal where the server runs.
-
-The Gemini call uses plain HTTPS from the Python standard library, so there is no extra SDK to install.
-If no key is set, uploads that match a known signature still work. For every other file, all
-columns come back `unresolved` and you assign each role by hand.
+To check that the AI works on your machine, run `python -m backend.check_ai`.
+The server terminal prints every AI step as `[PRISM AI] …` lines, including the exact error from the provider.
 
 ## How it works
 
-1. **Upload.** Only `.csv` and `.tsv` are accepted, plus `.txt` if it is tab-separated, like MaxQuant's `proteinGroups.txt`.
-   PRISM rejects anything else, including binary files, with a message asking you to export a quantified table first.
-   Every cell is read as an unmodified string.
-2. **Deterministic detection** (`backend/format_detect.py`). The header is checked against the
-   `SIGNATURES` table (MaxQuant, DIA-NN, Spectronaut, FragPipe, and generic mz/rt feature tables).
-   A signature matches only when **all** of its required columns are present, with no fuzzy matching.
-   On a match, value and feature-ID columns are resolved by fixed rules and **no AI is called**.
-3. **AI fallback** (`backend/llm_fallback.py`, Gemini). This step runs only when nothing matched. The model gets the header and the first 15
-   rows (cells cut at 40 characters). It must return `{column, proposed_role, confidence, evidence}` for each column,
-   using the fixed role vocabulary (`sample_id`, `subject_id`, `timepoint`, `batch`,
-   `group_or_outcome`, `feature_value`, `feature_annotation`, `ignore`) or `unresolved`.
-   If an entry is missing, uses an unknown role, or the call fails, that column becomes `unresolved`.
-   PRISM never defaults it to a real role.
-4. **Confirmation** (`POST /api/sessions/{id}/confirm`). The UI requires an explicit confirm click,
-   including for signature matches. It can't be confirmed while any column is `unresolved`. The endpoint returns the recognized
-   structure: platform, omics type, sample and feature counts, layout, and the final role of every column.
+```
+upload ─► parse (strings only, report oddities) ─► profile every column ─► group columns
+      ─► signature match (MaxQuant, DIA-NN, Spectronaut, FragPipe, mz/rt) pre-fills what is certain
+      ─► AI labels each group from a statistics digest (optional)
+      ─► every AI claim is checked against the data; contradictions become "unresolved"
+      ─► 8-step wizard: you confirm or correct each part
+      ─► schema.json + value matrices + feature / sample metadata
+```
 
-**No values are transformed** at any point in this step.
+**Principles, enforced in code:**
+- **Deterministic first.** Parsing, profiling, grouping, signatures and every consistency check are plain code.
+  The AI only interprets meaning from names and computed statistics.
+- **The AI proposes, code checks, you confirm.** Nothing counts until you confirm it. Each item carries provenance:
+  `signature`, `computed`, `ai_proposed_confirmed`, `ai_proposed_corrected` or `user_set`.
+  The wizard shows this as a badge.
+- **No value is modified.** The outputs are re-oriented (transposed or pivoted) and split into tables. Values are copied
+  exactly; only missing-value tokens become empty cells (the tokens seen are listed in the parse report).
+  No sample or feature is ever removed. QC, blank and pool samples, and decoy or contaminant rows, are labelled and kept.
+- **Privacy.** The AI gets a digest: layout hints, and per column group its name pattern, a few column names and aggregated statistics.
+  It never gets raw rows. Example values are only sent for low-cardinality text columns (≤ 20 distinct values),
+  and never for identifier-like ones (≥ 50 % distinct). "What the AI saw" in the page shows the exact digest.
 
-### Logs
+### Column grouping (`backend/profiling.py`)
+1. Numeric columns sharing a name prefix/suffix (≥ 3 columns, ≥ 3 characters) form a family, e.g. `LFQ intensity S01…`.
+   Two checks stop mixed groups:
+   - Families that swallow a more specific family are rejected: `X Intensity` never absorbs `X MaxLFQ Intensity`.
+   - Per-sample slices are rejected: suffix ` S01` across `Intensity S01`, `iBAQ S01`… is not a family.
+2. Columns whose profile deviates strongly from their family are split out: the typical value is far off,
+   or the whole-number / missing-value pattern differs. This keeps age, CD4 count or a scale factor out of a feature block.
+   Columns named like QC / blank / pool samples stay in their family.
+3. Remaining numeric columns are clustered by typical value, keeping clusters of ≥ 5 columns; the rest become singletons.
+   Text columns are singletons.
+4. The AI may suggest splitting a column out of a block (e.g. `iron` among metabolites). The code checks the columns exist and applies the split.
+   The split then shows in the wizard for you to confirm.
 
-Each session writes a JSON Lines file to `backend/logs/<session_id>.jsonl` with these events:
-`upload` → `signature_match` → `ai_proposal` (with the prompts and raw model output) →
-`confirmation`. For each column, the confirmation event records the original proposal (role, confidence,
-evidence), the final role, and whether it was *accepted*, *corrected* or *assigned*. It also has a UTC timestamp.
-You can see the log in the UI (“View session log”) or at `GET /api/sessions/{id}/log`.
+### Wizard steps
+1. **Layout.** Samples in columns, samples in rows, or long. Also the omics type and the source software.
+2. **Feature ID.** One column or a composite key (e.g. m/z + RT). Duplicates are reported, never merged.
+3. **Annotations.** The kind of each feature annotation column, and whether to keep it. Flag columns show how many rows are flagged.
+4. **Values.** The primary / auxiliary / excluded block, measurement type, scale, histogram and statistics. Numeric columns
+   that don't look like features are listed separately and sent to step 6.
+5. **Samples.** Sample IDs, with an editable prefix/suffix strip and a live preview, duplicates, and sample types (QC, blank, pool…).
+6. **Sample info.** Samples-in-rows: roles and kinds of the sample columns. Samples-in-columns: an optional metadata
+   file with a matching report. Near-miss IDs are only suggested, never merged automatically.
+7. **Processing history.** Normalized? Log-transformed? Imputed? Batch-corrected? Anything removed? Always asked, never inferred;
+   no answer is pre-selected.
+8. **Review.** Finishing is blocked while anything is unresolved. Then you download the files.
 
-### How samples and features are counted
+Keyboard: **Enter** confirms, **Esc** opens or closes the editor. Clicking a step in the stepper goes back to it.
+Changing the layout re-runs the proposal with your layout fixed.
 
-- No `sample_id` column: one row per feature, and each `feature_value` column is one sample (typical proteomics/metabolomics export).
-- `sample_id` unique on every row: one row per sample, and each `feature_value` column is one feature.
-- `sample_id` repeats: long format. Samples are the distinct sample IDs, and features are the distinct feature IDs.
+### Outputs (per session, in `backend/sessions/<id>/outputs/`)
+- `schema.json`: the confirmed schema (layout, assays and value blocks with profiles, annotations, sample
+  metadata, sample types, excluded columns, processing history, parse report, integrity flags, AI provider/model/prompt).
+- `value_matrix_<assay>.csv`: features × samples, from the primary block only. For long tables, the pivot runs only if every
+  (feature, sample) pair is unique; otherwise PRISM stops and explains that aggregation is not supported.
+- `feature_metadata.csv`, `sample_metadata.csv`.
+
+Every upload, parse report, AI request (digest), raw AI response, validation result, confirmed step and
+finalization is logged to `backend/logs/<session_id>.jsonl`, with timestamps, the provider, the model, `prompt_version` and temperature 0.
 
 ## API
 
 | Method | Path | |
 |---|---|---|
-| GET | `/api/health` | Whether AI is available, the model, roles and signatures |
-| POST | `/api/upload` | multipart `file` → preview, detection result or AI proposals |
-| POST | `/api/sessions/{id}/confirm` | `{"columns": [{"index", "column", "role"}]}` → structure summary |
-| GET | `/api/sessions/{id}/log` | Full event log for the session |
+| GET | `/api/vocabulary` | All vocabularies, definitions and history questions (the single source of truth) |
+| GET | `/api/health` | AI provider status |
+| POST | `/api/upload` | multipart `file` → session, parse report, preview, groups with profiles and histograms |
+| POST | `/api/propose` | `{session_id, ai}` → the draft (signature + validated AI proposal) and the exact digest(s) sent |
+| POST | `/api/confirm-step` | `{session_id, step_id, decision}` → updated draft; changing the layout triggers a re-proposal |
+| POST | `/api/reconsider` | `{session_id, group_id, user_hint}` → re-asks the AI about one group |
+| POST | `/api/metadata-upload` | multipart `session_id`, `file` → matching report |
+| POST | `/api/finalize` | → schema, artifact list, integrity flags |
+| GET | `/api/export/{session_id}/{artifact}` | download an output file |
+| GET | `/api/progress/{id}` | live progress of an upload / AI call |
+| GET | `/api/sessions/{id}/log` | the session's event log |
 
-Sessions are held in memory, so a restart clears them. The logs on disk remain.
-
-## Examples & tests
-
-`examples/` contains small synthetic files:
-
-- `maxquant_proteinGroups.txt` matches a signature (MaxQuant).
-- `xcms_feature_table.csv` matches a signature (generic mz/rt metabolomics).
-- `cohort_metabolites_wide.csv` matches no signature, so it goes to the AI fallback (or manual assignment).
+## Tests
 
 ```bash
 python -m pytest -q
 ```
+The LLM is always mocked in the tests, including deliberately wrong proposals. The tests cover:
+- parsing and the parse report;
+- digests and grouping;
+- signatures;
+- every consistency rule;
+- full API flows for fixtures A–F (MaxQuant, DIA-NN, MZmine, samples-in-rows multi-omics, SomaScan-like, long unique/duplicate);
+- AI off, invalid JSON, hallucinated group ids, provenance and the canonical outputs.
+
+To regenerate the fixtures: `python tests/fixtures/make_fixtures.py`.
 
 ## Layout
 
 ```
-backend/   main.py (API) · format_detect.py · llm_fallback.py · models.py · session_log.py · logs/
-frontend/  index.html (home + 3D prism) · tool.html · style.css · home.js · app.js · fonts/
-examples/  sample input tables
-tests/     pytest suite (the AI is mocked, so no key is needed)
+backend/   main.py (API) · schema.py (vocabulary) · parsing.py · profiling.py · format_detect.py (signatures)
+           validation.py · ai.py · llm_providers.py · mock_llm.py · workflow.py (draft, steps) · outputs.py
+           session_log.py · envfile.py · check_ai.py
+frontend/  index.html (home + 3D prism) · tool.html + app.js (wizard) · style.css · home.js · fonts/
+tests/     fixtures/ (A–F + messy file) · test_deterministic.py · test_flow.py
 ```

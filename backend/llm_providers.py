@@ -20,8 +20,8 @@ import urllib.error
 import urllib.request
 
 GEMINI_MODELS = [
-    "gemini-flash-lite-latest",   # lite models: no thinking, answer in seconds
-    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash-lite",      # lite models: no thinking, answer in seconds
+    "gemini-flash-lite-latest",
     "gemini-3.5-flash",
     "gemini-3-flash-preview",
     "gemini-3.8-flash",
@@ -33,7 +33,7 @@ DEFAULT_MODELS = {
     "mock": ["mock-llm-1"],
 }
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-REQUEST_TIMEOUT_S = 90
+REQUEST_TIMEOUT_S = 45    # a model slower than this is skipped for the next one
 RETRY_STATUS = {429, 500, 502, 503, 504}
 RETRY_DELAYS_S = (2,)
 MAX_RATE_LIMIT_WAITS = 3

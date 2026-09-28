@@ -867,5 +867,5 @@ def step_for_group(s, d, gid):
     if g["kind"] == "numeric_block":
         return "values"
     if lay == "samples_in_rows":
-        return "sample_info"
+        return "values" if g["type"] == "numeric" else "sample_info"
     return "annotations"
