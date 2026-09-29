@@ -417,6 +417,30 @@ details.saw summary { cursor: pointer; padding: 10px 12px; font-size: 12px; colo
 details.saw pre { margin: 0; padding: 10px 12px; max-height: 320px; overflow: auto; font-size: 11px; color: var(--text-dim); border-top: 1px solid var(--line); white-space: pre-wrap; word-break: break-all; }
 .busy { margin-bottom: 12px; }
 
+.field-k { display: block; }
+.check { display: inline-flex; gap: 6px; align-items: center; font-size: 12px; color: var(--text-dim); cursor: pointer; }
+.check input { accent-color: #fff; margin: 0; }
+.item-foot { margin-top: 6px; }
+.item.pick { display: flex; gap: 10px; align-items: center; cursor: pointer; }
+.item.pick.on { border-color: #8a8a8a; }
+.input.wide { width: 100%; }
+.input.grow { flex: 1; }
+textarea.input { width: 100%; resize: vertical; font-size: 12px; line-height: 1.45; }
+.side-by-side { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 4px; }
+.side-by-side .section-label { margin-top: 4px; }
+.computed .hist { margin-top: 0; }
+.computed .stats { grid-template-columns: repeat(3, 1fr); }
+.disagree { margin-top: 14px; border: 1px dashed #555; border-radius: var(--radius); padding: 10px 12px; background: #0b0b0b; }
+.disagree-head { font-size: 12px; color: var(--text); }
+.disagree-head strong { font-weight: 500; }
+.disagree .item-sub { margin: 4px 0 8px; }
+.disagree-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+.sample-list { display: flex; flex-direction: column; gap: 4px; }
+.sample-row { display: grid; grid-template-columns: minmax(80px, 1fr) minmax(0, 1.3fr) auto auto; gap: 8px; align-items: center; padding: 4px 8px; border: 1px solid var(--line); border-radius: var(--radius); }
+.sample-row.nonstudy { border-color: #8fb8ff55; }
+.sample-row .sid { font-family: var(--font-mono); font-size: 11px; color: var(--text); word-break: break-all; }
+.sample-row .input { font-size: 12px; padding: 4px 8px; }
+
 /* ------------------------------------------------ responsive */
 @media (max-width: 960px) {
   .principles { grid-template-columns: repeat(2, 1fr); }
@@ -425,6 +449,7 @@ details.saw pre { margin: 0; padding: 10px 12px; max-height: 320px; overflow: au
   .ws-grid { grid-template-columns: 1fr; }
   .guide-pane { position: static; }
   .guide-body { max-height: none; }
+  .side-by-side { grid-template-columns: 1fr; }
   .callout { display: none; }
   .stepper { grid-template-columns: repeat(4, 1fr); }
 }
@@ -439,7 +464,8 @@ details.saw pre { margin: 0; padding: 10px 12px; max-height: 320px; overflow: au
   .principles, .pipeline { grid-template-columns: 1fr; }
   .stepper li button span { display: none; }
   .opt-cards { grid-template-columns: 1fr; }
-  .item-controls, .row2 { grid-template-columns: 1fr; }
+  .item-controls, .row2, .side-by-side { grid-template-columns: 1fr; }
+  .sample-row { grid-template-columns: 1fr 1fr; }
   .panel-body { padding: 16px; }
   .panel-head { padding: 14px 16px; }
   .statement { padding: 80px 0; }

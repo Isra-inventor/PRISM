@@ -410,3 +410,41 @@ def test_upload_limits_and_filename_sanitized(client):
     assert r.status_code == 200 and r.json()["filename"] == "passwd.csv"
     r = client.get(f"/api/export/{r.json()['session_id']}/..%2Fstate.json")
     assert r.status_code in (400, 404)
+
+
+def test_assay_rename_keeps_block_provenance(flow):
+    f = flow("A_maxquant_proteinGroups.txt")
+    a = f.draft["assays"][0]
+    f.step("layout", {"layout": "samples_in_columns", "assays": [dict(a, assay_label="LFQ proteomics")]})
+    lfq = f.draft["groups"][gid_of(f, "LFQ intensity S01")]
+    assert lfq["assay_label"] == "LFQ proteomics" and lfq["provenance"] == "ai_proposed_confirmed"
+    assert f.draft["assays"][0]["provenance"] == "ai_proposed_corrected"
+
+
+def test_disagree_can_split_a_column_out(flow, monkeypatch):
+    """The user says 'iron is a clinical value': the AI's split suggestion is applied on reconsider."""
+    def no_split(system, prompt):
+        base = json.loads(_ORIGINAL_MOCK(system, prompt))
+        for g in base["groups"]:
+            g["suggest_split"] = None
+        return json.dumps(base)
+    monkeypatch.setattr(mock_llm.MockLLM, "respond", staticmethod(no_split))
+    f = flow("D_samples_in_rows_multiomics.csv")
+    block = gid_of(f, "iron")
+    assert f.draft["groups"][block]["role"] == "value"          # iron still inside the metabolite block
+
+    def with_split(system, prompt):
+        digest = json.loads(prompt.split("\n", 1)[1])
+        assert digest["already_confirmed"]["user_feedback"] == "iron is a clinical value"
+        return json.dumps({"groups": [{"group_id": block, "role": "value", "assay_label": "metabolomics",
+                                       "label": "metabolites", "confidence": 0.9, "evidence": "n",
+                                       "suggest_split": ["iron"], "suggest_split_role": "sample_metadata",
+                                       "suggest_split_audit_kind": "covariate", "suggest_split_label": "serum iron"}]})
+    monkeypatch.setattr(mock_llm.MockLLM, "respond", staticmethod(with_split))
+    r = f.c.post("/api/reconsider", json={"session_id": f.sid, "group_ids": [block], "user_hint": "iron is a clinical value"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    iron = next(g for g in body["session"]["groups"] if g["columns"] == ["iron"])
+    it = body["draft"]["groups"][iron["group_id"]]
+    assert it["role"] == "sample_metadata" and it["audit_kind"] == "covariate" and it["label"] == "serum iron"
+    assert "iron" not in next(g for g in body["session"]["groups"] if g["group_id"] == block)["columns"]

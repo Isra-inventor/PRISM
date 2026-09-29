@@ -126,9 +126,10 @@ what the statistics suggest, e.g. "LFQ intensity, apparently raw linear scale (m
   side). feature_identity lists the group_ids whose values identify each feature (several =
   composite key such as m/z + retention time); use [] when feature names are column headers.
 - groups: exactly one entry for EVERY group in the digest. Value groups name their assay_label.
-  suggest_split may list column names inside a multi-column group that do not belong (e.g. a
-  clinical covariate among metabolites), with suggest_split_role / suggest_split_audit_kind /
-  suggest_split_label for them.
+  When a multi-column group contains columns that are a different kind of thing (e.g. a
+  clinical covariate among metabolites), list their exact column names in suggest_split, with
+  suggest_split_role / suggest_split_audit_kind / suggest_split_label for them. Do not only
+  mention it in the label: code splits the group only when suggest_split names the columns.
 - samples: sample names or glob patterns (e.g. "QC_*") with a label and is_study_sample.
 - clarifying_questions for anything you cannot resolve from the digest.
 - Respect everything under already_confirmed."""

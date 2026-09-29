@@ -12,8 +12,8 @@
     ["samples", "Samples"], ["sample_info", "Sample info"], ["history", "History"], ["review", "Review"],
   ];
   const PREVIEW_COLS = 30;
-  const S = { vocab: null, defs: {}, historyQ: [], session: null, draft: null, digests: null, step: "layout",
-              editing: false, local: {}, aiOn: true, finalized: null, busy: false };
+  const S = { vocab: null, defs: {}, historyQ: [], scope: "", session: null, draft: null, digests: null, step: "layout",
+              local: {}, aiOn: true, finalized: null, busy: false };
 
   // ------------------------------------------------------------ helpers
   const $ = (id) => document.getElementById(id);
@@ -132,7 +132,7 @@
 
   // ------------------------------------------------------------ boot
   Promise.all([api("/api/vocabulary", undefined, "GET"), api("/api/health", undefined, "GET")]).then(([v, h]) => {
-    S.vocab = v.vocabulary; S.defs = v.definitions; S.historyQ = v.history_questions; S.unsupported = v.unsupported_notice;
+    S.vocab = v.vocabulary; S.defs = v.definitions; S.historyQ = v.history_questions; S.scope = v.scope_description || "";
     $("ai-status").textContent = h.ai_available ? `AI: ${h.ai_provider} · ${h.ai_models[0] || ""}` : "AI unavailable · manual mode";
     $("ai-status").title = h.ai_available ? "Used to label column groups; only statistics are sent, never raw rows."
       : (h.ai_unavailable_reason || "");
@@ -156,7 +156,7 @@
   $("restart").addEventListener("click", reset);
 
   function reset() {
-    Object.assign(S, { session: null, draft: null, digests: null, step: "layout", editing: false, local: {}, finalized: null });
+    Object.assign(S, { session: null, draft: null, digests: null, step: "layout", local: {}, finalized: null });
     show($("workspace"), false); show($("panel-upload")); show($("restart"), false); show($("upload-error"), false);
     input.value = "";
     window.scrollTo({ top: 0 });
@@ -196,7 +196,7 @@
       try {
         const r = await api("/api/propose", { session_id: S.session.session_id, ai: S.aiOn, progress_id: pid });
         S.session = r.session; S.draft = r.draft; S.digests = r.digests; S.finalized = null;
-        S.step = "layout"; S.editing = false; S.local = {};
+        S.step = "layout"; S.local = {};
       } catch (err) {
         $("guide").replaceChildren(el("div", { class: "alert alert-error", text: err.message }));
         throw err;
@@ -234,11 +234,12 @@
   }
   function roleLabel(it) {
     if (!it) return "pending";
-    const k = it.kind ? ` · ${pretty(it.kind)}` : "";
+    const lab = it.label ? ` · ${it.label}` : "";
     return {
-      feature_id: "feature ID", feature_annotation: "annotation" + k, sample_id: "sample ID", sample_metadata: "sample info" + k,
+      feature_id: "feature ID" + lab, feature_annotation: (it.marks_rows_as_suspect ? "flag" : "annotation") + lab,
+      sample_id: "sample ID", sample_metadata: `sample info${it.audit_kind ? " · " + pretty(it.audit_kind) : ""}${lab}`,
       ignore: "ignored", unresolved: "unresolved",
-      value: `value · ${it.block_role || "auxiliary"}${it.label ? " · " + it.label : ""}`,
+      value: `value · ${it.block_role || "auxiliary"}${lab}`,
     }[it.role] || it.role;
   }
   function focusGroups(step) {
@@ -277,12 +278,12 @@
       class: [stepStatus(id), id === S.step ? "current" : "", needs.has(id) ? "needs" : ""].join(" ") },
       el("button", { type: "button", onclick: () => go(id), title: stepStatus(id).replace("_", " ") },
         el("b", { text: String(k + 1) }), el("span", { text: label })))));
-    const sig = S.draft.signature;
-    $("ws-sig").textContent = sig ? `Recognized as ${sig.platform} output` : (S.draft.ai.enabled && S.draft.ai.available ? "No known format: AI-assisted" : "No known format: manual mode");
+    const hint = S.draft.signature_hint, aiUsed = S.draft.ai.used;
+    $("ws-sig").textContent = (aiUsed ? "AI-assisted" : "Manual mode") + (hint ? ` · ${hint.charAt(0).toUpperCase() + hint.slice(1)}` : "");
   }
 
   function go(step) {
-    S.step = step; S.editing = false; S.local = {};
+    S.step = step; S.local = {};
     renderStepper(); renderPreview(); renderGuide();
   }
 
@@ -405,10 +406,12 @@
   window.addEventListener("scroll", () => requestAnimationFrame(drawCallout), { passive: true });
 
   // ------------------------------------------------------------ guide building blocks
+  // Every proposal is editable in place: closed fields are dropdowns built from
+  // /api/vocabulary, open fields are text inputs with suggestions (labels already
+  // used in this session). Local edits live in S.local until the step is confirmed.
   function provBadge(p, source) {
-    const map = { signature: ["Signature", "p-signature"], computed: ["Computed", "p-computed"],
-                  ai_proposed_confirmed: ["AI suggestion", "p-ai"], ai_proposed_corrected: ["You (corrected AI)", "p-you"],
-                  user_set: ["You", "p-you"] };
+    const map = { computed: ["Computed", "p-computed"], ai_proposed_confirmed: ["AI suggestion", "p-ai"],
+                  ai_proposed_corrected: ["You (corrected AI)", "p-you"], user_set: ["You", "p-you"] };
     if (source === "none" && p === "user_set") return el("span", { class: "badge p-none", text: "No proposal" });
     const [t, c] = map[p] || ["—", "p-none"];
     return el("span", { class: `badge ${c}`, text: t });
@@ -420,10 +423,13 @@
   }
   function warnList(v, claimed) {
     const msgs = (v?.messages || []).map((m) => el("li", { class: v.status === "contradicted" ? "bad" : "", text: m }));
-    if (claimed) msgs.unshift(el("li", { class: "bad", text: `The AI proposed ${pretty(claimed.role)}${claimed.measurement_type ? " / " + pretty(claimed.measurement_type) : ""}${claimed.kind ? " / " + pretty(claimed.kind) : ""}, but the data contradicts it. Please choose.` }));
+    if (claimed) {
+      const what = [pretty(claimed.role), claimed.audit_kind && pretty(claimed.audit_kind), claimed.block_role, claimed.label && `“${claimed.label}”`].filter(Boolean).join(" / ");
+      msgs.unshift(el("li", { class: "bad", text: `The AI proposed ${what}, but the data contradicts it. Please choose.` }));
+    }
     return msgs.length ? el("ul", { class: "warns" }, msgs) : null;
   }
-  function metaRow(it, fields) {
+  function metaRow(it) {
     return el("div", { class: "meta-row" }, provBadge(it.provenance, it.source), confBar(it.source === "none" ? null : it.confidence),
       it.validation && it.validation.status !== "ok" ? el("span", { class: `badge v-${it.validation.status}`, text: it.validation.status }) : null);
   }
@@ -435,85 +441,167 @@
     s.addEventListener("change", () => onchange(s.value));
     return s;
   }
-  function fieldBox(label, node) { return el("label", { class: "field" }, label, node); }
-  // local edits of group items for the current step
+  // free-text input with suggestions; typing never re-renders (keeps focus)
+  function textInput(value, onInput, { placeholder = "", list, cls = "", onCommit } = {}) {
+    const i = el("input", { class: `input ${cls}`, type: "text", value: value ?? "", placeholder, list: list || null, spellcheck: "false" });
+    i.addEventListener("input", () => onInput(i.value));
+    if (onCommit) i.addEventListener("change", () => onCommit(i.value));
+    return i;
+  }
+  function datalists() {
+    const sug = S.draft.suggestions || {};
+    const mk = (id, vals) => el("datalist", { id }, (vals || []).map((v) => el("option", { value: v })));
+    return el("div", { class: "hidden" }, mk("dl-label", sug.label), mk("dl-assay", sug.assay_label), mk("dl-omics", sug.omics_type),
+      mk("dl-software", sug.source_software), mk("dl-sample-label", sug.sample_label));
+  }
+  function fieldBox(label, node, cls = "") { return el("label", { class: `field ${cls}` }, el("span", { class: "field-k", text: label }), node); }
   function local(gid) { S.local.items = S.local.items || {}; return (S.local.items[gid] = S.local.items[gid] || {}); }
   function cur(gid, f) { const l = S.local.items?.[gid]; return l && f in l ? l[f] : D(gid)[f]; }
   function colsText(g) { return g.n_columns <= 3 ? g.columns.join(", ") : `${g.columns.slice(0, 2).join(", ")} … ${g.columns[g.columns.length - 1]} (${g.n_columns} columns)`; }
+  const aiReady = () => S.draft.ai.enabled && S.draft.ai.available;
+  const assayLabels = () => S.draft.assays.map((a, k) => S.local.assays?.[k]?.assay_label ?? a.assay_label);
 
   function roleSelect(gid, allowed) {
     const roles = allowed || S.vocab.column_role.filter((r) => r !== "unresolved");
-    return select(roles, cur(gid, "role") === "unresolved" ? null : cur(gid, "role"), (v) => { local(gid).role = v; if (v !== D(gid).role) local(gid).kind = null; renderGuide(); },
-      { placeholder: "choose a role…", bad: cur(gid, "role") === "unresolved" });
+    const v = cur(gid, "role");
+    return select(roles.includes(v) || v === "unresolved" ? roles : [...roles, v], v === "unresolved" ? null : v,
+      (x) => { local(gid).role = x; renderGuide(); }, { placeholder: "choose a role…", bad: v === "unresolved", labels: (r) => pretty(r) });
   }
-  function kindSelect(gid) {
-    const role = cur(gid, "role");
-    const opts = role === "feature_annotation" ? S.vocab.feature_annotation_kind : role === "sample_metadata" ? S.vocab.sample_metadata_kind : null;
-    if (!opts) return null;
-    const v = cur(gid, "kind");
-    return select(opts, opts.includes(v) ? v : null, (x) => { local(gid).kind = x; renderGuide(); }, { placeholder: "choose a kind…", bad: !opts.includes(v) });
+  function auditKindSelect(gid) {
+    const v = cur(gid, "audit_kind");
+    return select(S.vocab.audit_kind, S.vocab.audit_kind.includes(v) ? v : null, (x) => { local(gid).audit_kind = x; renderGuide(); },
+      { placeholder: "what is it for the audit?", bad: !S.vocab.audit_kind.includes(v) });
   }
-  function reconsiderBox(gid) {
-    if (!(S.draft.ai.enabled && S.draft.ai.available)) return null;
-    const open = S.local.reconsider === gid;
-    if (!open) return el("button", { class: "linkbtn", type: "button", text: "Ask AI to reconsider", onclick: () => { S.local.reconsider = gid; renderGuide(); } });
-    const inp = el("input", { class: "input", type: "text", placeholder: "Optional hint, e.g. 'these are ion adducts'" });
-    setTimeout(() => inp.focus(), 0);
-    return el("div", { class: "reconsider" }, inp, el("button", { class: "btn btn-sm", type: "button", text: "Ask", onclick: async () => {
-      await busy("Asking the AI to reconsider", async (pid) => {
-        try {
-          const r = await api("/api/reconsider", { session_id: S.session.session_id, group_id: gid, user_hint: inp.value, progress_id: pid });
-          S.draft = r.draft;
-          if (r.digest) S.digests = [r.digest];
-          S.local = {};
-        } catch (err) { S.local.error = err.message; }
-      });
-      renderAll();
-    } }));
+  function keepBox(gid) {
+    const cb = el("input", { type: "checkbox", checked: cur(gid, "keep") !== false });
+    cb.addEventListener("change", () => { local(gid).keep = cb.checked; });
+    return el("label", { class: "check" }, cb, "keep in the outputs");
+  }
+  // suspect flag: which value means "flagged"?
+  const encV = (v) => JSON.stringify(v), decV = (s) => JSON.parse(s);
+  function suspectControls(gid) {
+    const it = D(gid), on = !!cur(gid, "marks_rows_as_suspect");
+    const cb = el("input", { type: "checkbox", checked: on });
+    cb.addEventListener("change", () => { local(gid).marks_rows_as_suspect = cb.checked; renderGuide(); });
+    const out = [el("label", { class: "check" }, cb, "marks rows as suspect (decoy, contaminant…)")];
+    if (!on) return out;
+    const counts = it.flag_values || it.value_counts;
+    if (!counts) {
+      out.push(el("div", { class: "item-sub", text: G(gid).n_columns > 1 ? "Several columns: record as a flag group; nothing is removed."
+        : "This column has more than 5 distinct values, so no single ‘flagged’ value can be chosen. It is recorded as a flag column; nothing is removed." }));
+      return out;
+    }
+    const fv = cur(gid, "flagged_value");
+    const opts = Object.keys(counts);
+    const s = el("select", { class: `select ${fv == null ? "bad" : ""}` },
+      fv == null ? el("option", { value: "", text: "which value means ‘flagged’?", selected: true, disabled: true }) : null,
+      opts.map((v) => el("option", { value: encV(v), selected: v === fv, text: `${v === "" ? "(empty)" : v} — ${counts[v]} row(s)` })));
+    s.addEventListener("change", () => { local(gid).flagged_value = decV(s.value); renderGuide(); });
+    out.push(fieldBox("Flagged value", s, "full"));
+    if (fv != null) out.push(el("div", { class: "notice", text: `${counts[fv] ?? 0} row(s) flagged — nothing is removed now; recorded for the audit step.` }));
+    return out;
   }
 
-  // generic item editor (annotations, sample info, other numeric)
-  function itemCard(gid, { roles, extra } = {}) {
-    const it = D(gid), g = G(gid);
-    const unres = cur(gid, "role") === "unresolved" || (["feature_annotation", "sample_metadata"].includes(cur(gid, "role")) && !cur(gid, "kind"));
-    const draftUnres = it.role === "unresolved" || (["feature_annotation", "sample_metadata"].includes(it.role) && !it.kind);
-    const touched = S.local.items?.[gid] && Object.keys(S.local.items[gid]).length > 0;
-    const editing = S.editing || unres || draftUnres || touched || it.validation?.status === "contradicted";
-    const kids = [el("div", { class: "item-head" }, el("span", { class: "item-name", text: colsText(g) }), metaRow(it))];
-    if (!editing) {
-      kids.push(el("div", { class: "item-sub", text: roleLabel({ ...it, role: cur(gid, "role"), kind: cur(gid, "kind") }) + (cur(gid, "keep") === false ? " · dropped" : "") }));
-    } else {
-      const ctr = el("div", { class: "item-controls" }, roleSelect(gid, roles), kindSelect(gid) || el("span"));
-      if (cur(gid, "kind") === "timepoint") ctr.append(el("div", { class: "full" }, select(S.vocab.timepoint_detail, cur(gid, "detail"), (v) => { local(gid).detail = v; }, { placeholder: "time point detail…" })));
-      if (["feature_annotation", "sample_metadata"].includes(cur(gid, "role"))) {
-        const cb = el("input", { type: "checkbox", checked: cur(gid, "keep") !== false });
-        cb.addEventListener("change", () => { local(gid).keep = cb.checked; });
-        ctr.append(el("label", { class: "keep full" }, cb, "keep in the outputs"));
-      }
-      kids.push(ctr);
+  function askAI(gids, hint, label) {
+    return busy(label || "Asking the AI to reconsider", async (pid) => {
+      try {
+        const r = await api("/api/reconsider", { session_id: S.session.session_id, group_ids: gids, user_hint: hint, progress_id: pid });
+        S.draft = r.draft;
+        if (r.session) S.session = r.session;
+        if (r.digest) S.digests = [r.digest];
+        // keep what the user already edited in this step; everything else shows the new proposal
+        S.local = { items: S.local.items, samples: S.local.samples, rules: S.local.rules,
+                    note: r.questions?.length ? "The AI asks: " + r.questions.map((q) => q.question).join(" ") : null };
+      } catch (err) { S.local.error = err.message; }
+    }).then(() => renderAll());
+  }
+  function reconsiderOne(gid) {
+    if (!aiReady()) return null;
+    const open = S.local.reconsider === gid;
+    if (!open) return el("button", { class: "linkbtn", type: "button", text: "Ask the AI about this one", onclick: () => { S.local.reconsider = gid; renderGuide(); } });
+    const inp = textInput("", () => {}, { placeholder: "What's wrong? e.g. ‘these are ion adducts, not names’", cls: "grow" });
+    setTimeout(() => inp.focus(), 0);
+    return el("div", { class: "reconsider" }, inp, el("button", { class: "btn btn-sm", type: "button", text: "Ask", onclick: () => askAI([gid], inp.value) }));
+  }
+  // the visible per-step "disagree" box
+  const touched = (gid) => Object.keys(S.local.items?.[gid] || {}).length > 0;
+  function disagreeBox(gids, what) {
+    gids = gids.filter((g) => D(g));
+    if (!gids.length) return null;
+    const ask = gids.filter((g) => !touched(g));
+    const box = el("div", { class: "disagree" });
+    const head = el("div", { class: "disagree-head" }, el("strong", { text: "Disagree? Tell the AI what's wrong" }));
+    if (!aiReady()) {
+      box.append(head, el("p", { class: "item-sub", text: "The AI is off, so there is nothing to ask. Every field above is editable: change it directly and confirm." }));
+      return box;
     }
-    if (extra) kids.push(extra);
-    kids.push(el("div", { class: "item-sub", text: it.hint || "" }), evidence(it.evidence), warnList(it.validation, it.claimed));
-    if (it.source === "ai" || it.role === "unresolved") kids.push(el("div", { style: "margin-top:6px" }, reconsiderBox(gid)));
-    return el("div", { class: `item ${unres ? "unres" : ""}`, onmouseenter: () => hoverGroup(gid, true), onmouseleave: () => hoverGroup(gid, false) }, kids);
+    const ta = el("textarea", { class: "input", rows: 2, placeholder: `e.g. “the iron column is a clinical value, not a metabolite” or “these are raw intensities, the LFQ block is the main one”` });
+    ta.value = S.local.feedback || "";
+    ta.addEventListener("input", () => { S.local.feedback = ta.value; });
+    const kept = gids.length - ask.length;
+    box.append(head,
+      el("p", { class: "item-sub", text: `You can edit any field above yourself. Or describe what is wrong: the AI re-proposes the ${ask.length} ${what} in this step with your note, and you still confirm the result.`
+        + (kept ? ` The ${kept} you already edited are kept as you set them.` : "") }),
+      ta,
+      el("div", { class: "disagree-actions" }, el("button", { class: "btn btn-sm", type: "button", text: "Ask the AI again", onclick: () => {
+        if (!ta.value.trim()) { S.local.error = "Write a short note about what is wrong first."; renderGuide(); return; }
+        if (!ask.length) { S.local.error = "You have edited every item in this step yourself; just confirm."; renderGuide(); return; }
+        askAI(ask, ta.value, "Asking the AI to reconsider this step");
+      } })));
+    return box;
+  }
+
+  // generic item editor (annotations, sample info, other columns)
+  function itemCard(gid, { roles } = {}) {
+    const it = D(gid), g = G(gid), role = cur(gid, "role");
+    const unres = role === "unresolved" || (role === "sample_metadata" && !S.vocab.audit_kind.includes(cur(gid, "audit_kind")))
+      || (cur(gid, "marks_rows_as_suspect") && (it.flag_values || it.value_counts) && cur(gid, "flagged_value") == null);
+    const ctr = el("div", { class: "item-controls" },
+      fieldBox("Role", roleSelect(gid, roles)),
+      fieldBox("What it is (your words)", textInput(cur(gid, "label"), (v) => { local(gid).label = v; }, { placeholder: "e.g. gene symbol", list: "dl-label" })));
+    if (role === "sample_metadata") {
+      ctr.append(fieldBox("Audit kind", auditKindSelect(gid)),
+        fieldBox("Detail (optional)", textInput(cur(gid, "detail"), (v) => { local(gid).detail = v; }, { placeholder: cur(gid, "audit_kind") === "timepoint" ? "e.g. ordinal label, days, date" : "optional" })));
+    }
+    if (role === "feature_annotation") ctr.append(el("div", { class: "full" }, suspectControls(gid)));
+    if (role === "value") {
+      ctr.append(fieldBox("Assay", textInput(cur(gid, "assay_label") || assayLabels()[0], (v) => { local(gid).assay_label = v; }, { list: "dl-assay" })),
+        fieldBox("Block", select(S.vocab.block_role, cur(gid, "block_role") || "auxiliary", (v) => { local(gid).block_role = v; renderGuide(); })));
+    }
+    if (["feature_annotation", "sample_metadata"].includes(role)) ctr.append(el("div", { class: "full" }, keepBox(gid)));
+    return el("div", { class: `item ${unres ? "unres" : ""}`, onmouseenter: () => hoverGroup(gid, true), onmouseleave: () => hoverGroup(gid, false) },
+      el("div", { class: "item-head" }, el("span", { class: "item-name", text: colsText(g) }), metaRow(it)),
+      ctr,
+      el("div", { class: "item-sub", text: it.hint || "" }), evidence(it.evidence), warnList(it.validation, it.claimed),
+      el("div", { class: "item-foot" }, reconsiderOne(gid)));
   }
   function hoverGroup(gid, on) {
     $("pv").querySelectorAll(`th[data-gid="${gid}"] .chip`).forEach((c) => c.style.outline = on ? "1px solid #fff" : "");
   }
+  const ITEM_FIELDS = ["role", "label", "assay_label", "block_role", "audit_kind", "marks_rows_as_suspect", "flagged_value", "detail", "keep"];
   function itemDecisions(gids) {
     return gids.map((gid) => {
       const l = S.local.items?.[gid] || {};
       const out = { group_id: gid };
-      for (const f of ["role", "kind", "detail", "keep", "block_role", "measurement_type", "scale", "omics_type", "label"]) if (f in l) out[f] = l[f];
+      for (const f of ITEM_FIELDS) if (f in l) out[f] = l[f];
       return out;
     }).filter((d) => Object.keys(d).length > 1);
+  }
+  function checkItems(gids) {
+    for (const gid of gids) {
+      const role = cur(gid, "role"), name = G(gid).columns[0];
+      if (role === "unresolved") throw new Error(`Choose a role for ${name}.`);
+      if (role === "sample_metadata" && !S.vocab.audit_kind.includes(cur(gid, "audit_kind"))) throw new Error(`Choose an audit kind for ${name}.`);
+      if (cur(gid, "marks_rows_as_suspect") && (D(gid).flag_values || D(gid).value_counts) && cur(gid, "flagged_value") == null)
+        throw new Error(`Choose which value of ${name} means ‘flagged’.`);
+    }
   }
 
   // ------------------------------------------------------------ steps
   const LAYOUT_TEXT = {
-    samples_in_columns: ["Samples in columns", "Each row looks like one feature, and each sample has its own column. Is that right?"],
-    samples_in_rows: ["Samples in rows", "Each row looks like one sample, and each feature has its own column. Is that right?"],
-    long: ["Long table", "Each row looks like one measurement: a feature, a sample and a single value. Is that right?"],
+    samples_in_columns: ["Samples in columns", "Each row looks like one feature, and each sample has its own column."],
+    samples_in_rows: ["Samples in rows", "Each row looks like one sample, and each feature has its own column."],
+    long: ["Long table", "Each row looks like one measurement: a feature, a sample and a single value."],
   };
   function layoutIcon(kind) {
     const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
@@ -524,36 +612,55 @@
     else { for (let r = 0; r < 5; r++) { rect(0, r * 6.2, 14, 5, "#fff"); rect(16, r * 6.2, 14, 5, "#d9c7a3"); rect(32, r * 6.2, 12, 5, "#ff8a2a"); } }
     return svg;
   }
-
+  function scopeNotice(a) {
+    if (!a || !["no", "unsure"].includes(a.in_supported_scope)) return null;
+    return el("div", { class: "notice accent" }, `Recognized as ${a.omics_type || "unknown"} — not yet supported by PRISM's audit`,
+      a.in_supported_scope === "unsure" ? " (the AI is not sure)" : "", ". This is a notice, not a block: you can finish this step and download the files.",
+      a.scope_reason ? el("div", { class: "item-sub", text: a.scope_reason }) : null);
+  }
+  function assayCard(a, k) {
+    S.local.assays = S.local.assays || {};
+    const l = (S.local.assays[k] = S.local.assays[k] || {});
+    const v = (f) => (f in l ? l[f] : a[f]);
+    const set = (f) => (x) => { l[f] = x; };
+    const nBlocks = Object.values(S.draft.groups).filter((it) => it.role === "value" && it.assay_label === a.assay_label).length;
+    return el("div", { class: "block-card" },
+      el("div", { class: "item-head" }, el("h4", { text: `Assay ${k + 1}` }, el("span", { class: "item-sub", text: `  ${nBlocks} value block(s)` })), metaRow(a)),
+      el("div", { class: "item-controls" },
+        fieldBox("Assay label", textInput(v("assay_label"), set("assay_label"), { list: "dl-assay" })),
+        fieldBox("Omics type (your words)", textInput(v("omics_type") === "unknown" ? "" : v("omics_type"), set("omics_type"), { placeholder: "e.g. proteomics, 16S microbiome", list: "dl-omics" })),
+        fieldBox("Source software", textInput(v("source_software") === "unknown" ? "" : v("source_software"), set("source_software"), { placeholder: "unknown", list: "dl-software" })),
+        fieldBox("In PRISM's supported scope?", select(S.vocab.in_supported_scope, v("in_supported_scope"), (x) => { l.in_supported_scope = x; renderGuide(); }))),
+      scopeNotice({ ...a, ...l }), evidence(a.evidence));
+  }
   function stepLayout() {
-    const d = S.draft, lay = S.local.layout ?? d.layout.value, om = S.local.omics ?? d.omics_type.value,
-          sw = S.local.software ?? d.source_software.value;
-    const known = LAYOUT_TEXT[lay];
+    const d = S.draft, lay = S.local.layout ?? d.layout.value, known = LAYOUT_TEXT[lay];
     const body = [];
-    if (d.signature) body.push(el("div", { class: "notice", text: `Recognized as ${d.signature.platform} output (exact column signature, no AI needed for this).` }));
-    const editing = S.editing || !LAYOUT_TEXT[d.layout.value] || S.local.layout != null || !S.vocab.omics_type.includes(om) || om === "unknown";
-    if (editing) {
-      body.push(el("div", { class: "opt-cards" }, Object.entries(LAYOUT_TEXT).map(([k, [t, q]]) => el("button", {
-        type: "button", class: `opt-card ${lay === k ? "sel" : ""}`, onclick: () => { S.local.layout = k; renderGuide(); } },
-        layoutIcon(k), el("strong", { text: t }), q.replace(" Is that right?", "")))));
-      if (d.layout.hint) body.push(el("div", { class: "notice", text: "Hint from the data: " + d.layout.hint }));
-      body.push(el("div", { class: "row2" },
-        fieldBox("Omics type", select(S.vocab.omics_type, om, (v) => { S.local.omics = v; renderGuide(); })),
-        fieldBox("Source software", (() => { const i = el("input", { class: "input", value: sw === "unknown" ? "" : sw, placeholder: "unknown" }); i.addEventListener("input", () => { S.local.software = i.value; }); return i; })())));
-    } else {
-      body.push(el("div", { class: "answer" }, el("div", { class: "opt-card sel", style: "cursor:default" }, layoutIcon(lay), el("strong", { text: known[0] })),
-        el("div", { class: "meta-row" }, `Omics type: `, el("b", { text: pretty(om) }), " · Software: ", el("b", { text: sw || "unknown" })),
-        metaRow(d.layout), evidence(d.layout.evidence), warnList(d.layout.validation)));
-    }
-    if (om && !S.vocab.supported_downstream.includes(om)) body.push(el("div", { class: "notice accent", text: S.unsupported }));
+    if (d.signature_hint) body.push(el("div", { class: "notice", text: `Known format: ${d.signature_hint}. This is only a hint${d.ai.used ? " given to the AI" : "; it pre-filled the proposal below"}.` }));
+    body.push(el("div", { class: "opt-cards" }, Object.entries(LAYOUT_TEXT).map(([k, [t, q]]) => el("button", {
+      type: "button", class: `opt-card ${lay === k ? "sel" : ""}`, onclick: () => { S.local.layout = k; renderGuide(); } },
+      layoutIcon(k), el("strong", { text: t }), q))));
+    if (S.local.layout && S.local.layout !== d.layout.value) body.push(el("div", { class: "notice", text: "Changing the layout re-proposes every column: steps you confirmed are asked again." }));
+    body.push(el("div", { class: "meta-row" }, metaRow(d.layout)), evidence(d.layout.evidence), warnList(d.layout.validation));
+    if (d.layout.hint) body.push(el("div", { class: "item-sub", text: "From the data: " + d.layout.hint }));
+    body.push(el("div", { class: "section-label", text: d.assays.length > 1 ? `${d.assays.length} assays in this file` : "What was measured" }));
+    body.push(el("div", {}, d.assays.map(assayCard)));
+    if (S.scope) body.push(el("details", { class: "saw" }, el("summary", { text: "What PRISM currently supports" }), el("p", { class: "item-sub", text: S.scope })));
     return {
-      title: known ? known[1] : "How is this table organised?",
-      question: known ? null : "Pick the layout that matches your file. Features usually outnumber samples.",
+      title: known ? `${known[0]}: is that right?` : "How is this table organised?",
+      question: known ? "Check the layout and describe what was measured, in your own words. Everything here is editable." : "Pick the layout that matches your file. Features usually outnumber samples.",
       body,
       decision: () => {
         if (!LAYOUT_TEXT[lay]) throw new Error("Choose one of the three layouts.");
-        if (!om || !S.vocab.omics_type.includes(om)) throw new Error("Choose an omics type.");
-        return { layout: lay, omics_type: om, source_software: sw || "unknown" };
+        const assays = d.assays.map((a, k) => {
+          const l = S.local.assays?.[k] || {};
+          const x = { assay_label: l.assay_label ?? a.assay_label, omics_type: l.omics_type ?? a.omics_type,
+                      source_software: l.source_software ?? a.source_software, in_supported_scope: l.in_supported_scope ?? a.in_supported_scope,
+                      scope_reason: a.scope_reason };
+          if (!String(x.assay_label || "").trim()) throw new Error(`Give assay ${k + 1} a label.`);
+          return x;
+        });
+        return { layout: lay, assays };
       },
     };
   }
@@ -573,22 +680,17 @@
     const sel = S.local.fid ?? d.feature_identity.group_ids;
     const fi = d.feature_identity;
     const labels = sel.map((g) => G(g)?.columns[0]).filter(Boolean);
-    const body = [];
-    const editingFid = S.editing || S.local.fid != null || !d.feature_identity.group_ids.length;
-    if (!editingFid) {
-      body.push(el("div", { class: "answer" }, el("div", { class: "val" }, labels.map((l, k) => [k ? " + " : "", code(l)])),
-        metaRow(fi), evidence(fi.evidence), warnList(fi.validation)));
-    } else {
-      body.push(el("div", { class: "section-label", text: "Tick one column, or several for a composite key (e.g. m/z + RT)" }));
-      body.push(el("div", { class: "items" }, candidateIdGroups().map((g) => {
-        const cb = el("input", { type: "checkbox", checked: sel.includes(g.group_id) });
-        cb.addEventListener("change", () => { const s = new Set(S.local.fid ?? d.feature_identity.group_ids); cb.checked ? s.add(g.group_id) : s.delete(g.group_id); S.local.fid = [...s]; renderGuide(); });
-        return el("label", { class: "item", style: "display:flex;gap:10px;align-items:center;cursor:pointer" }, cb,
-          el("span", {}, el("span", { class: "item-name", text: g.columns[0] }), el("div", { class: "item-sub", text: D(g.group_id).hint || "" })));
-      })));
-      body.push(warnList(fi.validation));
-    }
-    let sid = S.local.sid ?? d.sample_id_group.value;
+    const body = [el("div", { class: "meta-row" }, metaRow(fi)), evidence(fi.evidence), warnList(fi.validation),
+      el("div", { class: "section-label", text: "Tick one column, or several for a composite key (e.g. m/z + RT)" })];
+    body.push(el("div", { class: "items" }, candidateIdGroups().map((g) => {
+      const cb = el("input", { type: "checkbox", checked: sel.includes(g.group_id) });
+      cb.addEventListener("change", () => { const s = new Set(S.local.fid ?? d.feature_identity.group_ids); cb.checked ? s.add(g.group_id) : s.delete(g.group_id); S.local.fid = [...s]; renderGuide(); });
+      const shape = (g.profile?.value_shapes || [])[0];
+      return el("label", { class: `item pick ${sel.includes(g.group_id) ? "on" : ""}` }, cb,
+        el("span", {}, el("span", { class: "item-name", text: g.columns[0] }), D(g.group_id).label ? el("span", { class: "item-sub", text: ` · ${D(g.group_id).label}` }) : null,
+          el("div", { class: "item-sub", text: (D(g.group_id).hint || "") + (shape ? ` Format: ${shape.shape}` : "") })));
+    })));
+    const sid = S.local.sid ?? d.sample_id_group.value;
     if (lay === "long") {
       body.push(fieldBox("Column naming the sample on each row", select(candidateIdGroups().map((g) => g.group_id), sid,
         (v) => { S.local.sid = v; renderGuide(); }, { placeholder: "choose…", labels: (g) => G(g).columns[0] })));
@@ -598,6 +700,7 @@
       title: sel.length ? (sel.length > 1 ? "These columns together identify each feature. Confirm?" : "This column uniquely identifies each feature. Confirm?") : "Which column identifies each feature?",
       question: sel.length ? el("span", {}, labels.map((l, k) => [k ? " + " : "", code(l)]), ". Duplicates or empty IDs are only reported; nothing is merged or removed.") : "Tick the identifier column(s).",
       body,
+      disagree: [candidateIdGroups().map((g) => g.group_id), "candidate ID columns"],
       decision: () => {
         if (!sel.length) throw new Error("Choose at least one column.");
         const dec = { feature_identity: { group_ids: sel } };
@@ -609,19 +712,17 @@
 
   function stepAnnotations() {
     const gids = focusGroups("annotations");
-    const flags = gids.filter((g) => (cur(g, "kind") || "").startsWith("flag_"));
     const body = [];
     if (!gids.length) body.push(el("p", { class: "q", text: "No annotation columns in this file." }));
-    for (const gid of flags) {
-      const n = S.draft.flags?.[gid];
-      if (n != null) body.push(el("div", { class: "notice", text: `${G(gid).columns[0]}: ${n} row(s) are flagged as ${pretty(cur(gid, "kind")).replace("flag ", "")}. Nothing is removed now; flagged rows are recorded for the audit step.` }));
-    }
-    body.push(el("div", { class: "items" }, gids.map((g) => itemCard(g))));
+    const flagged = gids.filter((g) => D(g).marks_rows_as_suspect);
+    if (flagged.length) body.push(el("div", { class: "notice", text: `${flagged.length} column(s) mark rows as suspect. Choose which value means ‘flagged’; nothing is removed now.` }));
+    body.push(el("div", { class: "items" }, gids.map((g) => itemCard(g, { roles: ["feature_annotation", "feature_id", "sample_metadata", "value", "ignore"] }))));
     return {
-      title: `${gids.length} column(s) describe the features. Are these labels right?`,
-      question: "Each gets a kind (gene symbol, m/z, flag…). Everything is kept unless you untick it.",
+      title: `${gids.length} column(s) describe the features. Are these right?`,
+      question: "Each shows the AI's description in plain words. Edit any label, role or flag directly; everything is kept unless you untick it.",
       body,
-      decision: () => ({ items: itemDecisions(gids) }),
+      disagree: [gids, "annotation columns"],
+      decision: () => { checkItems(gids); return { items: itemDecisions(gids) }; },
     };
   }
 
@@ -641,36 +742,34 @@
 
   function valueCard(gid) {
     const it = D(gid), g = G(gid), p = g.profile || {}, lay = layout();
-    const br = cur(gid, "block_role") || "auxiliary", mt = cur(gid, "measurement_type"), sc = cur(gid, "scale"), om = cur(gid, "omics_type");
+    const role = cur(gid, "role"), br = cur(gid, "block_role") || "auxiliary";
     const n = g.n_columns;
-    const voice = lay === "samples_in_rows"
-      ? `These ${n} columns look like ${n} features measured in every sample${it.label ? ` (${it.label})` : ""}.`
-      : `These ${n} columns look like one measurement per sample${it.label ? ` (${it.label})` : ""}.`;
-    const look = `Median ${fmtNum(p.median)}, range ${fmtNum(p.min)}–${fmtNum(p.max)}, ${pct(p.frac_zero)} zeros, ${pct(p.frac_na)} missing — this looks like ${sc === "linear" ? "raw, linear-scale" : pretty(sc || "unknown") + "-scale"} ${pretty(mt || "values")}.`;
+    const voice = lay === "samples_in_rows" ? `${n} columns: ${n} features measured in every sample.` : `${n} columns: one measurement per sample.`;
     const seg = el("div", { class: "seg orange" }, S.vocab.block_role.map((r) => el("button", { type: "button", class: br === r ? "on" : "", text: r,
-      title: S.defs[r] || "", onclick: () => { local(gid).block_role = r; renderGuide(); } })));
+      title: S.defs[r] || "", onclick: () => { local(gid).block_role = r; if (cur(gid, "role") !== "value") local(gid).role = "value"; renderGuide(); } })));
     const canvas = el("canvas", { class: "hist" });
     setTimeout(() => drawHist(canvas, g.histogram), 0);
-    const touched = S.local.items?.[gid] && ["measurement_type", "scale", "omics_type", "role"].some((f) => f in S.local.items[gid]);
-    const editing = S.editing || it.role === "unresolved" || touched || it.validation?.status === "contradicted";
-    const controls = editing ? el("div", { class: "item-controls" },
-      fieldBox("Measurement", select(S.vocab.measurement_type, mt, (v) => { local(gid).measurement_type = v; renderGuide(); }, { placeholder: "choose…" })),
-      fieldBox("Scale", select(S.vocab.scale, sc, (v) => { local(gid).scale = v; renderGuide(); }, { placeholder: "choose…" })),
-      fieldBox("Omics type", select(S.vocab.omics_type, om, (v) => { local(gid).omics_type = v; renderGuide(); })),
-      fieldBox("Role", roleSelect(gid))) : null;
     const samples = lay === "samples_in_columns" ? (S.draft.blocks_samples?.[gid] || []) : [];
-    return el("div", { class: `block-card ${br === "primary" ? "primary" : ""}`, onmouseenter: () => hoverGroup(gid, true), onmouseleave: () => hoverGroup(gid, false) },
-      el("div", { class: "item-head" }, el("h4", {}, it.label && it.label !== "values" ? it.label : (g.pattern ? g.pattern.text.trim() : `${n} numeric columns`),
-        el("span", { class: "item-sub", text: `  ${pretty(om || "unknown")} · ${n} columns` })), metaRow(it)),
-      el("div", { class: "q", style: "margin:6px 0 0" }, voice, " ", look, " Correct?"),
-      seg, controls,
+    const computed = el("div", { class: "computed" },
+      el("div", { class: "section-label", text: "Computed from the data" }),
       canvas,
       el("div", { class: "stats" }, [["min", p.min], ["p1", p.p1], ["median", p.median], ["p99", p.p99], ["max", p.max],
-        ["zeros", pct(p.frac_zero)], ["missing", pct(p.frac_na)], ["whole numbers", p.integer_valued ? "yes" : "no"]]
+        ["zeros", pct(p.frac_zero)], ["missing", pct(p.frac_na)], ["whole numbers", p.integer_valued ? "yes" : "no"], ["span", p.log10_span != null ? `${fmtNum(p.log10_span)} decades` : "—"]]
         .map(([k, v]) => el("div", {}, el("span", { text: k }), el("b", { text: typeof v === "number" ? fmtNum(v) : v })))),
-      samples.length ? el("div", { class: "item-sub", style: "margin-top:6px" }, `Samples: ${samples.slice(0, 6).join(", ")}${samples.length > 6 ? ` … (${samples.length})` : ""}`) : null,
+      samples.length ? el("div", { class: "item-sub", style: "margin-top:6px" }, `Samples: ${samples.slice(0, 6).join(", ")}${samples.length > 6 ? ` … (${samples.length})` : ""}`) : null);
+    const described = el("div", { class: "described" },
+      el("div", { class: "section-label", text: "Described by " + (it.source === "ai" ? "the AI" : it.source === "computed" ? "the known format" : "you") }),
+      fieldBox("What these values are (your words)", textInput(cur(gid, "label"), (v) => { local(gid).label = v; }, { placeholder: "e.g. LFQ intensity, apparently linear", list: "dl-label" })),
+      fieldBox("Assay", textInput(cur(gid, "assay_label") || assayLabels()[0], (v) => { local(gid).assay_label = v; }, { list: "dl-assay" })),
+      fieldBox("Role", roleSelect(gid)));
+    return el("div", { class: `block-card ${br === "primary" && role === "value" ? "primary" : ""} ${role === "unresolved" ? "unres" : ""}`, onmouseenter: () => hoverGroup(gid, true), onmouseleave: () => hoverGroup(gid, false) },
+      el("div", { class: "item-head" }, el("h4", {}, cur(gid, "label") || (g.pattern ? g.pattern.text.trim() : `${n} numeric columns`),
+        el("span", { class: "item-sub", text: `  ${colsText(g)}` })), metaRow(it)),
+      el("div", { class: "q", style: "margin:6px 0 8px" }, voice, " Which block is the main matrix?"),
+      seg,
+      el("div", { class: "side-by-side" }, described, computed),
       evidence(it.evidence), warnList(it.validation, it.claimed),
-      it.source === "ai" || it.role === "unresolved" ? el("div", { style: "margin-top:6px" }, reconsiderBox(gid)) : null);
+      el("div", { class: "item-foot" }, reconsiderOne(gid)));
   }
 
   function stepValues() {
@@ -679,17 +778,22 @@
     const others = all.filter((g) => !blocks.includes(g));
     const body = [el("div", {}, blocks.map(valueCard))];
     if (others.length) {
-      body.push(el("div", { class: "section-label", text: "Numeric columns that don't look like features" }));
-      body.push(el("p", { class: "q", text: "Covariates and technical values (age, CD4 count, iron, scale factors…) go to Sample info. Change any of them if needed." }));
-      body.push(el("div", { class: "items" }, others.map((g) => itemCard(g, { roles: ["sample_metadata", "value", "ignore", "feature_annotation"] }))));
+      body.push(el("div", { class: "section-label", text: "Other numeric columns" }));
+      body.push(el("p", { class: "q", text: "Covariates and technical values (age, CD4 count, iron, scale factors…) usually describe samples. Change any of them if needed." }));
+      body.push(el("div", { class: "items" }, others.map((g) => itemCard(g, { roles: ["sample_metadata", "value", "feature_annotation", "ignore"] }))));
     }
-    const prim = blocks.filter((g) => (cur(g, "block_role")) === "primary");
     return {
       title: blocks.length > 1 ? `${blocks.length} candidate measurement blocks. Which is the main one?` : "Is this the measurement block?",
-      question: "Mark one primary block per omics type; the others can stay as auxiliary (kept alongside) or be excluded.",
+      question: "Mark one primary block per assay; the others stay as auxiliary (kept alongside) or are excluded. The AI's description sits beside the computed profile: correct it if they don't match.",
       body,
+      disagree: [all, "column groups"],
       decision: () => {
-        if (!prim.length) throw new Error("Mark at least one block as primary.");
+        checkItems(all);
+        const labels = new Set(all.filter((g) => cur(g, "role") === "value").map((g) => cur(g, "assay_label") || assayLabels()[0]));
+        for (const a of labels) {
+          const prim = all.filter((g) => cur(g, "role") === "value" && (cur(g, "assay_label") || assayLabels()[0]) === a && cur(g, "block_role") === "primary");
+          if (prim.length > 1) throw new Error(`Only one primary block per assay (${a}).`);
+        }
         return { items: itemDecisions(all) };
       },
     };
@@ -708,6 +812,20 @@
     return el("div", {}, el("div", { class: "ids" }, shown.map((x, k) => [k ? ", " : "", el("span", { class: counts[x] > 1 ? "dup" : "", text: x })])),
       el("div", { class: "item-sub", text: `${ids.length} sample IDs${ids.length > 13 ? ` (… ${ids.length - 13} more)` : ""}${dup.length ? ` · ${dup.length} duplicated: ${dup.slice(0, 5).join(", ")}` : " · all unique"}` }));
   }
+  function sampleRow(sid) {
+    const st = S.draft.samples[sid];
+    S.local.samples = S.local.samples || {};
+    const l = S.local.samples[sid] || {};
+    const v = (f) => (f in l ? l[f] : st[f]);
+    const set = (f, x) => { S.local.samples[sid] = { ...(S.local.samples[sid] || {}), [f]: x }; };
+    const cb = el("input", { type: "checkbox", checked: v("is_study_sample") });
+    cb.addEventListener("change", () => { set("is_study_sample", cb.checked); renderGuide(); });
+    return el("div", { class: `sample-row ${v("is_study_sample") ? "" : "nonstudy"}`, title: st.evidence || "" },
+      el("span", { class: "sid", text: sid }),
+      textInput(v("label"), (x) => set("label", x), { list: "dl-sample-label", placeholder: "label" }),
+      el("label", { class: "check" }, cb, "study sample"),
+      provBadge(st.provenance, st.source));
+  }
   function stepSamples() {
     const d = S.draft, lay = layout(), body = [];
     if (lay === "samples_in_columns") {
@@ -717,40 +835,40 @@
         const base = d.sample_rules[gid] || { strip_prefix: "", strip_suffix: "" };
         const r = S.local.rules[gid] || { strip_prefix: base.strip_prefix, strip_suffix: base.strip_suffix };
         const ids = G(gid).indices.map((i) => applyRule(header(i), r));
-        const mk = (k, ph) => { const i = el("input", { class: "input", value: r[k], placeholder: ph }); i.addEventListener("input", () => { S.local.rules[gid] = { ...r, [k]: i.value }; renderGuideKeepFocus(i); }); return i; };
+        const prev = el("div", {}, idPreview(ids));
+        const mk = (k, ph) => textInput(r[k], (x) => { r[k] = x; S.local.rules[gid] = { ...r }; prev.replaceChildren(idPreview(G(gid).indices.map((i) => applyRule(header(i), r)))); }, { placeholder: ph });
         body.push(el("div", { class: "block-card" }, el("h4", { text: D(gid).label || "Primary block" }),
           el("div", { class: "row2", style: "margin-top:8px" }, fieldBox("Strip prefix", mk("strip_prefix", "none")), fieldBox("Strip suffix", mk("strip_suffix", "none"))),
-          idPreview(ids)));
+          prev));
       }
     } else {
       const sid = S.local.sid ?? d.sample_id_group.value;
       body.push(fieldBox("Column identifying each sample", select(candidateIdGroups().map((g) => g.group_id), sid,
         (v) => { S.local.sid = v; renderGuide(); }, { placeholder: "choose…", labels: (g) => G(g).columns[0], bad: !sid })));
-      if (sid === d.sample_id_group.value) body.push(idPreview(d.samples.ids));
+      if (sid === d.sample_id_group.value) body.push(idPreview(d.sample_list.ids));
       else body.push(el("div", { class: "item-sub", text: "The ID list updates after you confirm." }));
     }
-    // sample types
-    const types = d.sample_types, ids = Object.keys(types);
-    S.local.types = S.local.types || {};
-    const tval = (s) => S.local.types[s] ?? types[s].type;
-    const counts = {}; ids.forEach((s) => { counts[tval(s)] = (counts[tval(s)] || 0) + 1; });
-    body.push(el("div", { class: "section-label", text: "Sample types" }),
-      el("div", { class: "item-sub", style: "margin-bottom:8px", text: Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(" · ") + ". Nothing is dropped: QC, blanks and pools are only labelled." }));
-    const special = ids.filter((s) => tval(s) !== "study");
-    const list = S.local.showAllTypes ? ids.slice(0, 600) : special.slice(0, 60);
-    body.push(el("div", { class: "types" }, list.map((s) => el("span", { class: `type-chip t-${tval(s)}`, title: types[s].evidence || "" }, s,
-      select(S.vocab.sample_type, tval(s), (v) => { S.local.types[s] = v; renderGuide(); })))));
-    body.push(el("button", { class: "linkbtn", type: "button", style: "margin-top:8px",
-      text: S.local.showAllTypes ? "Show only non-study samples" : `Show all ${ids.length} samples`, onclick: () => { S.local.showAllTypes = !S.local.showAllTypes; renderGuide(); } }));
+    const ids = Object.keys(d.samples);
+    const isStudy = (s) => (S.local.samples?.[s] && "is_study_sample" in S.local.samples[s] ? S.local.samples[s].is_study_sample : d.samples[s].is_study_sample);
+    const non = ids.filter((s) => !isStudy(s));
+    const byLabel = {}; ids.forEach((s) => { const lab = S.local.samples?.[s]?.label ?? d.samples[s].label; byLabel[lab] = (byLabel[lab] || 0) + 1; });
+    body.push(el("div", { class: "section-label", text: "What each sample is" }),
+      el("div", { class: "item-sub", style: "margin-bottom:8px", text: `${ids.length - non.length} study sample(s), ${non.length} other (QC, blank, pool…). Labels: ${Object.entries(byLabel).map(([k, v]) => `${v} ${k || "(no label)"}`).join(" · ")}. Nothing is dropped: non-study samples are only labelled.` }));
+    // list non-study samples as proposed (plus any you edited), so rows don't jump away while you edit
+    const shortList = ids.filter((s) => !d.samples[s].is_study_sample || S.local.samples?.[s]);
+    const list = S.local.showAll ? ids.slice(0, 600) : (shortList.length ? shortList.slice(0, 80) : ids.slice(0, 12));
+    body.push(el("div", { class: "sample-list" }, list.map(sampleRow)));
+    if (ids.length > list.length || S.local.showAll) body.push(el("button", { class: "linkbtn", type: "button", style: "margin-top:8px",
+      text: S.local.showAll ? "Show fewer" : `Show all ${ids.length} samples`, onclick: () => { S.local.showAll = !S.local.showAll; renderGuide(); } }));
     return {
-      title: `${d.samples.n} samples found. Are the sample IDs right?`,
-      question: lay === "samples_in_columns" ? "Sample IDs come from the measurement column names. Adjust what is stripped; the preview updates live." : "Sample IDs come from one column.",
+      title: `${d.sample_list.n} samples found. Are the sample IDs and labels right?`,
+      question: lay === "samples_in_columns" ? "Sample IDs come from the measurement column names. Adjust what is stripped; the list updates live. Untick ‘study sample’ for QC, blanks, pools…" : "Sample IDs come from one column. Untick ‘study sample’ for QC, blanks, pools…",
       body,
       decision: () => {
         const dec = {};
         if (lay === "samples_in_columns") dec.sample_rules = S.local.rules || {};
         else { const sid = S.local.sid ?? d.sample_id_group.value; if (!sid) throw new Error("Choose the sample ID column."); dec.sample_id_group = sid; }
-        if (Object.keys(S.local.types || {}).length) dec.sample_types = S.local.types;
+        if (Object.keys(S.local.samples || {}).length) dec.samples = S.local.samples;
         return dec;
       },
     };
@@ -761,10 +879,11 @@
     if (lay !== "samples_in_columns") {
       const gids = focusGroups("sample_info");
       if (!gids.length) body.push(el("p", { class: "q", text: "No sample information columns besides the sample ID." }));
-      body.push(el("div", { class: "items" }, gids.map((g) => itemCard(g, { roles: ["sample_metadata", "sample_id", "ignore", "feature_annotation", "value"] }))));
+      body.push(el("div", { class: "items" }, gids.map((g) => itemCard(g, { roles: ["sample_metadata", "sample_id", "feature_annotation", "value", "ignore"] }))));
       return { title: `${gids.length} column(s) describe the samples. Are these right?`,
-        question: "PRISM only labels candidates: which variable is the research outcome is decided in a later step.",
-        body, decision: () => ({ items: itemDecisions(gids) }) };
+        question: "The audit kind says what the later steps use it for (subject, time point, batch…). Group-like variables are candidates only: PRISM never decides which variable is the research outcome.",
+        body, disagree: [gids, "sample information columns"],
+        decision: () => { checkItems(gids); return { items: itemDecisions(gids) }; } };
     }
     const meta = d.metadata;
     const fileIn = el("input", { type: "file", accept: ".csv,.tsv,.txt", class: "input" });
@@ -787,26 +906,39 @@
           const key = `${n.data_id}|${n.metadata_id}`;
           const cb = el("input", { type: "checkbox", checked: !!S.local.near[key] });
           cb.addEventListener("change", () => { S.local.near[key] = cb.checked; });
-          return el("label", { class: "item", style: "display:flex;gap:10px;align-items:center" }, cb, code(n.data_id), " ↔ ", code(n.metadata_id), el("span", { class: "item-sub", text: " " + n.reason }));
+          return el("label", { class: "item pick" }, cb, code(n.data_id), " ↔ ", code(n.metadata_id), el("span", { class: "item-sub", text: " " + n.reason }));
         })));
       }
       S.local.metaCols = S.local.metaCols || {};
       body.push(el("div", { class: "section-label", text: "Metadata columns" }));
       body.push(el("div", { class: "items" }, meta.columns.filter((c) => c.role !== "sample_id").map((c) => {
-        const v = S.local.metaCols[c.column] ?? c.kind;
-        return el("div", { class: `item ${v ? "" : "unres"}` }, el("div", { class: "item-head" }, el("span", { class: "item-name", text: c.column })),
-          el("div", { class: "item-controls" }, select(S.vocab.sample_metadata_kind, v, (x) => { S.local.metaCols[c.column] = x; renderGuide(); }, { placeholder: "choose a kind…", bad: !v })),
+        const l = (S.local.metaCols[c.column] = S.local.metaCols[c.column] || {});
+        const v = (f) => (f in l ? l[f] : c[f]);
+        const cb = el("input", { type: "checkbox", checked: v("keep") !== false });
+        cb.addEventListener("change", () => { l.keep = cb.checked; });
+        return el("div", { class: `item ${S.vocab.audit_kind.includes(v("audit_kind")) ? "" : "unres"}` },
+          el("div", { class: "item-head" }, el("span", { class: "item-name", text: c.column })),
+          el("div", { class: "item-controls" },
+            fieldBox("Audit kind", select(S.vocab.audit_kind, v("audit_kind"), (x) => { l.audit_kind = x; renderGuide(); }, { placeholder: "what is it for the audit?", bad: !S.vocab.audit_kind.includes(v("audit_kind")) })),
+            fieldBox("What it is (your words)", textInput(v("label"), (x) => { l.label = x; }, { list: "dl-label" })),
+            fieldBox("Detail (optional)", textInput(v("detail"), (x) => { l.detail = x; })),
+            el("div", { class: "full" }, el("label", { class: "check" }, cb, "keep in the outputs"))),
           el("div", { class: "item-sub", text: c.hint }));
       })));
     }
     return {
       title: "Do you have a sample metadata file?",
-      question: "Your table has samples in columns, so information about samples (group, time point, batch…) usually lives in a separate sheet. You can also skip this; that is recorded.",
+      question: "Your table has samples in columns, so information about samples (subject, time point, batch, group…) usually lives in a separate sheet. You can also skip this; that is recorded.",
       body,
       extraActions: [el("button", { class: "btn btn-sm", type: "button", text: "Skip (record as missing)", onclick: () => submit({ metadata: { skip: true } }) })],
       decision: () => {
         if (!meta || meta.skipped || !meta.report) throw new Error("Upload a file, or use 'Skip'.");
-        const cols = meta.columns.filter((c) => c.role !== "sample_id").map((c) => ({ column: c.column, kind: S.local.metaCols?.[c.column] ?? c.kind, keep: true }));
+        const cols = meta.columns.filter((c) => c.role !== "sample_id").map((c) => {
+          const l = S.local.metaCols?.[c.column] || {};
+          const x = { column: c.column, audit_kind: l.audit_kind ?? c.audit_kind, label: l.label ?? c.label, detail: l.detail ?? c.detail, keep: l.keep ?? c.keep };
+          if (!S.vocab.audit_kind.includes(x.audit_kind)) throw new Error(`Choose an audit kind for '${c.column}'.`);
+          return x;
+        });
         const acc = Object.entries(S.local.near || {}).filter(([, v]) => v).map(([k]) => k.split("|"));
         return { metadata: { columns: cols, accept_near_misses: acc } };
       },
@@ -818,25 +950,23 @@
     S.local.hist = S.local.hist || JSON.parse(JSON.stringify(d.processing_history));
     if (S.local.software == null) S.local.software = d.software_and_version || "";
     if (S.local.notes == null) S.local.notes = d.history_notes || "";
-    const logBlocks = Object.keys(d.groups).filter((g) => D(g).role === "value" && D(g).block_role === "primary" && ["log2", "log10", "ln"].includes(D(g).scale));
+    const prim = Object.keys(d.groups).filter((g) => D(g).role === "value" && D(g).block_role === "primary");
     const body = [];
-    if (logBlocks.length) body.push(el("div", { class: "notice", text: `Hint from the data: the values of ${D(logBlocks[0]).label || "the primary block"} look ${D(logBlocks[0]).scale}-scale. This is only a hint; please answer below.` }));
+    const described = prim.map((g) => D(g).label).filter(Boolean);
+    if (described.length) body.push(el("div", { class: "notice", text: `Main block(s) described as: ${described.map((x) => `“${x}”`).join(", ")}. That is only a description; please answer below.` }));
     for (const q of S.historyQ) {
       const a = S.local.hist[q.id];
       body.push(el("div", { class: "hq" }, el("p", { text: q.question }),
         el("div", { class: "radios" }, S.vocab.yes_no_unsure.map((v) => el("label", { class: a.answer === v ? "on" : "" },
           el("input", { type: "radio", name: q.id, checked: a.answer === v, onchange: () => { a.answer = v; renderGuide(); } }), pretty(v)))),
-        (() => { const i = el("input", { class: "input", value: a.note || "", placeholder: "note (optional)", style: "width:100%" }); i.addEventListener("input", () => { a.note = i.value; }); return i; })()));
+        textInput(a.note, (x) => { a.note = x; }, { placeholder: "note (optional)", cls: "wide" })));
     }
-    const sw = el("input", { class: "input", value: S.local.software, placeholder: "e.g. MaxQuant 2.4.9, normalized in Perseus", style: "width:100%" });
-    sw.addEventListener("input", () => { S.local.software = sw.value; });
-    const nt = el("input", { class: "input", value: S.local.notes, placeholder: "anything else about how the data was produced", style: "width:100%" });
-    nt.addEventListener("input", () => { S.local.notes = nt.value; });
-    body.push(fieldBox("Software and version", sw), fieldBox("Notes", nt));
+    body.push(fieldBox("Software and version", textInput(S.local.software, (x) => { S.local.software = x; }, { placeholder: "e.g. MaxQuant 2.4.9, normalized in Perseus", cls: "wide" })),
+      fieldBox("Notes", textInput(S.local.notes, (x) => { S.local.notes = x; }, { placeholder: "anything else about how the data was produced", cls: "wide" })));
     return {
       title: "What happened to the values before you uploaded them?",
       question: "PRISM asks this and never guesses it. No answer is pre-selected; “not sure” is fine.",
-      body, noEdit: true,
+      body,
       decision: () => {
         const missing = S.historyQ.filter((q) => !S.local.hist[q.id].answer);
         if (missing.length) throw new Error("Answer every question (yes, no or not sure).");
@@ -847,17 +977,20 @@
 
   function stepReview() {
     const d = S.draft, body = [];
-    const values = Object.keys(d.groups).filter((g) => D(g).role === "value");
+    const groups = Object.entries(d.groups);
     const li = (k, v) => el("li", {}, el("span", { text: k }), el("span", {}, v));
+    const flags = groups.filter(([, x]) => x.role === "feature_annotation" && x.marks_rows_as_suspect);
+    const nonStudy = Object.values(d.samples).filter((x) => !x.is_study_sample).length;
     body.push(el("ul", { class: "review-list" },
       li("Layout", [pretty(d.layout.value), " ", provBadge(d.layout.provenance, d.layout.source)]),
-      li("Omics type", [pretty(d.omics_type.value), " ", provBadge(d.omics_type.provenance, d.omics_type.source)]),
-      li("Software", d.source_software.value),
+      ...d.assays.map((a) => li(`Assay · ${a.assay_label}`, [`${a.omics_type} · ${a.source_software}`, " ",
+        ["no", "unsure"].includes(a.in_supported_scope) ? el("span", { class: "badge v-warning", text: "outside current scope" }) : null, " ", provBadge(a.provenance, a.source)])),
       li("Feature ID", layout() === "samples_in_rows" ? "column headers" : d.feature_identity.group_ids.map((g) => G(g).columns[0]).join(" + ") || "—"),
-      ...values.map((g) => li(`Values (${D(g).block_role})`, `${D(g).label || G(g).columns[0]} · ${G(g).n_columns} col · ${pretty(D(g).omics_type)} · ${pretty(D(g).measurement_type)} · ${D(g).scale}`)),
-      li("Annotations", String(Object.values(d.groups).filter((x) => x.role === "feature_annotation").length)),
-      li("Sample info", String(Object.values(d.groups).filter((x) => x.role === "sample_metadata").length + (d.metadata?.columns ? d.metadata.columns.length - 1 : 0))),
-      li("Samples", `${d.samples.n}${d.samples.duplicates.length ? ` (${d.samples.duplicates.length} duplicated)` : ""}`)));
+      ...groups.filter(([, x]) => x.role === "value").map(([g, x]) => li(`Values (${x.block_role})`, [`${x.label || G(g).columns[0]} · ${G(g).n_columns} col · ${x.assay_label}`, " ", provBadge(x.provenance, x.source)])),
+      li("Annotations", `${groups.filter(([, x]) => x.role === "feature_annotation").length}${flags.length ? ` (${flags.map(([g, x]) => `${G(g).columns[0]}: ${x.n_flagged ?? "?"} flagged`).join(", ")})` : ""}`),
+      li("Sample info", groups.filter(([, x]) => x.role === "sample_metadata").map(([g, x]) => `${G(g).columns[0]} (${pretty(x.audit_kind || "?")})`).join(", ")
+        + (d.metadata?.columns ? ` + ${d.metadata.columns.length - 1} from the metadata file` : "") || "—"),
+      li("Samples", `${d.sample_list.n}${nonStudy ? ` (${nonStudy} non-study)` : ""}${d.sample_list.duplicates.length ? ` (${d.sample_list.duplicates.length} duplicated)` : ""}`)));
     const unres = (d.unresolved || []);
     if (unres.length) {
       body.push(el("div", { class: "section-label", text: "Still open — finishing is blocked" }),
@@ -873,8 +1006,8 @@
     }
     return {
       title: S.finalized ? "Structure confirmed. Your files are ready." : "Review the recognized structure",
-      question: S.finalized ? "Next, PRISM's audit step will start from this confirmed schema." : "Everything below was confirmed by you step by step. Finishing writes schema.json and the canonical tables.",
-      body, noEdit: true, noReconsider: true,
+      question: S.finalized ? "Next, PRISM's audit step will start from this confirmed schema." : "Everything below was confirmed by you step by step. Click any step above to change it. Finishing writes schema.json and the canonical tables.",
+      body,
       confirmLabel: S.finalized ? "Add another dataset" : "Confirm & finish",
       confirmDisabled: !S.finalized && unres.length > 0,
       custom: async () => {
@@ -891,13 +1024,6 @@
   const BUILDERS = { layout: stepLayout, feature_id: stepFeatureId, annotations: stepAnnotations, values: stepValues,
                      samples: stepSamples, sample_info: stepSampleInfo, history: stepHistory, review: stepReview };
 
-  function renderGuideKeepFocus(input) {
-    const pos = input.selectionStart, ph = input.placeholder, val = input.value;
-    renderGuide();
-    const again = [...$("guide").querySelectorAll("input")].find((i) => i.placeholder === ph && i.value === val);
-    if (again) { again.focus(); try { again.setSelectionRange(pos, pos); } catch (_) {} }
-  }
-
   let current = null;
   function renderGuide() {
     if (!S.draft) return;
@@ -908,19 +1034,23 @@
     const actions = el("div", { class: "guide-actions" },
       el("button", { class: "btn btn-light btn-sm", type: "button", disabled: spec.confirmDisabled, onclick: () => (spec.custom ? spec.custom() : submit()) },
         spec.confirmLabel || (st === "confirmed" ? "Confirm again" : "Confirm"), el("span", { class: "kbd", text: "⏎" })),
-      spec.noEdit ? null : el("button", { class: "btn btn-sm", type: "button", onclick: () => { S.editing = !S.editing; renderGuide(); } },
-        S.editing ? "Done changing" : "Change…", el("span", { class: "kbd", text: "Esc" })),
       ...(spec.extraActions || []),
       el("span", { class: "spacer" }),
       idx > 0 ? el("button", { class: "linkbtn", type: "button", text: "← back", onclick: () => go(STEPS[idx - 1][0]) }) : null);
     const err = S.local.error ? el("div", { class: "alert alert-error guide-err", text: S.local.error }) : null;
+    const note = S.local.note ? el("div", { class: "notice", text: S.local.note }) : null;
     const status = st === "confirmed" ? " · confirmed" : st === "not_applicable" ? " · not needed for this layout" : "";
+    const qs = (S.draft.clarifying_questions || []).filter((q) => !q.group_id || focusGroups(S.step).includes(q.group_id));
     $("guide").replaceChildren(...[
+      datalists(),
       el("div", { class: "guide-step" }, el("span", { text: `Step ${idx + 1} of 8 · ${STEPS[idx][1]}${status}` }),
         S.draft.ai.error && S.draft.ai.enabled ? el("span", { class: "badge v-warning", title: S.draft.ai.error, text: "AI unavailable" }) : null),
       el("h3", { text: spec.title }),
       spec.question ? el("p", { class: "q" }, spec.question) : null,
+      qs.length && S.step !== "review" ? el("div", { class: "notice" }, el("b", { text: "The AI asks: " }), qs.map((q) => q.question).join(" ")) : null,
+      note,
       el("div", { class: "guide-body" }, spec.body),
+      spec.disagree ? disagreeBox(...spec.disagree) : null,
       err, actions].filter(Boolean));
     setTimeout(drawCallout, 30);
   }
@@ -941,7 +1071,7 @@
     S.draft = res.draft;
     if (res.session) S.session = res.session;
     if (res.digests) S.digests = res.digests;
-    S.editing = false; S.local = {};
+    S.local = {};
     S.step = res.reproposed ? "feature_id" : nextStep(step);
     renderAll();
   }
@@ -950,8 +1080,7 @@
     if (!S.draft || $("workspace").classList.contains("hidden") || S.busy) return;
     const t = e.target.tagName;
     if (e.key === "Escape") {
-      if (["INPUT", "SELECT", "TEXTAREA"].includes(t)) { e.target.blur(); return; }
-      if (current && !current.noEdit) { S.editing = !S.editing; renderGuide(); }
+      if (["INPUT", "SELECT", "TEXTAREA"].includes(t)) e.target.blur();
     } else if (e.key === "Enter" && !["INPUT", "SELECT", "TEXTAREA", "BUTTON", "A"].includes(t) && !e.metaKey && !e.ctrlKey) {
       e.preventDefault();
       if (current?.custom) { if (!current.confirmDisabled) current.custom(); } else submit();

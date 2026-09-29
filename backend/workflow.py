@@ -168,6 +168,23 @@ def _apply_split(s, sp):
     return [n["group_id"] for n in new]
 
 
+def _apply_ai_splits(s, prop, layout):
+    """Apply the AI's split suggestions (code decides: see _apply_split) and give
+    each new single-column group the role the AI suggested for it."""
+    new_all = []
+    for sp in prop.get("splits", []):
+        new_ids = _apply_split(s, sp)
+        if new_ids:
+            s.log("split_applied", {"split": sp, "new_groups": new_ids})
+            for gid in new_ids:
+                item = {"role": sp.get("role") or UNRESOLVED, "audit_kind": sp.get("audit_kind"),
+                        "label": sp.get("label") or "", "confidence": 0.7, "source": "ai",
+                        "evidence": f"Split out of the block on the AI's suggestion: {sp.get('evidence', '')}"}
+                prop["groups"][gid] = ai.finalize_item(_blank(item), s.groups_by_id[gid], s.cols, layout)
+            new_all.extend(new_ids)
+    return new_all
+
+
 # ---------------------------------------------------------------- hints
 
 def group_hint(g):
@@ -239,15 +256,7 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
         fixed = {"layout": fixed_layout} if fixed_layout else {}
         prop, meta, digests = ai.propose(s.filename, s.sha, s.groups, s.hints, s.cols, fixed=fixed, log=s.log,
                                          on_progress=on_progress, signature_hint=hint)
-        for sp in prop.get("splits", []):
-            new_ids = _apply_split(s, sp)
-            if new_ids:
-                s.log("split_applied", {"split": sp, "new_groups": new_ids})
-                for gid in new_ids:
-                    item = {"role": sp.get("role") or UNRESOLVED, "audit_kind": sp.get("audit_kind"),
-                            "label": sp.get("label") or "", "confidence": 0.7, "source": "ai",
-                            "evidence": f"Split out of the block on the AI's suggestion: {sp.get('evidence', '')}"}
-                    prop["groups"][gid] = ai.finalize_item(_blank(item), s.groups_by_id[gid], s.cols, fixed_layout)
+        _apply_ai_splits(s, prop, fixed_layout)
         if meta.get("error") and not prop.get("layout"):
             prop = None  # the AI failed entirely: fall back to manual starting points
     manual = prop is None
@@ -496,6 +505,8 @@ def _confirm_step(s, step, decision, on_progress=None):
                     for it in d["groups"].values():
                         if it.get("assay_label") == old["assay_label"]:
                             it["assay_label"] = label
+                        if (it.get("proposed") or {}).get("assay_label") == old["assay_label"]:
+                            it["proposed"]["assay_label"] = label  # a rename is not a correction of the block
             else:
                 old = _snap({"source": "user", "confidence": 1.0, "evidence": "Added by you."}, ASSAY_FIELDS)
                 d["assays"].append(old)
@@ -710,7 +721,19 @@ def reconsider(s, gids, hint, on_progress=None):
     if meta.get("error"):
         raise StepError("The AI could not answer: " + meta["error"])
     labels = [a["assay_label"] for a in d["assays"]]
+    split_ids = _apply_ai_splits(s, prop, d["layout"]["value"])
     changed = {}
+    for gid in split_ids:
+        new = _blank(prop["groups"][gid])
+        new["hint"] = group_hint(s.groups_by_id[gid])
+        _attach_flags(s, gid, new)
+        d["groups"][gid] = _snap(new, GROUP_FIELDS)
+        changed[gid] = {"old": None, "new": {k: new.get(k) for k in GROUP_FIELDS}}
+    for gid in split_ids:  # the parent block's profile changed
+        parent = s.groups_by_id[gid]["split_from"]
+        if parent in d["groups"]:
+            d["groups"][parent]["hint"] = group_hint(s.groups_by_id[parent])
+    d["groups"] = {g["group_id"]: d["groups"][g["group_id"]] for g in s.groups}  # file order
     for gid in gids:
         new = prop["groups"].get(gid)
         if new is None:
@@ -727,9 +750,10 @@ def reconsider(s, gids, hint, on_progress=None):
         d["groups"][gid] = new
         changed[gid] = {"old": {k: old.get(k) for k in GROUP_FIELDS}, "new": {k: new.get(k) for k in GROUP_FIELDS}}
     _assign_block_roles(d, s)
-    s.log("reconsider", {"group_ids": gids, "user_feedback": hint, "changes": changed})
+    s.log("reconsider", {"group_ids": gids, "user_feedback": hint, "changes": changed, "splits": split_ids})
+    refresh_samples(s, d)
     s.save()
-    return {"draft": public_draft(s), "digest": digests[0] if digests else None,
+    return {"draft": public_draft(s), "digest": digests[0] if digests else None, "split_groups": split_ids,
             "questions": prop.get("clarifying_questions", [])}
 
 
@@ -818,8 +842,12 @@ def public_draft(s):
     """Draft + derived facts for the frontend (provenance, sample ids, labels in use)."""
     d = s.draft
     out = copy.deepcopy(d)
-    for it in out["groups"].values():
+    for gid, it in out["groups"].items():
         it["provenance"] = provenance(it, GROUP_FIELDS)
+        g = s.groups_by_id[gid]
+        if it.get("flag_values") is None and g["n_columns"] == 1 and it["role"] in ("feature_annotation", UNRESOLVED) \
+                and ((g.get("profile") or {}).get("n_unique") or 99) <= FLAG_MAX_VALUES:
+            it["value_counts"] = flag_values(s, gid)  # lets the UI offer 'marks rows as suspect' at once
         if it.get("marks_rows_as_suspect") and it.get("flag_values") and it.get("flagged_value") is not None:
             it["n_flagged"] = it["flag_values"].get(it["flagged_value"], 0)
     out["layout"]["provenance"] = provenance(out["layout"], FACT_FIELDS)

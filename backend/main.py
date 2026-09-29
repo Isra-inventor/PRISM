@@ -244,7 +244,10 @@ def _do_reconsider(req):
     s = session_or_404(req.session_id)
     with s.lock:
         try:
-            return workflow.reconsider(s, req.group_ids or [req.group_id], req.user_hint, on_progress=ai_progress(req.progress_id))
+            res = workflow.reconsider(s, req.group_ids or [req.group_id], req.user_hint,
+                                      on_progress=ai_progress(req.progress_id))
+            res["session"] = session_payload(s)  # groups change when the AI's split is applied
+            return res
         except workflow.StepError as e:
             raise HTTPException(422, str(e))
 

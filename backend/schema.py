@@ -9,7 +9,7 @@ written by the AI (or the user) and are never enumerated here.
 from .config import SCOPE_DESCRIPTION
 
 SCHEMA_VERSION = "0.2.1"
-PROMPT_VERSION = "step0-v2.1"
+PROMPT_VERSION = "step0-v2.1.1"
 UNRESOLVED = "unresolved"
 
 VOCABULARY = {
