@@ -71,6 +71,8 @@ def _omics(names):
 class MockLLM:
     @staticmethod
     def respond(system, prompt):
+        if prompt.startswith("Literature"):
+            return MockLLM.literature(json.loads(prompt.split("\n", 1)[1]))
         digest = json.loads(prompt.split("\n", 1)[1])
         hints = digest["file"]["layout_hints"]
         fixed = digest.get("already_confirmed") or {}
@@ -85,22 +87,19 @@ class MockLLM:
                 layout = "samples_in_columns"
         groups, samples, fid, assays = [], [], [], {}
         file_omics = _omics([n for g in digest["groups"] for n in _names(g)])
-        has_lfq = any("lfq" in (g.get("pattern") or "").lower() for g in digest["groups"])
         for g in digest["groups"]:
             names = _names(g)
             name = names[0] if names else ""
             prof = g.get("profile") or {}
             e = {"group_id": g["group_id"], "role": "unresolved", "assay_label": None, "label": "",
-                 "block_role": None, "audit_kind": None, "marks_rows_as_suspect": False,
+                 "audit_kind": None, "marks_rows_as_suspect": False,
                  "confidence": 0.6, "evidence": "mock rule", "suggest_split": None}
             if g["kind"] == "numeric_block" and not re.search(r"scale|norm", (g.get("pattern") or "").lower()):
                 om = _omics(names) if layout == "samples_in_rows" else file_omics
                 label = om
                 assays.setdefault(label, om)
-                pat = (g.get("pattern") or "").lower()
-                block_role = "primary" if "lfq" in pat else ("auxiliary" if has_lfq else None)
                 logscale = (not prof.get("integer_valued") and (prof.get("p99") or 0) < 40 and (prof.get("median") or 0) > 5)
-                e.update(role="value", assay_label=label, block_role=block_role,
+                e.update(role="value", assay_label=label,
                          label=f"{(g.get('pattern') or 'values').strip()}, apparently {'log' if logscale else 'linear'} "
                                f"scale (median {prof.get('median')})",
                          confidence=0.85, evidence=f"{g['n_columns']} numeric columns; median {prof.get('median')}")
@@ -169,7 +168,34 @@ class MockLLM:
             "groups": groups,
             "samples": samples,
             "clarifying_questions": [],
+            "literature_queries": [],
         })
+
+
+def _literature(payload):
+    """Cite the first passage mentioning the block's name, quoting its first words."""
+    passages = payload["passages"]
+    blocks = []
+    for b in payload["file"]["value_blocks"]:
+        name = (b.get("name") or "").lower()
+        hit = next((p for p in passages if name and name in p["text"].lower()), None)
+        cites = [{"passage_id": hit["id"], "quote": " ".join(hit["text"].split()[:8])}] if hit else []
+        yes = hit is not None and re.search(r"quantif|analy[sz]ed|used for", hit["text"], re.I)
+        blocks.append({"group_id": b["group_id"], "description": f"{b.get('name') or 'values'} (mock)",
+                       "typical_use": "mock: from the first matching passage" if hit else "not covered",
+                       "suggested_for_analysis": "yes" if yes else "unsure",
+                       "reason": "mock rule", "citations": cites})
+    first = passages[0] if passages else None
+    return json.dumps({
+        "summary": "mock summary",
+        "summary_citations": [{"passage_id": first["id"], "quote": " ".join(first["text"].split()[:8])}] if first else [],
+        "blocks": blocks,
+        "for_later_steps": [{"topic": "normalization", "passage_ids": [p["id"] for p in passages
+                                                                       if "normaliz" in p["text"].lower()][:2]}],
+    })
+
+
+MockLLM.literature = staticmethod(_literature)
 
 
 def expand_sample_rules(rules, sample_ids):

@@ -76,10 +76,10 @@ def set_progress(pid, **fields):
             p["log"] = (p["log"] + [{"t": round(now - p["started"], 1), "msg": fields["message"]}])[-8:]
 
 
-def ai_progress(pid, start=10, end=99):
+def ai_progress(pid, start=10, end=99, stage="ai"):
     def cb(done, total, message):
         pct = start + (end - start) * done / total if total else start
-        set_progress(pid, stage="ai", percent=int(pct), batches_done=done, batches_total=total, message=message)
+        set_progress(pid, stage=stage, percent=int(pct), batches_done=done, batches_total=total, message=message)
     return cb
 
 
@@ -255,6 +255,29 @@ def _do_reconsider(req):
 @app.post("/api/reconsider")
 async def reconsider(req: ReconsiderRequest):
     return await run(req.progress_id, _do_reconsider, req)
+
+
+class LiteratureRequest(BaseModel):
+    session_id: str
+    queries: List[str] = []
+    progress_id: Optional[str] = None
+
+
+def _do_literature(req):
+    s = session_or_404(req.session_id)
+    with s.lock:
+        if s.draft is None:
+            raise HTTPException(409, "Run /api/propose first.")
+        set_progress(req.progress_id, stage="literature", percent=5, message="Searching the literature")
+        try:
+            return workflow.run_literature(s, req.queries, on_progress=ai_progress(req.progress_id, 5, 99, "literature"))
+        except workflow.StepError as e:
+            raise HTTPException(422, str(e))
+
+
+@app.post("/api/literature")
+async def literature_search(req: LiteratureRequest):
+    return await run(req.progress_id, _do_literature, req)
 
 
 @app.post("/api/metadata-upload")

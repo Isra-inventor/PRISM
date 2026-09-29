@@ -8,8 +8,8 @@ written by the AI (or the user) and are never enumerated here.
 
 from .config import SCOPE_DESCRIPTION
 
-SCHEMA_VERSION = "0.2.1"
-PROMPT_VERSION = "step0-v2.1.1"
+SCHEMA_VERSION = "0.3.0"
+PROMPT_VERSION = "step0-v3"
 UNRESOLVED = "unresolved"
 
 VOCABULARY = {
@@ -18,12 +18,13 @@ VOCABULARY = {
     # decides which output file a column goes to
     "column_role": ["feature_id", "feature_annotation", "value", "sample_id", "sample_metadata",
                     "ignore", "unresolved"],
-    "block_role": ["primary", "auxiliary", "excluded"],
     # only for sample_metadata columns; the later audit reads exactly these ('other' is the escape hatch)
     "audit_kind": ["subject_id", "timepoint", "batch", "run_order", "technical_replicate", "sample_type",
                    "group", "covariate", "other"],
     "yes_no_unsure": ["yes", "no", "not_sure"],
     "in_supported_scope": ["yes", "no", "unsure"],
+    # a literature-backed suggestion only; "yes" needs at least one verified citation
+    "suggested_for_analysis": ["yes", "no", "unsure"],
     "provenance": ["computed", "ai_proposed_confirmed", "ai_proposed_corrected", "user_set"],
     "booleans": ["keep", "marks_rows_as_suspect", "is_study_sample"],
 }
@@ -36,9 +37,6 @@ DEFINITIONS = {
     "sample_metadata": "Describes a sample (subject, time point, batch, group, covariate...).",
     "ignore": "Not used. Kept in the log, left out of the outputs.",
     "unresolved": "Not decided yet. Must be resolved before finishing.",
-    "primary": "The main measurement matrix of its assay (at most one per assay).",
-    "auxiliary": "Kept alongside, not used as the main matrix (e.g. iBAQ next to LFQ).",
-    "excluded": "Not used and not exported.",
     "subject_id": "The individual a sample came from; repeats across repeated measures.",
     "timepoint": "When the sample was taken (visit, day, time).",
     "batch": "Processing / acquisition batch or plate.",
@@ -54,6 +52,10 @@ DEFINITIONS = {
     "long": "Each row is one (feature, sample) pair with a single value column.",
     "marks_rows_as_suspect": "The column flags rows as decoy, contaminant or otherwise suspect.",
     "is_study_sample": "False for QC, blank, pool, calibrator and similar non-study injections.",
+    "keep": ("Kept in the outputs. Every kept value block becomes its own matrix; nothing ranks them. "
+             "Which one to analyse is a later decision, informed by the literature."),
+    "suggested_for_analysis": ("What similar studies in the retrieved literature analysed. A suggestion with "
+                               "citations, never a decision."),
 }
 
 HISTORY_QUESTIONS = [

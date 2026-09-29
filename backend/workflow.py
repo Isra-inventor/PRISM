@@ -18,7 +18,7 @@ import uuid
 from collections import Counter, OrderedDict
 from pathlib import Path
 
-from . import ai, llm_providers as llm
+from . import ai, literature, llm_providers as llm
 from .format_detect import signature_hint, signature_prefill
 from .mock_llm import expand_sample_rules
 from .parsing import cell, is_missing, parse_bytes, sanitize_filename
@@ -29,7 +29,7 @@ from .validation import timepoint_detail, validate_feature_identity, validate_gr
 
 SESSIONS_DIR = Path(os.environ.get("PRISM_SESSIONS_DIR", Path(__file__).parent / "sessions"))
 STEPS = ["layout", "feature_id", "annotations", "values", "samples", "sample_info", "history", "review"]
-GROUP_FIELDS = ("role", "assay_label", "label", "block_role", "audit_kind", "marks_rows_as_suspect",
+GROUP_FIELDS = ("role", "assay_label", "label", "audit_kind", "marks_rows_as_suspect",
                 "flagged_value", "detail", "keep")
 ASSAY_FIELDS = ("assay_label", "omics_type", "source_software", "in_supported_scope", "scope_reason")
 FACT_FIELDS = ("value",)
@@ -238,7 +238,7 @@ def _proposed_flag_value(values):
 # ---------------------------------------------------------------- building the draft
 
 def _blank(item):
-    base = {"role": UNRESOLVED, "assay_label": None, "label": "", "block_role": None, "audit_kind": None,
+    base = {"role": UNRESOLVED, "assay_label": None, "label": "", "audit_kind": None,
             "marks_rows_as_suspect": False, "flagged_value": None, "detail": None, "keep": True,
             "confidence": 0.0, "evidence": "", "source": "none", "validation": {"status": "ok", "messages": []}}
     base.update({k: v for k, v in item.items() if v is not None or k not in base})
@@ -308,7 +308,6 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
             item["assay_label"] = labels[0]
         _attach_flags(s, gid, item)
         d["groups"][gid] = item
-    _assign_block_roles(d, s)
     for gid, item in d["groups"].items():
         if item["role"] != UNRESOLVED:
             item["validation"] = validate_group(item, s.groups_by_id[gid], s.cols, layout)
@@ -340,6 +339,8 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
             d["sample_rules"][g["group_id"]] = _snap(dict(g["sample_id_rule"], source="computed"),
                                                      ("strip_prefix", "strip_suffix"))
     d["sample_rules_ai"] = prop.get("samples", [])
+    d["literature_queries_ai"] = prop.get("literature_queries", [])
+    d["literature"] = None
     d["clarifying_questions"] = prop.get("clarifying_questions", [])
     d["rejected"] = prop.get("rejected", [])
     refresh_samples(s, d)
@@ -358,32 +359,15 @@ def _attach_flags(s, gid, item):
         item["flagged_value"] = _proposed_flag_value(item["flag_values"])
 
 
-def _assign_block_roles(d, s):
-    """At most one primary value block per assay: keep what was proposed,
-    otherwise the widest block becomes primary; others auxiliary."""
-    by_assay = {}
-    for gid, it in d["groups"].items():
-        if it["role"] == "value":
-            by_assay.setdefault(it.get("assay_label") or "assay", []).append(gid)
-    for gids in by_assay.values():
-        primaries = [g for g in gids if d["groups"][g].get("block_role") == "primary"]
-        if not primaries:
-            best = max(gids, key=lambda g: (s.groups_by_id[g]["n_columns"], -min(s.groups_by_id[g]["indices"])))
-            primaries = [best]
-            d["groups"][best]["block_role"] = "primary"
-        for g in gids:
-            if g != primaries[0] and d["groups"][g].get("block_role") in (None, "primary"):
-                d["groups"][g]["block_role"] = "auxiliary"
-
-
 # ---------------------------------------------------------------- samples
 
 def layout_of(d):
     return d["layout"]["value"]
 
 
-def primary_blocks(s, d):
-    return [gid for gid, it in d["groups"].items() if it["role"] == "value" and it.get("block_role") == "primary"]
+def value_blocks(s, d):
+    """Kept value blocks, in file order. None is ranked above another."""
+    return [gid for gid, it in d["groups"].items() if it["role"] == "value" and it.get("keep", True)]
 
 
 def sample_ids(s, d, gid=None):
@@ -391,7 +375,7 @@ def sample_ids(s, d, gid=None):
     lay = layout_of(d)
     if lay == "samples_in_columns":
         out = []
-        for b in ([gid] if gid else primary_blocks(s, d)):
+        for b in ([gid] if gid else value_blocks(s, d)):
             g = s.groups_by_id.get(b)
             if not g:
                 continue
@@ -537,8 +521,6 @@ def _confirm_step(s, step, decision, on_progress=None):
                     it[f] = val
             ai.normalize_item(it)
             if it["role"] == "value":
-                if not it.get("block_role"):
-                    it["block_role"] = "auxiliary"
                 if not it.get("assay_label"):
                     it["assay_label"] = d["assays"][0]["assay_label"]
                 if it["assay_label"] not in [a["assay_label"] for a in d["assays"]]:
@@ -615,7 +597,6 @@ def _confirm_step(s, step, decision, on_progress=None):
         apply_metadata_decision(s, d, decision["metadata"])
 
     _check_step(s, d, step)
-    _assign_block_roles(d, s)
     refresh_samples(s, d)
     d["steps"][step] = "confirmed"
     if roles_changed and not reproposed:
@@ -650,14 +631,8 @@ def _check_step(s, d, step):
         if not d["sample_id_group"]["value"]:
             raise StepError("Choose the column that names the sample on each row.")
         d["long_duplicates"] = long_duplicates(s, d)
-    if step == "values":
-        per = Counter(it.get("assay_label") for it in d["groups"].values()
-                      if it["role"] == "value" and it.get("block_role") == "primary")
-        if not per:
-            raise StepError("Mark at least one value block as primary.")
-        too_many = [a for a, n in per.items() if n > 1]
-        if too_many:
-            raise StepError(f"Only one primary block per assay (more than one for: {', '.join(too_many)}).")
+    if step == "values" and not value_blocks(s, d):
+        raise StepError("Keep at least one value block.")
     if step == "samples" and lay in ("samples_in_rows", "long") and not d["sample_id_group"]["value"]:
         raise StepError("Choose the column that identifies each sample.")
 
@@ -710,7 +685,7 @@ def reconsider(s, gids, hint, on_progress=None):
         raise StepError("The AI is off or unavailable: " + (why or "turn it on to ask it to reconsider."))
     fixed = {"layout": d["layout"]["value"],
              "assays": [{f: a.get(f) for f in ASSAY_FIELDS} for a in d["assays"]],
-             "confirmed_groups": {g: {k: it.get(k) for k in ("role", "label", "audit_kind", "block_role")}
+             "confirmed_groups": {g: {k: it.get(k) for k in ("role", "label", "audit_kind", "keep")}
                                   for g, it in d["groups"].items() if g not in gids and it["role"] != UNRESOLVED},
              "user_feedback": _clean(hint, 1000),
              "instruction": ("The user disagrees with the previous proposal for these groups. Reconsider only "
@@ -742,19 +717,63 @@ def reconsider(s, gids, hint, on_progress=None):
         new = _blank(new)
         new["hint"], new["keep"] = old.get("hint"), old.get("keep", True)
         if new["role"] == "value":
-            new["block_role"] = new.get("block_role") or old.get("block_role") or "auxiliary"
             if new.get("assay_label") not in labels:
                 new["assay_label"] = old.get("assay_label") if old.get("assay_label") in labels else labels[0]
         _attach_flags(s, gid, new)
         _snap(new, GROUP_FIELDS)
         d["groups"][gid] = new
         changed[gid] = {"old": {k: old.get(k) for k in GROUP_FIELDS}, "new": {k: new.get(k) for k in GROUP_FIELDS}}
-    _assign_block_roles(d, s)
     s.log("reconsider", {"group_ids": gids, "user_feedback": hint, "changes": changed, "splits": split_ids})
     refresh_samples(s, d)
     s.save()
     return {"draft": public_draft(s), "digest": digests[0] if digests else None, "split_groups": split_ids,
             "questions": prop.get("clarifying_questions", [])}
+
+
+# ---------------------------------------------------------------- literature (RAG)
+
+def literature_description(s, d):
+    """What the literature step works from: the (confirmed) assays and kept value
+    blocks, with labels and computed statistics. No data values."""
+    blocks = []
+    for gid in value_blocks(s, d):
+        it, g = d["groups"][gid], s.groups_by_id[gid]
+        p = g.get("profile") or {}
+        blocks.append({"group_id": gid, "assay_label": it.get("assay_label") or d["assays"][0]["assay_label"],
+                       "label": it.get("label") or "", "n_columns": g["n_columns"],
+                       "name": literature.block_name(it.get("label"), (g.get("pattern") or {}).get("text")),
+                       "stats": {k: p.get(k) for k in ("median", "min", "max", "frac_zero", "frac_na",
+                                                        "integer_valued", "log10_span")}})
+    return {"layout": d["layout"]["value"],
+            "assays": [{k: a.get(k) for k in ("assay_label", "omics_type", "source_software")} for a in d["assays"]],
+            "value_blocks": blocks}
+
+
+def suggested_queries(s, d):
+    desc = literature_description(s, d)
+    return list(dict.fromkeys((d.get("literature_queries_ai") or []) + literature.default_queries(desc)))[
+        :literature.MAX_QUERIES]
+
+
+def run_literature(s, queries=None, on_progress=None):
+    d = s.draft
+    if not literature.enabled():
+        raise StepError("Literature search is turned off (PRISM_LITERATURE=off).")
+    desc = literature_description(s, d)
+    if not desc["value_blocks"]:
+        raise StepError("Keep at least one value block first: the search is about the measurements.")
+    queries = [literature._term(q) if q.count('"') % 2 else q.strip() for q in (queries or []) if q and q.strip()] \
+        or suggested_queries(s, d)
+    ok, _ = llm.available()
+    try:
+        rec = literature.run(desc, queries, ai_on=d["ai"]["enabled"] and ok, log=s.log, on_progress=on_progress)
+    except literature.LiteratureError as e:
+        raise StepError(str(e) + " Check your internet connection; you can continue without it.")
+    d["literature"] = rec
+    s.log("literature", {k: rec.get(k) for k in ("status", "queries", "summary", "blocks", "for_later_steps",
+                                                   "rejected", "error")})
+    s.save()
+    return {"draft": public_draft(s)}
 
 
 # ---------------------------------------------------------------- sample metadata file (samples in columns)
@@ -868,6 +887,8 @@ def public_draft(s):
         "sample_label": sorted({x["label"] for x in d["samples"].values() if x.get("label")}),
     }
     out["unresolved"] = unresolved_items(s, d)
+    out["literature_queries_suggested"] = suggested_queries(s, d) if value_blocks(s, d) else []
+    out["literature_enabled"] = literature.enabled()
     return out
 
 
@@ -891,8 +912,8 @@ def unresolved_items(s, d):
         out.append({"step": "samples", "what": "Sample ID column is not chosen."})
     if d.get("long_duplicates") and lay == "long":
         out.append({"step": "feature_id", "what": d["long_duplicates"]["message"]})
-    if not primary_blocks(s, d):
-        out.append({"step": "values", "what": "No primary value block."})
+    if not value_blocks(s, d):
+        out.append({"step": "values", "what": "No value block is kept."})
     if any(not d["processing_history"][q]["answer"] for q, _ in HISTORY_QUESTIONS):
         out.append({"step": "history", "what": "Processing-history questions are not all answered."})
     for st in STEPS[:-1]:

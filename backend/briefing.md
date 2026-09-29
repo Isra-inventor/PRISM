@@ -34,8 +34,8 @@ Mark these carefully; they drive the audit:
 - Numeric clinical columns (age, CD4 count, serum iron, BMI) sitting next to omics features and
   looking like features. They are sample information, not measurements.
 - Several measurement families of the same features side by side, e.g. LFQ intensity vs raw
-  intensity vs iBAQ vs peptide counts. Usually one is the main matrix (primary) and the others
-  are auxiliary.
+  intensity vs iBAQ vs peptide counts. Describe each one in its own label; do not rank them.
+  Which one gets analysed depends on the study and is decided later, with the literature.
 - Technical numeric columns such as scale factors, normalization factors or quality metrics.
   They describe samples (or runs), not features.
 - QC, blank, pool, buffer and calibrator samples among the study samples.

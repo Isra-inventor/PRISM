@@ -8,6 +8,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 FIX = ROOT / "tests" / "fixtures"
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tests"))
 
 
 @pytest.fixture(autouse=True)
@@ -16,7 +17,10 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "mock")
     for k in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "PRISM_LLM_MODEL"):
         monkeypatch.delenv(k, raising=False)
-    from backend import ai, session_log, workflow
+    from backend import ai, literature, session_log, workflow
+    import fake_europepmc
+    monkeypatch.setattr(literature, "_get", lambda url, kind: fake_europepmc.respond(url))  # never the network
+    monkeypatch.setattr(literature, "CACHE_DIR", tmp_path / "litcache")
     monkeypatch.setattr(workflow, "SESSIONS_DIR", tmp_path / "sessions")
     monkeypatch.setattr(session_log, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(ai, "CACHE_DIR", tmp_path / "cache")

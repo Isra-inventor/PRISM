@@ -3,7 +3,7 @@
 A signature matches only if ALL of its required columns are present in the
 header (no fuzzy matching). A match pre-fills the proposal with provenance
 'signature'. Grouping and profiling still run: e.g. MaxQuant has several
-per-sample families and the wizard still asks which one is primary.
+per-sample families; each is described, none is ranked.
 """
 
 from __future__ import annotations
@@ -93,7 +93,7 @@ KNOWN_COLUMNS = {
         "R.FileName": ("sample_id", "raw file name", {}),
         "R.Condition": ("sample_metadata", "condition", {"audit_kind": "group"}),
         "R.Replicate": ("sample_metadata", "replicate number", {"audit_kind": "technical_replicate"}),
-        "F.PeakArea": ("value", "fragment peak area", {"block_role": "primary"}),
+        "F.PeakArea": ("value", "fragment peak area", {}),
         "PG.ProteinGroups": ("feature_annotation", "protein group accessions", {}),
         "PG.Genes": ("feature_annotation", "gene symbol", {}),
     },
@@ -113,26 +113,26 @@ KNOWN_COLUMNS = {
     },
 }
 
-# Per-sample column families: pattern text -> (block_role, label)
+# Per-sample column families: pattern text -> label
 KNOWN_FAMILIES = {
     "maxquant_proteinGroups": {
-        "LFQ intensity ": ("primary", "LFQ intensity"),
-        "Intensity ": ("auxiliary", "raw intensity"),
-        "iBAQ ": ("auxiliary", "iBAQ intensity"),
-        "Peptides ": ("auxiliary", "peptide count per sample"),
-        "Razor + unique peptides ": ("auxiliary", "razor + unique peptide count per sample"),
-        "Unique peptides ": ("auxiliary", "unique peptide count per sample"),
-        "MS/MS count ": ("auxiliary", "MS/MS count per sample"),
-        "Sequence coverage ": ("auxiliary", "sequence coverage per sample (%)"),
+        "LFQ intensity ": "LFQ intensity",
+        "Intensity ": "raw intensity",
+        "iBAQ ": "iBAQ intensity",
+        "Peptides ": "peptide count per sample",
+        "Razor + unique peptides ": "razor + unique peptide count per sample",
+        "Unique peptides ": "unique peptide count per sample",
+        "MS/MS count ": "MS/MS count per sample",
+        "Sequence coverage ": "sequence coverage per sample (%)",
     },
     "fragpipe_combined_proteins": {
-        " MaxLFQ Intensity": ("primary", "MaxLFQ intensity"),
-        " Intensity": ("auxiliary", "intensity"),
-        " Unique Intensity": ("auxiliary", "unique intensity"),
-        " Razor Intensity": ("auxiliary", "razor intensity"),
-        " Spectral Count": ("auxiliary", "spectral count"),
-        " Unique Spectral Count": ("auxiliary", "unique spectral count"),
-        " Total Spectral Count": ("auxiliary", "total spectral count"),
+        " MaxLFQ Intensity": "MaxLFQ intensity",
+        " Intensity": "intensity",
+        " Unique Intensity": "unique intensity",
+        " Razor Intensity": "razor intensity",
+        " Spectral Count": "spectral count",
+        " Unique Spectral Count": "unique spectral count",
+        " Total Spectral Count": "total spectral count",
     },
 }
 
@@ -193,9 +193,9 @@ def signature_prefill(header, groups):
             continue
         pat = (g.get("pattern") or {}).get("text")
         if pat in families:
-            block_role, label = families[pat]
+            label = families[pat]
             prop["groups"][g["group_id"]] = {
-                "role": "value", "label": label, "block_role": block_role, "assay_label": assay,
+                "role": "value", "label": label, "assay_label": assay,
                 "confidence": 0.9, "source": "computed",
                 "evidence": f"{SOFTWARE[name]} per-sample column family '{pat.strip()} ...'."}
     if name == "diann_pg_matrix":
@@ -203,7 +203,7 @@ def signature_prefill(header, groups):
         for g in groups:
             if g["type"] == "numeric" and min(g["indices"]) > pg_pos and g["group_id"] not in prop["groups"]:
                 prop["groups"][g["group_id"]] = {
-                    "role": "value", "label": "protein group quantity", "block_role": "primary",
+                    "role": "value", "label": "protein group quantity",
                     "assay_label": assay, "confidence": 0.9, "source": "computed",
                     "evidence": "DIA-NN: sample columns are all columns after the fixed PG.* columns."}
     return prop

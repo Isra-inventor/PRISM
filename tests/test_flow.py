@@ -34,7 +34,7 @@ def test_A_maxquant(flow, isolated):
     assert d["layout"]["provenance"] == "ai_proposed_confirmed"          # the hint is not a provenance
     g = d["groups"]
     lfq, inten, pep = gid_of(f, "LFQ intensity S01"), gid_of(f, "Intensity S01"), gid_of(f, "Peptides S01")
-    assert g[lfq]["block_role"] == "primary" and g[inten]["block_role"] == "auxiliary"
+    assert all(g[x]["role"] == "value" and g[x]["keep"] for x in (lfq, inten, pep))   # no ranking
     assert g[pep]["role"] == "value" and g[pep]["validation"]["status"] == "ok"
     assert len({g[x]["assay_label"] for x in (lfq, inten, pep)}) == 1    # one assay, several blocks
     rev, con = gid_of(f, "Reverse"), gid_of(f, "Potential contaminant")
@@ -45,12 +45,14 @@ def test_A_maxquant(flow, isolated):
     out = f.finalize()
     schema = out["schema"]
     assert schema["signature_hint"] == d["signature_hint"]
-    assert [b["block_role"] for b in schema["assays"][0]["value_blocks"]].count("primary") == 1
-    assert all(b["label"] for b in schema["assays"][0]["value_blocks"])
+    blocks = schema["assays"][0]["value_blocks"]
+    assert len(blocks) == 4 and all(b["label"] and "block_role" not in b for b in blocks)
+    assert len([a for a in out["artifacts"] if a.startswith("value_matrix_A1_")]) == 4   # one matrix per kept block
     rev_ann = next(a for a in schema["feature_annotations"] if a["column"] == "Reverse")
     assert rev_ann["marks_rows_as_suspect"] is True and rev_ann["flagged_value"] == "+"
     assert rev_ann["n_flagged"] == 3 and rev_ann["provenance"] == "ai_proposed_confirmed" and rev_ann["label"]
-    vm = rows_of(f.export("value_matrix_A1.csv"))
+    lfq_file = next(b["file"] for b in blocks if b["group_id"] == lfq)
+    vm = rows_of(f.export(lfq_file))
     assert vm[0] == ["feature_key", "S01", "S02", "S03", "S04", "S05", "S06"]
     assert len(vm) == 61                                      # all 60 proteins kept, incl. decoys/contaminants
     src = list(csv.reader(io.StringIO(fixture_bytes("A_maxquant_proteinGroups.txt").decode()), delimiter="\t"))
@@ -69,7 +71,7 @@ def test_A_manual_mode_starts_from_signature(flow):
     assert d["ai"]["used"] is False and d["layout"]["value"] == "samples_in_columns"
     assert d["layout"]["provenance"] == "computed"
     g = d["groups"]
-    assert g[gid_of(f, "LFQ intensity S01")]["block_role"] == "primary"
+    assert g[gid_of(f, "LFQ intensity S01")]["label"] == "LFQ intensity"
     assert g[gid_of(f, "Reverse")]["marks_rows_as_suspect"] is True
     f.confirm_all_as_proposed()
     schema = f.finalize()["schema"]
@@ -93,10 +95,10 @@ def test_B_diann(flow):
     for c in ("PG.ProteinNames", "PG.Genes"):
         assert g[gid_of(f, c)]["role"] == "feature_annotation" and g[gid_of(f, c)]["label"]
     block = g[gid_of(f, "S01.raw")]
-    assert block["role"] == "value" and block["block_role"] == "primary" and block["validation"]["status"] == "ok"
+    assert block["role"] == "value" and block["validation"]["status"] == "ok"
     assert f.draft["sample_list"]["ids"][:2] == ["S01", "S02"]      # '.raw' stripped
     f.confirm_all_as_proposed()
-    vm = rows_of(f.export("value_matrix_A1.csv")) if f.finalize() else None
+    vm = rows_of(f.export("value_matrix_A1_B1.csv")) if f.finalize() else None
     assert "" in [c for r in vm[1:] for c in r[1:]]              # 'NaN' written as empty
 
 
@@ -128,7 +130,7 @@ def test_C_mzmine_ai_path(flow):
     assert len(sm) == 18 and ["QC_01", "false"] in [[r[0], r[2]] for r in sm]     # QC kept, labelled
     samples = {x["sample"]: x for x in out["schema"]["samples"]}
     assert samples["QC_01"]["is_study_sample"] is False and samples["QC_01"]["provenance"] == "ai_proposed_confirmed"
-    vm = rows_of(f.export("value_matrix_A1.csv"))
+    vm = rows_of(f.export("value_matrix_A1_B1.csv"))
     assert "|" in vm[1][0]
 
 
@@ -148,13 +150,13 @@ def test_D_samples_in_rows(flow):
     assert g[gid_of(f, "severity_group")]["audit_kind"] == "group"
     values = [it for it in g.values() if it["role"] == "value"]
     assert len({it["assay_label"] for it in values}) == 2 and len(d["assays"]) == 2
-    assert all(it["block_role"] == "primary" for it in values)
+    assert all(it["keep"] for it in values)
     f.confirm_all_as_proposed()
     out = f.finalize()
     assert len(out["schema"]["assays"]) == 2
     names = out["artifacts"]
-    assert "value_matrix_A1.csv" in names and "value_matrix_A2.csv" in names
-    m = rows_of(f.export("value_matrix_A1.csv"))
+    assert "value_matrix_A1_B1.csv" in names and "value_matrix_A2_B1.csv" in names
+    m = rows_of(f.export("value_matrix_A1_B1.csv"))
     assert m[0][1:4] == ["S001", "S002", "S003"] and len(m[0]) == 41     # transposed: features x samples
     sm = rows_of(f.export("sample_metadata.csv"))
     assert {"age", "CD4_count", "iron", "visit"} <= set(sm[0])
@@ -184,7 +186,7 @@ def test_F1_long_pivots(flow):
     assert f.draft["layout"]["value"] == "long"
     f.confirm_all_as_proposed()
     f.finalize()
-    m = rows_of(f.export("value_matrix_A1.csv"))
+    m = rows_of(f.export("value_matrix_A1_B1.csv"))
     assert m[0] == ["feature_key", "S01", "S02", "S03", "S04", "S05", "S06"] and len(m) == 13
 
 
@@ -258,7 +260,7 @@ def test_ai_off_full_manual_flow(flow):
     for g in f.upload["groups"]:
         c = g["columns"][0]
         if g["kind"] == "numeric_block":
-            items.append({"group_id": g["group_id"], "role": "value", "label": "peak area", "block_role": "primary",
+            items.append({"group_id": g["group_id"], "role": "value", "label": "peak area",
                           "assay_label": "LC-MS untargeted"})
         elif c != "row ID":
             items.append({"group_id": g["group_id"], "role": "feature_annotation", "label": c})
@@ -311,10 +313,19 @@ def test_history_must_be_answered_and_no_default(flow):
     f.step("history", {"processing_history": {"normalized": {"answer": "yes"}}}, expect=422)
 
 
-def test_values_step_enforces_primary(flow):
+def test_values_step_keep_and_exclude(flow):
     f = flow("A_maxquant_proteinGroups.txt")
-    f.step("values", {"items": [{"group_id": gid_of(f, "Intensity S01"), "block_role": "primary"}]}, expect=422)
-    f.step("values", {"items": [{"group_id": gid_of(f, "LFQ intensity S01"), "block_role": "auxiliary"}]}, expect=422)
+    blocks = [gid_of(f, c) for c in ("LFQ intensity S01", "Intensity S01", "iBAQ S01", "Peptides S01")]
+    f.step("values", {"items": [{"group_id": g, "keep": False} for g in blocks]}, expect=422)   # keep at least one
+    f.confirm_all_as_proposed()
+    f.step("values", {"items": [{"group_id": g, "keep": False} for g in blocks[1:]]})
+    for st in ("samples", "sample_info"):
+        if f.draft["steps"][st] == "pending":
+            f.step(st, {} if st == "samples" else {"metadata": {"skip": True}})
+    out = f.finalize()
+    assert [a for a in out["artifacts"] if a.startswith("value_matrix")] == ["value_matrix_A1_B1.csv"]
+    excl = {x["column"] for x in out["schema"]["excluded_columns"] if x["reason"] == "value_block_excluded"}
+    assert "iBAQ S01" in excl and "LFQ intensity S01" not in excl
 
 
 def test_layout_change_triggers_reproposal(flow):

@@ -106,7 +106,6 @@ Anything else must still be recognized and described, but flagged in_supported_s
 ## Closed fields (use exactly these values; code branches on them)
 - layout: {closed['layout']}
 - role: {closed['column_role']}
-- block_role (role value only): {closed['block_role']}. At most one primary block per assay.
 - audit_kind (role sample_metadata only, else null): {closed['audit_kind']} ('other' is the escape hatch)
 - in_supported_scope: {closed['in_supported_scope']}
 - marks_rows_as_suspect (feature_annotation only): true when the column flags rows as decoy /
@@ -132,6 +131,9 @@ what the statistics suggest, e.g. "LFQ intensity, apparently raw linear scale (m
   mention it in the label: code splits the group only when suggest_split names the columns.
 - samples: sample names or glob patterns (e.g. "QC_*") with a label and is_study_sample.
 - clarifying_questions for anything you cannot resolve from the digest.
+- literature_queries: 1-3 Europe PMC search queries that would find papers analysing data like
+  this (the platform / software, the measurement types, the organism or sample type if the names
+  show it), e.g. "LFQ intensity" AND iBAQ AND MaxQuant. Names and terms only, never data values.
 - Respect everything under already_confirmed."""
 
 
@@ -153,7 +155,6 @@ def response_schema():
         "role": s(enum=VOCABULARY["column_role"]),
         "assay_label": s(nullable=True),
         "label": s(),
-        "block_role": s(enum=VOCABULARY["block_role"], nullable=True),
         "audit_kind": s(enum=VOCABULARY["audit_kind"], nullable=True),
         "marks_rows_as_suspect": b(nullable=True),
         "confidence": n(),
@@ -172,6 +173,7 @@ def response_schema():
             "confidence": n(), "evidence": s()}, "required": ["pattern_or_sample", "label", "is_study_sample"]}},
         "clarifying_questions": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
             "group_id": s(nullable=True), "question": s()}, "required": ["question"]}},
+        "literature_queries": {"type": "ARRAY", "items": s()},
     }, "required": ["layout", "assays", "groups"]}
 
 
@@ -204,7 +206,6 @@ class GroupLabel(BaseModel):
     role: str
     assay_label: Optional[str] = None
     label: Optional[str] = ""
-    block_role: Optional[str] = None
     audit_kind: Optional[str] = None
     marks_rows_as_suspect: Optional[bool] = None
     confidence: float = 0.0
@@ -234,6 +235,7 @@ class AIResponse(BaseModel):
     groups: List[GroupLabel] = []
     samples: List[SampleRule] = []
     clarifying_questions: List[Question] = []
+    literature_queries: List[str] = []
 
 
 def _clamp(x):
@@ -315,14 +317,15 @@ def ask(digest, sha, log=None, mock_fn=None):
 
 # ---------------------------------------------------------------- validate & merge
 
-GROUP_KEYS = ("role", "assay_label", "label", "block_role", "audit_kind", "marks_rows_as_suspect")
+GROUP_KEYS = ("role", "assay_label", "label", "audit_kind", "marks_rows_as_suspect")
 
 
 def validate_response(resp, groups, cols, layout=None):
     """AIResponse -> proposal. Unknown group ids are rejected; values outside
     the closed sets and contradicted claims become unresolved."""
     by_id = {g["group_id"]: g for g in groups}
-    out = {"groups": {}, "rejected": [], "samples": [], "clarifying_questions": [], "splits": [], "assays": []}
+    out = {"groups": {}, "rejected": [], "samples": [], "clarifying_questions": [], "splits": [], "assays": [],
+           "literature_queries": []}
     if resp.layout is not None:
         out["layout"] = {"value": resp.layout.value, "confidence": _clamp(resp.layout.confidence),
                          "evidence": resp.layout.evidence, "source": "ai"}
@@ -351,7 +354,7 @@ def validate_response(resp, groups, cols, layout=None):
         if gl.group_id in out["groups"]:
             continue
         item = {"role": gl.role, "assay_label": gl.assay_label, "label": (gl.label or "").strip(),
-                "block_role": gl.block_role, "audit_kind": gl.audit_kind,
+                "audit_kind": gl.audit_kind,
                 "marks_rows_as_suspect": bool(gl.marks_rows_as_suspect),
                 "confidence": _clamp(gl.confidence), "evidence": gl.evidence, "source": "ai"}
         out["groups"][gl.group_id] = finalize_item(item, by_id[gl.group_id], cols, layout)
@@ -362,6 +365,7 @@ def validate_response(resp, groups, cols, layout=None):
     out["samples"] = [{"pattern_or_sample": x.pattern_or_sample, "label": x.label, "is_study_sample": x.is_study_sample,
                        "confidence": _clamp(x.confidence), "evidence": x.evidence, "source": "ai"} for x in resp.samples]
     out["clarifying_questions"] = [q.model_dump() for q in resp.clarifying_questions]
+    out["literature_queries"] = [q.strip()[:200] for q in resp.literature_queries if q and q.strip()][:3]
     return out
 
 
@@ -369,7 +373,6 @@ def normalize_item(item):
     """Drop fields that do not apply to the role (keeps the item consistent)."""
     role = item.get("role")
     if role != "value":
-        item["block_role"] = None
         if role not in ("feature_annotation",):
             item["assay_label"] = item.get("assay_label") if role == "feature_id" else None
     if role != "sample_metadata":
@@ -385,7 +388,7 @@ def finalize_item(item, group, cols, layout=None):
     v = validate_group(item, group, cols, layout)
     item["validation"] = v
     if v["status"] == "contradicted":
-        item["claimed"] = {k: item.get(k) for k in ("role", "block_role", "audit_kind", "label")}
+        item["claimed"] = {k: item.get(k) for k in ("role", "audit_kind", "label")}
         item["role"] = UNRESOLVED
     if item.get("role") == "sample_metadata" and item.get("audit_kind") == "timepoint" and group["n_columns"] == 1:
         item.setdefault("detail", timepoint_detail(cols.digests[group["indices"][0]]))
@@ -393,7 +396,7 @@ def finalize_item(item, group, cols, layout=None):
 
 
 def unresolved_item(evidence, source="none"):
-    return {"role": UNRESOLVED, "assay_label": None, "label": "", "block_role": None, "audit_kind": None,
+    return {"role": UNRESOLVED, "assay_label": None, "label": "", "audit_kind": None,
             "marks_rows_as_suspect": False, "confidence": 0.0, "evidence": evidence, "source": source,
             "validation": {"status": "ok", "messages": []}}
 
@@ -404,7 +407,8 @@ def propose(filename, sha, groups, hints, cols, fixed=None, group_ids=None, log=
     Returns (proposal, meta, digests)."""
     targets = [g for g in groups if group_ids is None or g["group_id"] in group_ids]
     batches = [targets[i:i + GROUPS_PER_CALL] for i in range(0, len(targets), GROUPS_PER_CALL)] or [[]]
-    merged = {"groups": {}, "rejected": [], "samples": [], "clarifying_questions": [], "splits": [], "assays": []}
+    merged = {"groups": {}, "rejected": [], "samples": [], "clarifying_questions": [], "splits": [], "assays": [],
+              "literature_queries": []}
     metas, digests = [], []
     fixed = dict(fixed or {})
     for n, batch in enumerate(batches, 1):
@@ -436,6 +440,7 @@ def propose(filename, sha, groups, hints, cols, fixed=None, group_ids=None, log=
                 "The AI returned no label for this group.", "ai")
         for k in ("rejected", "samples", "clarifying_questions", "splits"):
             merged[k].extend(part[k])
+        merged["literature_queries"].extend(q for q in part["literature_queries"] if q not in merged["literature_queries"])
         if log:
             log("validation_result", {"batch": n, "groups": {gid: it["validation"] for gid, it in part["groups"].items()},
                                       "rejected": part["rejected"]})

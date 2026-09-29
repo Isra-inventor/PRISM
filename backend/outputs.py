@@ -39,11 +39,11 @@ def _fact(item):
 
 
 def _assays(s, d):
-    """Value groups (primary / auxiliary) grouped by assay label, in the order of d['assays']."""
+    """Kept value groups grouped by assay label, in the order of d['assays']. No block is ranked."""
     assays = OrderedDict((a["assay_label"], (a, [])) for a in d["assays"])
     for g in s.groups:
         it = d["groups"][g["group_id"]]
-        if it["role"] != "value" or it.get("block_role") == "excluded":
+        if it["role"] != "value" or not it.get("keep", True):
             continue
         lab = it.get("assay_label") or d["assays"][0]["assay_label"]
         if lab not in assays:
@@ -77,64 +77,71 @@ def build(s):
     feature_rows_all = []
     fk_idx = feature_key_indices(s, d)
     block_n = 0
+    lit_blocks = (d.get("literature") or {}).get("blocks") or {}
     for a_n, (a_label, (assay, gs)) in enumerate(assays.items(), 1):
         aid = f"A{a_n}"
         blocks = []
-        primary = None
-        for g in gs:
+        n_features = n_samples = 0
+        for b_n, g in enumerate(gs, 1):
             it = d["groups"][g["group_id"]]
-            block_n += 1
-            bid = f"B{block_n}"
+            bid = f"B{b_n}"
             prof = dict(g.get("profile") or {})
             for k in ("column", "position", "type", "values"):
                 prof.pop(k, None)
             rule = d["sample_rules"].get(g["group_id"], {"strip_prefix": "", "strip_suffix": ""})
+            sids = sample_ids(s, d, g["group_id"]) if lay == "samples_in_columns" else sample_ids(s, d)
+            where = f"{aid}/{bid}"
+            if len(set(sids)) != len(sids):
+                dup = [k for k, n in Counter(sids).items() if n > 1]
+                flags.append({"flag": "duplicate_sample_ids", "assay": aid, "block": bid,
+                              "detail": f"{len(dup)} sample ID(s) occur more than once: {', '.join(dup[:5])}"})
+            if lay == "samples_in_columns":
+                keys = ["|".join(cell(r, i) for i in fk_idx) for r in rows]
+                mat = [[k] + [_v(cell(r, i)) for i in g["indices"]] for k, r in zip(keys, rows)]
+                feat_keys = keys
+            elif lay == "samples_in_rows":
+                feat_keys = [header[i] for i in g["indices"]]
+                mat = [[header[i]] + [_v(cell(r, i)) for r in rows] for i in g["indices"]]
+            else:
+                vi = g["indices"][0]
+                si = s.groups_by_id[d["sample_id_group"]["value"]]["indices"][0]
+                pivot, feat_keys = OrderedDict(), []
+                for r in rows:
+                    fk = "|".join(cell(r, i).strip() for i in fk_idx)
+                    if fk not in pivot:
+                        pivot[fk] = {}
+                        feat_keys.append(fk)
+                    pivot[fk][cell(r, si).strip()] = _v(cell(r, vi))
+                mat = [[fk] + [pivot[fk].get(sm, "") for sm in sids] for fk in feat_keys]
+            dupk = [k for k, n in Counter(feat_keys).items() if n > 1]
+            if dupk and b_n == 1:
+                flags.append({"flag": "duplicate_feature_keys", "assay": aid,
+                              "detail": f"{len(dupk)} feature key(s) occur more than once (kept as is): {', '.join(dupk[:5])}"})
+            if any(not k for k in feat_keys) and b_n == 1:
+                flags.append({"flag": "empty_feature_keys", "assay": aid,
+                              "detail": f"{sum(1 for k in feat_keys if not k)} feature(s) have an empty key (kept)."})
+            fname = f"value_matrix_{aid}_{bid}.csv"
+            artifacts[fname] = _csv(["feature_key"] + sids, mat)
+            # one set of feature rows per assay (blocks of one assay share the rows),
+            # except samples-in-rows, where each block's columns are its own features
+            if lay == "samples_in_rows" or b_n == 1:
+                feature_rows_all.append((aid, g, feat_keys))
+            n_features, n_samples = max(n_features, len(feat_keys)), max(n_samples, len(sids))
+            lit = lit_blocks.get(g["group_id"])
             blocks.append({
-                "block_id": bid, "group_id": g["group_id"], "block_role": it["block_role"],
+                "block_id": bid, "group_id": g["group_id"], "file": fname, "keep": True,
                 "columns": g["columns"],
                 "sample_id_rule": {"strip_prefix": rule.get("strip_prefix", ""),
                                    "strip_suffix": rule.get("strip_suffix", "")} if lay == "samples_in_columns" else None,
                 "label": it.get("label") or "", "confidence": it.get("confidence"),
                 "provenance": provenance(it, GROUP_FIELDS),
                 "profile": prof,
+                "n_features": len(feat_keys), "n_samples": len(sids),
+                "literature": ({k: lit.get(k) for k in ("description", "typical_use", "suggested_for_analysis",
+                                                          "reason", "citations")} if lit else None),
             })
-            if it["block_role"] == "primary":
-                primary = (bid, g)
-        if primary is None:
+        if not blocks:
             continue
-        bid, g = primary
-        sids = sample_ids(s, d, g["group_id"]) if lay == "samples_in_columns" else sample_ids(s, d)
-        if len(set(sids)) != len(sids):
-            dup = [k for k, n in Counter(sids).items() if n > 1]
-            flags.append({"flag": "duplicate_sample_ids", "assay": aid,
-                          "detail": f"{len(dup)} sample ID(s) occur more than once: {', '.join(dup[:5])}"})
-        if lay == "samples_in_columns":
-            keys = ["|".join(cell(r, i) for i in fk_idx) for r in rows]
-            mat = [[k] + [_v(cell(r, i)) for i in g["indices"]] for k, r in zip(keys, rows)]
-            feat_keys = keys
-        elif lay == "samples_in_rows":
-            feat_keys = [header[i] for i in g["indices"]]
-            mat = [[header[i]] + [_v(cell(r, i)) for r in rows] for i in g["indices"]]
-        else:
-            vi = g["indices"][0]
-            si = s.groups_by_id[d["sample_id_group"]["value"]]["indices"][0]
-            pivot, feat_keys = OrderedDict(), []
-            for r in rows:
-                fk = "|".join(cell(r, i).strip() for i in fk_idx)
-                if fk not in pivot:
-                    pivot[fk] = {}
-                    feat_keys.append(fk)
-                pivot[fk][cell(r, si).strip()] = _v(cell(r, vi))
-            mat = [[fk] + [pivot[fk].get(sm, "") for sm in sids] for fk in feat_keys]
-        dupk = [k for k, n in Counter(feat_keys).items() if n > 1]
-        if dupk:
-            flags.append({"flag": "duplicate_feature_keys", "assay": aid,
-                          "detail": f"{len(dupk)} feature key(s) occur more than once (kept as is): {', '.join(dupk[:5])}"})
-        if any(not k for k in feat_keys):
-            flags.append({"flag": "empty_feature_keys", "assay": aid,
-                          "detail": f"{sum(1 for k in feat_keys if not k)} feature(s) have an empty key (kept)."})
-        artifacts[f"value_matrix_{aid}.csv"] = _csv(["feature_key"] + sids, mat)
-        feature_rows_all.append((aid, g, feat_keys))
         fi = d["feature_identity"]
         schema_assays.append({
             "assay_id": aid,
@@ -150,8 +157,8 @@ def build(s):
                                  {"columns": [], "from": "column headers of the value block", "composite": False,
                                   "provenance": "computed"}),
             "value_blocks": blocks,
-            "n_features": len(feat_keys),
-            "n_samples": len(sids),
+            "n_features": n_features,
+            "n_samples": n_samples,
         })
         if assay.get("in_supported_scope") in ("no", "unsure"):
             flags.append({"flag": "outside_supported_scope", "assay": aid,
@@ -305,10 +312,25 @@ def build(s):
                "models_used": d["ai"].get("models_used", []), "prompt_version": d["ai"]["prompt_version"],
                "temperature": d["ai"]["temperature"], "enabled": d["ai"]["enabled"]},
         "signature_hint": d.get("signature_hint"),
+        "literature": _literature(d.get("literature")),
         "clarifying_questions": d.get("clarifying_questions", []),
         "log_ref": f"{s.sid}.jsonl",
     }
     return schema, artifacts, flags
+
+
+def _literature(rec):
+    """Everything retrieved is kept, so later steps can reuse it without searching again."""
+    if not rec:
+        return None
+    keep = ("source", "endpoint", "queries", "ran_at", "status", "error", "ai_used", "summary", "blocks",
+            "for_later_steps", "rejected", "full_text_papers")
+    out = {k: rec.get(k) for k in keep}
+    out["papers"] = [{k: p.get(k) for k in ("paper_id", "title", "authors", "journal", "year", "pmid", "pmcid", "doi",
+                                              "url", "open_access", "query")} for p in (rec.get("papers") or {}).values()]
+    out["passages"] = [{k: p.get(k) for k in ("passage_id", "paper_id", "section", "text", "score")}
+                       for p in rec.get("passages") or []]
+    return out
 
 
 def _annotation(s, gid, it, column, i):
@@ -332,7 +354,7 @@ def _excluded(s, d):
         reason = None
         if it["role"] == "ignore":
             reason = "user_excluded" if provenance(it, GROUP_FIELDS) == "user_set" else "ignored"
-        elif it["role"] == "value" and it.get("block_role") == "excluded":
+        elif it["role"] == "value" and not it.get("keep", True):
             reason = "value_block_excluded"
         elif it["role"] in ("feature_annotation", "sample_metadata") and not it.get("keep", True):
             reason = "user_dropped"

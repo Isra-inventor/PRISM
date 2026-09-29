@@ -65,7 +65,9 @@ upload ─► parse (strings only, report oddities) ─► profile every column 
       ─► AI labels each group from a statistics digest, briefed by backend/briefing.md (optional)
       ─► structural checks; contradicted claims become "unresolved"
       ─► 8-step wizard: every proposal is editable in place; "Disagree?" re-asks the AI with your note
-      ─► schema.json + value matrices + feature / sample metadata
+      ─► step 4: Europe PMC literature search; the AI describes each value block from the papers,
+         with citations checked word for word
+      ─► schema.json + one value matrix per kept block + feature / sample metadata + the literature
 ```
 
 **Principles, enforced in code:**
@@ -131,9 +133,10 @@ You still confirm the result. With the AI off, the box says so and you edit dire
 3. **Annotations.** Each column's label and role, and whether to keep it. For a column that marks rows as suspect
    (decoy, contaminant…), PRISM lists its distinct values with counts (≤ 5) and asks which one means "flagged", then shows
    "N rows flagged — nothing is removed now; recorded for the audit step."
-4. **Values.** Primary / auxiliary / excluded per assay. The block's label (the AI's words, editable) sits beside the profile
-   computed from the data (histogram, min / median / max, zeros, whole numbers, span), so you can see whether they match.
-   Numeric columns that don't look like features are listed separately.
+4. **Values.** Nothing is ranked: there is no "primary" block. You keep or exclude each value block, and every kept block
+   is exported as its own matrix. The block's label (the AI's words, editable) sits beside the profile computed from the
+   data (histogram, min / median / max, zeros, whole numbers, span), so you can see whether they match. Below it,
+   **what the literature says** (see next section). Numeric columns that don't look like features are listed separately.
 5. **Samples.** Sample IDs, with an editable prefix/suffix strip and a live preview, and duplicates. Each sample has a label and
    a "study sample" tick: untick it for QC, blanks, pools, calibrators. Nothing is dropped.
 6. **Sample info.** Samples-in-rows: role, audit kind, label and detail of each sample column. Samples-in-columns: an optional
@@ -145,13 +148,37 @@ You still confirm the result. With the AI off, the box says so and you edit dire
 Keyboard: **Enter** confirms, **Esc** leaves a field. Clicking a step in the stepper goes back to it.
 Changing the layout re-runs the proposal with your layout fixed.
 
+### Literature (RAG) — `backend/literature.py`
+When you open step 4, PRISM searches **Europe PMC** (PubMed abstracts plus open-access full text) for papers with similar
+data, and the AI describes each value block from what it finds:
+1. **Queries**: 1–3 written by the AI in the first proposal, plus ones built from your confirmed description (software,
+   omics type, block names such as `"LFQ intensity" AND "iBAQ"`). They are shown and editable; "Search again" re-runs them.
+   Only these names and terms are sent to Europe PMC, never data.
+2. **Retrieval**: the top papers per query; for the best open-access ones, the methods / data-processing / results
+   sections of the full text (that is where papers say what they actually analysed). Everything is cut into passages
+   and ranked (BM25, plus a bonus for the block names), at most 3 passages per paper. Responses are cached on disk
+   (`backend/cache/literature/`).
+3. **Suggestions**: the AI gets the passages and, per block, writes what the measurement is, how similar studies used it,
+   and `suggested_for_analysis` yes / no / unsure — several blocks can be "yes"; nothing is ranked. Every claim must cite a
+   passage with an **exact quote**. Code checks each quote word for word: quotes that are not in the passage are
+   discarded, and a "yes" left without a verified citation becomes "unsure". The page shows the badge, the text,
+   `[n]` links to the papers (hover shows the quote), and the papers and passages themselves.
+4. **Kept for later steps**: all papers and passages, plus the passages the AI points to for normalization / missing
+   values / batch effects (`for_later_steps`, pointers only, no advice), are stored in `schema.json`, so the audit and
+   preprocessing steps can reuse them without searching again.
+
+With the AI off, the search still runs and you get the ranked passages to read yourself. If Europe PMC cannot be
+reached you get a clear message and can continue without it. `PRISM_LITERATURE=off` turns it off;
+`PRISM_EUROPEPMC_URL` points at a mirror. RAG does not train the model: it puts relevant, citable text in front of it for each file.
+
 ### Outputs (per session, in `backend/sessions/<id>/outputs/`)
 - `schema.json`: the confirmed schema: layout; assays (label, omics type, software, scope, feature identity, value blocks with
-  label, block role and computed profile); `feature_annotations` (label, `marks_rows_as_suspect`, `flag_values`, `flagged_value`,
+  label, file, computed profile and the literature suggestion); `feature_annotations` (label, `marks_rows_as_suspect`, `flag_values`, `flagged_value`,
   `n_flagged`, keep, provenance); `sample_metadata` (audit kind, label, detail); `samples` (sample, label, `is_study_sample`,
   provenance); excluded columns, processing history, parse report, integrity flags (incl. `outside_supported_scope`),
-  `signature_hint`, and the AI provider / model / prompt version.
-- `value_matrix_<assay>.csv`: features × samples, from the primary block only. For long tables, the pivot runs only if every
+  `signature_hint`, `literature` (queries, papers, passages, per-block suggestions with verified citations, pointers for
+  later steps), and the AI provider / model / prompt version.
+- `value_matrix_<assay>_<block>.csv` (e.g. `value_matrix_A1_B2.csv`): features × samples, one per kept block. For long tables, the pivot runs only if every
   (feature, sample) pair is unique; otherwise PRISM stops and explains that aggregation is not supported.
 - `feature_metadata.csv`, `sample_metadata.csv` (`sample_id`, `sample_label`, `is_study_sample`, then the metadata columns).
 
@@ -167,6 +194,7 @@ finalization is logged to `backend/logs/<session_id>.jsonl`, with timestamps, th
 | POST | `/api/upload` | multipart `file` → session, parse report, preview, groups with profiles and histograms |
 | POST | `/api/propose` | `{session_id, ai}` → the draft (validated AI proposal, or the manual starting point) and the exact digest(s) sent |
 | POST | `/api/confirm-step` | `{session_id, step_id, decision}` → updated draft; changing the layout triggers a re-proposal |
+| POST | `/api/literature` | `{session_id, queries?}` → searches Europe PMC and adds cited suggestions per value block |
 | POST | `/api/reconsider` | `{session_id, group_ids, user_hint}` → re-asks the AI about these groups with your note (splits it suggests are applied) |
 | POST | `/api/metadata-upload` | multipart `session_id`, `file` → matching report |
 | POST | `/api/finalize` | → schema, artifact list, integrity flags |
@@ -179,14 +207,22 @@ finalization is logged to `backend/logs/<session_id>.jsonl`, with timestamps, th
 ```bash
 python -m pytest -q
 ```
-The LLM is always mocked in the tests, including deliberately wrong proposals. The tests assert structure (role,
-block role, audit kind, `marks_rows_as_suspect`, `is_study_sample`), never label wording. They cover:
+The LLM is always mocked in the tests, including deliberately wrong proposals, and Europe PMC is replaced by a fake
+(`tests/fake_europepmc.py`, same response format, invented test papers). The tests assert structure (role, keep, audit kind, `marks_rows_as_suspect`, `is_study_sample`), never label wording. They cover:
 - parsing and the parse report;
 - digests and grouping (incl. the 16S and methylation tables);
 - signatures as hint and manual starting point;
 - the structural checks: hallucinated group id, value role on a text column, a closed field outside its set;
 - full API flows for fixtures A–F (MaxQuant, DIA-NN, MZmine, samples-in-rows multi-omics, SomaScan-like, long unique/duplicate);
-- AI off, invalid JSON, suspect-flag values, out-of-scope notice, disagree / reconsider (incl. a split), provenance and the outputs.
+- AI off, invalid JSON, suspect-flag values, out-of-scope notice, disagree / reconsider (incl. a split), provenance and the outputs;
+- literature: queries, full-text parsing, caching, citations verified word for word, invented quotes discarded and
+  "yes" downgraded, AI off, no results, service unreachable, and the real HTTP client against the fake server.
+
+To try the literature step offline, run the fake service and point PRISM at it:
+```bash
+python tests/fake_europepmc.py 8090
+PRISM_EUROPEPMC_URL=http://127.0.0.1:8090 python -m uvicorn backend.main:app --reload
+```
 
 A manual acceptance test runs against the real AI with tables outside the current scope (fixtures H: 16S OTU
 counts, I: methylation beta values). They must be described sensibly and flagged `no` / `unsure`, and the wizard
@@ -202,8 +238,10 @@ To regenerate the fixtures: `python tests/fixtures/make_fixtures.py`.
 ```
 backend/   main.py (API) · schema.py (vocabulary) · config.py (scope) · briefing.md (AI briefing)
            parsing.py · profiling.py · format_detect.py (signatures)
-           validation.py · ai.py · llm_providers.py · mock_llm.py · workflow.py (draft, steps) · outputs.py
+           validation.py · ai.py · literature.py (Europe PMC RAG) · llm_providers.py · mock_llm.py
+           workflow.py (draft, steps) · outputs.py
            session_log.py · envfile.py · check_ai.py
 frontend/  index.html (home + 3D prism) · tool.html + app.js (wizard) · style.css · home.js · fonts/
-tests/     fixtures/ (A–F, H 16S, I methylation, messy file) · test_deterministic.py · test_flow.py · test_real_api.py
+tests/     fixtures/ (A–F, H 16S, I methylation, messy file) · fake_europepmc.py · test_deterministic.py
+           test_flow.py · test_literature.py · test_real_api.py
 ```

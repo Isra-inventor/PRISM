@@ -65,8 +65,6 @@ def validate_group(item, group, cols, layout=None):
     if role == "value":
         if group["type"] != "numeric":
             _contradict(res, "Contains non-numeric values, so it cannot be a measurement column.")
-        if item.get("block_role") not in (None, *VOCABULARY["block_role"]):
-            _contradict(res, f"'{item.get('block_role')}' is not an allowed block role.")
         return res
     if role == "sample_metadata" and item.get("audit_kind") not in (None, *VOCABULARY["audit_kind"]):
         _contradict(res, f"'{item.get('audit_kind')}' is not an allowed audit kind.")

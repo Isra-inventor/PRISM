@@ -45,7 +45,7 @@ def test_out_of_scope_described_and_wizard_completes(flow, real_ai, name):
     assert re.search(CASES[name], described, re.I), described
     assert a["in_supported_scope"] in ("no", "unsure")
     block = next(it for it in d["groups"].values() if it["role"] == "value")
-    assert block["block_role"] == "primary" and block["label"]
+    assert block["keep"] and block["label"]
     f.confirm_all_as_proposed()
     for st, it in f.draft["groups"].items():
         assert it["role"] != "unresolved", (st, it)

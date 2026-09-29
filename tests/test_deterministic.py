@@ -138,8 +138,8 @@ def test_maxquant_prefill_is_manual_starting_point():
     rev, con = g[by_col(groups, "Reverse")["group_id"]], g[by_col(groups, "Potential contaminant")["group_id"]]
     assert rev["role"] == con["role"] == "feature_annotation"
     assert rev["marks_rows_as_suspect"] is True and con["marks_rows_as_suspect"] is True
-    assert g[by_col(groups, "LFQ intensity S01")["group_id"]]["block_role"] == "primary"
-    assert g[by_col(groups, "Peptides S01")["group_id"]]["block_role"] == "auxiliary"
+    lfq, pep = g[by_col(groups, "LFQ intensity S01")["group_id"]], g[by_col(groups, "Peptides S01")["group_id"]]
+    assert lfq["role"] == pep["role"] == "value" and "block_role" not in lfq   # described, never ranked
     assert all(it["source"] == "computed" for it in g.values())
     assert p["layout"]["value"] == "samples_in_columns"
     assert p["assays"][0]["in_supported_scope"] == "yes"
@@ -162,8 +162,7 @@ def test_value_role_on_text_is_contradicted_and_id_checks():
     t, cols, groups, _ = load("D_samples_in_rows_multiomics.csv")
     assert validate_group({"role": "value"}, by_col(groups, "visit"), cols)["status"] == "contradicted"
     proteins = next(g for g in groups if g["n_columns"] == 25)
-    assert validate_group({"role": "value", "block_role": "primary"}, proteins, cols)["status"] == "ok"
-    assert validate_group({"role": "value", "block_role": "main"}, proteins, cols)["status"] == "contradicted"
+    assert validate_group({"role": "value"}, proteins, cols)["status"] == "ok"
     subj = by_col(groups, "subject_id")
     assert validate_group({"role": "sample_id"}, subj, cols)["status"] == "warning"   # repeats: warning only
     assert validate_group({"role": "sample_id"}, by_col(groups, "sample_id"), cols)["status"] == "ok"

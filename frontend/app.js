@@ -71,7 +71,7 @@
       let p = server ? server.percent : Math.round((upload || 0) * 2);
       let lab = label;
       if (upload != null && upload < 1) lab = `Uploading (${Math.round(upload * 100)}%)`;
-      else if (server) lab = { reading: "Reading the file", detecting: "Grouping columns", ai: "AI is labelling column groups",
+      else if (server) lab = { reading: "Reading the file", detecting: "Grouping columns", ai: "AI is labelling column groups", literature: "Searching the literature",
                                done: "Done", error: "Stopped with an error" }[server.stage] || label;
       q(".p-label").textContent = lab;
       q(".progress-pct").textContent = `${p}%`;
@@ -156,7 +156,7 @@
   $("restart").addEventListener("click", reset);
 
   function reset() {
-    Object.assign(S, { session: null, draft: null, digests: null, step: "layout", local: {}, finalized: null });
+    Object.assign(S, { session: null, draft: null, digests: null, step: "layout", local: {}, finalized: null, litTried: false });
     show($("workspace"), false); show($("panel-upload")); show($("restart"), false); show($("upload-error"), false);
     input.value = "";
     window.scrollTo({ top: 0 });
@@ -196,7 +196,7 @@
       try {
         const r = await api("/api/propose", { session_id: S.session.session_id, ai: S.aiOn, progress_id: pid });
         S.session = r.session; S.draft = r.draft; S.digests = r.digests; S.finalized = null;
-        S.step = "layout"; S.local = {};
+        S.step = "layout"; S.local = {}; S.litTried = false;
       } catch (err) {
         $("guide").replaceChildren(el("div", { class: "alert alert-error", text: err.message }));
         throw err;
@@ -208,7 +208,7 @@
   // ------------------------------------------------------------ roles, steps
   function roleKey(it) {
     if (!it) return "pending";
-    if (it.role === "value") return `value_${it.block_role || "auxiliary"}`;
+    if (it.role === "value") return it.keep === false ? "value_excluded" : "value";
     return it.role;
   }
   function stepFor(gid) {
@@ -239,7 +239,7 @@
       feature_id: "feature ID" + lab, feature_annotation: (it.marks_rows_as_suspect ? "flag" : "annotation") + lab,
       sample_id: "sample ID", sample_metadata: `sample info${it.audit_kind ? " · " + pretty(it.audit_kind) : ""}${lab}`,
       ignore: "ignored", unresolved: "unresolved",
-      value: `value · ${it.block_role || "auxiliary"}${lab}`,
+      value: `value${it.keep === false ? " · excluded" : ""}${lab}`,
     }[it.role] || it.role;
   }
   function focusGroups(step) {
@@ -250,11 +250,11 @@
       case "layout": return byRole("value").length ? byRole("value") : all.filter((g) => G(g)?.kind === "numeric_block");
       case "feature_id": return lay === "samples_in_rows" ? byRole("value")
         : [...S.draft.feature_identity.group_ids, ...(lay === "long" && S.draft.sample_id_group.value ? [S.draft.sample_id_group.value] : [])];
-      case "samples": return lay === "samples_in_columns" ? all.filter((g) => D(g).role === "value" && D(g).block_role === "primary") : byRole("sample_id");
-      case "history": return all.filter((g) => D(g).role === "value" && D(g).block_role === "primary");
+      case "samples": return lay === "samples_in_columns" ? all.filter((g) => D(g).role === "value" && D(g).keep !== false) : byRole("sample_id");
+      case "history": return all.filter((g) => D(g).role === "value" && D(g).keep !== false);
       case "review": return [];
       case "values": {
-        const blocks = all.filter((g) => D(g).role === "value").sort((a, b) => (D(a).block_role === "primary" ? -1 : 0) - (D(b).block_role === "primary" ? -1 : 0));
+        const blocks = all.filter((g) => D(g).role === "value");
         return [...blocks, ...all.filter((g) => !blocks.includes(g) && (stepFor(g) === "values" || (lay === "samples_in_rows"
           && G(g)?.type === "numeric" && G(g).n_columns === 1 && ["sample_metadata", "ignore"].includes(D(g).role))))];
       }
@@ -294,8 +294,8 @@
   }
 
   function renderLegend() {
-    const items = [["feature ID", "var(--c-fid)"], ["annotation", "var(--c-ann)"], ["value (primary)", "var(--c-val)"],
-      ["value (auxiliary)", "transparent;border:1px solid var(--c-val)"], ["sample ID", "var(--c-sid)"], ["sample info", "var(--c-smd)"],
+    const items = [["feature ID", "var(--c-fid)"], ["annotation", "var(--c-ann)"], ["value", "var(--c-val)"],
+      ["value (excluded)", "transparent;border:1px solid #333"], ["sample ID", "var(--c-sid)"], ["sample info", "var(--c-smd)"],
       ["ignored", "transparent;border:1px solid #333"], ["unresolved", "transparent;border:1px solid var(--c-unres)"],
       ["pending", "transparent;border:1px dashed #555"]];
     $("legend").replaceChildren(...items.map(([t, c]) => el("span", {}, el("i", { style: `background:${c}` }), t)));
@@ -424,7 +424,7 @@
   function warnList(v, claimed) {
     const msgs = (v?.messages || []).map((m) => el("li", { class: v.status === "contradicted" ? "bad" : "", text: m }));
     if (claimed) {
-      const what = [pretty(claimed.role), claimed.audit_kind && pretty(claimed.audit_kind), claimed.block_role, claimed.label && `“${claimed.label}”`].filter(Boolean).join(" / ");
+      const what = [pretty(claimed.role), claimed.audit_kind && pretty(claimed.audit_kind), claimed.label && `“${claimed.label}”`].filter(Boolean).join(" / ");
       msgs.unshift(el("li", { class: "bad", text: `The AI proposed ${what}, but the data contradicts it. Please choose.` }));
     }
     return msgs.length ? el("ul", { class: "warns" }, msgs) : null;
@@ -535,7 +535,7 @@
       box.append(head, el("p", { class: "item-sub", text: "The AI is off, so there is nothing to ask. Every field above is editable: change it directly and confirm." }));
       return box;
     }
-    const ta = el("textarea", { class: "input", rows: 2, placeholder: `e.g. “the iron column is a clinical value, not a metabolite” or “these are raw intensities, the LFQ block is the main one”` });
+    const ta = el("textarea", { class: "input", rows: 2, placeholder: `e.g. “the iron column is a clinical value, not a metabolite” or “these are peptide counts, not intensities”` });
     ta.value = S.local.feedback || "";
     ta.addEventListener("input", () => { S.local.feedback = ta.value; });
     const kept = gids.length - ask.length;
@@ -565,8 +565,7 @@
     }
     if (role === "feature_annotation") ctr.append(el("div", { class: "full" }, suspectControls(gid)));
     if (role === "value") {
-      ctr.append(fieldBox("Assay", textInput(cur(gid, "assay_label") || assayLabels()[0], (v) => { local(gid).assay_label = v; }, { list: "dl-assay" })),
-        fieldBox("Block", select(S.vocab.block_role, cur(gid, "block_role") || "auxiliary", (v) => { local(gid).block_role = v; renderGuide(); })));
+      ctr.append(fieldBox("Assay", textInput(cur(gid, "assay_label") || assayLabels()[0], (v) => { local(gid).assay_label = v; }, { list: "dl-assay" })));
     }
     if (["feature_annotation", "sample_metadata"].includes(role)) ctr.append(el("div", { class: "full" }, keepBox(gid)));
     return el("div", { class: `item ${unres ? "unres" : ""}`, onmouseenter: () => hoverGroup(gid, true), onmouseleave: () => hoverGroup(gid, false) },
@@ -578,7 +577,7 @@
   function hoverGroup(gid, on) {
     $("pv").querySelectorAll(`th[data-gid="${gid}"] .chip`).forEach((c) => c.style.outline = on ? "1px solid #fff" : "");
   }
-  const ITEM_FIELDS = ["role", "label", "assay_label", "block_role", "audit_kind", "marks_rows_as_suspect", "flagged_value", "detail", "keep"];
+  const ITEM_FIELDS = ["role", "label", "assay_label", "audit_kind", "marks_rows_as_suspect", "flagged_value", "detail", "keep"];
   function itemDecisions(gids) {
     return gids.map((gid) => {
       const l = S.local.items?.[gid] || {};
@@ -740,13 +739,88 @@
     if (h.n_zero) { const z = `${h.n_zero} zeros`; ctx.fillText(z, (w - ctx.measureText(z).width) / 2, hh - 2); }
   }
 
+  // ---------------- literature (Europe PMC) — suggestions, always with verified citations
+  const LIT = () => S.draft.literature;
+  function paperNo(pid) {
+    const order = [...new Set((LIT()?.passages || []).map((p) => p.paper_id))];
+    Object.keys(LIT()?.papers || {}).forEach((k) => { if (!order.includes(k)) order.push(k); });
+    return order.indexOf(pid) + 1;
+  }
+  function citeChips(cites) {
+    if (!cites || !cites.length) return null;
+    const papers = LIT().papers || {};
+    return el("span", { class: "cites" }, cites.map((c) => {
+      const p = papers[c.paper_id] || {};
+      return el("a", { class: "cite", href: p.url || "#", target: "_blank", rel: "noopener",
+        title: `“${c.quote}”\n— ${p.title || c.paper_id} (${p.journal || ""} ${p.year || ""})` }, `[${paperNo(c.paper_id)}]`);
+    }));
+  }
+  const SUG = { yes: ["similar studies analysed it", "s-yes"], no: ["usually not analysed", "s-no"], unsure: ["not clear from the papers", "s-unsure"] };
+  function litBlock(gid) {
+    const rec = LIT();
+    if (!rec) return null;
+    const b = rec.blocks?.[gid];
+    if (!b) return rec.status === "done" ? el("div", { class: "lit lit-none", text: "The retrieved papers say nothing about this block." }) : null;
+    const [txt, cls] = SUG[b.suggested_for_analysis] || SUG.unsure;
+    return el("div", { class: "lit" },
+      el("div", { class: "section-label", text: "What the literature says" }),
+      el("div", { class: "lit-head" }, el("span", { class: `badge ${cls}`, text: `suggestion: ${txt}` }),
+        b.supported ? null : el("span", { class: "badge v-warning", text: "no verifiable citation" })),
+      b.description ? el("p", {}, b.description) : null,
+      b.typical_use ? el("p", {}, el("span", { class: "lit-k", text: "Typical use: " }), b.typical_use, " ", citeChips(b.citations)) : null,
+      b.reason ? el("p", { class: "item-sub" }, b.reason) : null);
+  }
+  function literaturePanel() {
+    const d = S.draft, rec = LIT();
+    if (!d.literature_enabled) return el("div", { class: "notice", text: "Literature search is turned off on this server (PRISM_LITERATURE=off)." });
+    const qs = S.local.litQueries ?? (rec?.queries?.length ? rec.queries : d.literature_queries_suggested || []);
+    const ta = el("textarea", { class: "input", rows: Math.max(2, Math.min(5, qs.length)), spellcheck: "false" });
+    ta.value = qs.join("\n");
+    ta.addEventListener("input", () => { S.local.litQueries = ta.value.split("\n"); });
+    const go = el("button", { class: "btn btn-sm", type: "button", text: rec ? "Search again" : "Search Europe PMC", onclick: () => searchLiterature() });
+    const box = el("div", { class: "lit-panel" },
+      el("div", { class: "disagree-head" }, el("strong", { text: "What do papers with similar data say?" })),
+      el("p", { class: "item-sub", text: "PRISM searches Europe PMC (PubMed abstracts + open-access full text) with these queries — names and terms only, never your data — "
+        + "and the AI describes each block from the retrieved passages. Every citation is checked word for word against its passage. These are suggestions: you decide." }));
+    if (rec) {
+      const n = Object.keys(rec.papers || {}).length;
+      box.append(el("div", { class: `notice ${rec.error ? "accent" : ""}` },
+        rec.error ? rec.error + " " : "",
+        `${n} paper(s), ${(rec.passages || []).length} relevant passage(s)${rec.full_text_papers?.length ? `, ${rec.full_text_papers.length} read in full` : ""}`
+        + (rec.status === "retrieved_only" ? " · not summarised (AI off or unavailable): read the passages below." : "") + ` · searched ${rec.ran_at}`));
+      if (rec.summary?.text) box.append(el("p", {}, rec.summary.text, " ", citeChips(rec.summary.citations)));
+      if (rec.rejected?.length) box.append(el("div", { class: "item-sub", text: `${rec.rejected.length} citation(s) from the AI were discarded because the quote was not found in the paper.` }));
+      const papers = Object.values(rec.papers || {}).sort((a, b) => paperNo(a.paper_id) - paperNo(b.paper_id));
+      if (papers.length) box.append(el("details", { class: "saw" }, el("summary", { text: `Papers (${papers.length})` }),
+        el("ol", { class: "papers" }, papers.map((p) => el("li", {},
+          el("a", { href: p.url, target: "_blank", rel: "noopener", text: p.title }),
+          el("div", { class: "item-sub", text: `[${paperNo(p.paper_id)}] ${p.authors} · ${p.journal} ${p.year}${p.open_access ? " · open access" : ""}` }))))));
+      if (rec.passages?.length) box.append(el("details", { class: "saw" }, el("summary", { text: `Passages given to the AI (${rec.passages.length})` }),
+        el("ol", { class: "papers" }, rec.passages.map((p) => el("li", {}, el("div", { class: "item-sub", text: `${p.passage_id} · [${paperNo(p.paper_id)}] ${p.section}` }), p.text)))));
+    }
+    box.append(fieldBox("Search queries (one per line, Europe PMC syntax)", ta), el("div", { class: "disagree-actions" }, go));
+    return box;
+  }
+  async function searchLiterature(auto) {
+    const queries = (S.local.litQueries || []).map((q) => q.trim()).filter(Boolean);
+    const keep = { items: S.local.items };
+    await busy("Searching the literature", async (pid) => {
+      try {
+        const r = await api("/api/literature", { session_id: S.session.session_id, queries, progress_id: pid });
+        S.draft = r.draft;
+        S.local = keep;
+      } catch (e) { S.local.error = (auto ? "Literature search: " : "") + e.message; S.litTried = true; }
+    });
+    renderGuide();
+  }
+
   function valueCard(gid) {
     const it = D(gid), g = G(gid), p = g.profile || {}, lay = layout();
-    const role = cur(gid, "role"), br = cur(gid, "block_role") || "auxiliary";
+    const role = cur(gid, "role"), keep = cur(gid, "keep") !== false;
     const n = g.n_columns;
     const voice = lay === "samples_in_rows" ? `${n} columns: ${n} features measured in every sample.` : `${n} columns: one measurement per sample.`;
-    const seg = el("div", { class: "seg orange" }, S.vocab.block_role.map((r) => el("button", { type: "button", class: br === r ? "on" : "", text: r,
-      title: S.defs[r] || "", onclick: () => { local(gid).block_role = r; if (cur(gid, "role") !== "value") local(gid).role = "value"; renderGuide(); } })));
+    const keepCb = el("input", { type: "checkbox", checked: keep && role === "value" });
+    keepCb.addEventListener("change", () => { local(gid).keep = keepCb.checked; if (keepCb.checked && cur(gid, "role") !== "value") local(gid).role = "value"; renderGuide(); });
     const canvas = el("canvas", { class: "hist" });
     setTimeout(() => drawHist(canvas, g.histogram), 0);
     const samples = lay === "samples_in_columns" ? (S.draft.blocks_samples?.[gid] || []) : [];
@@ -762,12 +836,13 @@
       fieldBox("What these values are (your words)", textInput(cur(gid, "label"), (v) => { local(gid).label = v; }, { placeholder: "e.g. LFQ intensity, apparently linear", list: "dl-label" })),
       fieldBox("Assay", textInput(cur(gid, "assay_label") || assayLabels()[0], (v) => { local(gid).assay_label = v; }, { list: "dl-assay" })),
       fieldBox("Role", roleSelect(gid)));
-    return el("div", { class: `block-card ${br === "primary" && role === "value" ? "primary" : ""} ${role === "unresolved" ? "unres" : ""}`, onmouseenter: () => hoverGroup(gid, true), onmouseleave: () => hoverGroup(gid, false) },
+    return el("div", { class: `block-card ${keep && role === "value" ? "kept" : "dropped"} ${role === "unresolved" ? "unres" : ""}`, onmouseenter: () => hoverGroup(gid, true), onmouseleave: () => hoverGroup(gid, false) },
       el("div", { class: "item-head" }, el("h4", {}, cur(gid, "label") || (g.pattern ? g.pattern.text.trim() : `${n} numeric columns`),
         el("span", { class: "item-sub", text: `  ${colsText(g)}` })), metaRow(it)),
-      el("div", { class: "q", style: "margin:6px 0 8px" }, voice, " Which block is the main matrix?"),
-      seg,
+      el("div", { class: "q", style: "margin:6px 0 8px" }, voice),
+      el("label", { class: "check" }, keepCb, "keep and export this block (its own matrix file)"),
       el("div", { class: "side-by-side" }, described, computed),
+      litBlock(gid),
       evidence(it.evidence), warnList(it.validation, it.claimed),
       el("div", { class: "item-foot" }, reconsiderOne(gid)));
   }
@@ -776,24 +851,24 @@
     const all = focusGroups("values");
     const blocks = all.filter((g) => D(g).role === "value" || (D(g).role === "unresolved" && G(g).kind === "numeric_block"));
     const others = all.filter((g) => !blocks.includes(g));
-    const body = [el("div", {}, blocks.map(valueCard))];
+    if (!LIT() && !S.litTried && S.draft.literature_enabled && blocks.some((g) => D(g).role === "value")) {
+      S.litTried = true;               // search once automatically when the step first opens
+      setTimeout(() => searchLiterature(true), 0);
+    }
+    const body = [literaturePanel(), el("div", {}, blocks.map(valueCard))];
     if (others.length) {
       body.push(el("div", { class: "section-label", text: "Other numeric columns" }));
       body.push(el("p", { class: "q", text: "Covariates and technical values (age, CD4 count, iron, scale factors…) usually describe samples. Change any of them if needed." }));
       body.push(el("div", { class: "items" }, others.map((g) => itemCard(g, { roles: ["sample_metadata", "value", "feature_annotation", "ignore"] }))));
     }
     return {
-      title: blocks.length > 1 ? `${blocks.length} candidate measurement blocks. Which is the main one?` : "Is this the measurement block?",
-      question: "Mark one primary block per assay; the others stay as auxiliary (kept alongside) or are excluded. The AI's description sits beside the computed profile: correct it if they don't match.",
+      title: blocks.length > 1 ? `${blocks.length} measurement blocks. What is each one?` : "Is this the measurement block?",
+      question: "Nothing is ranked: every block you keep is exported as its own matrix. Check each description against the computed profile, and see what papers with similar data did with it.",
       body,
       disagree: [all, "column groups"],
       decision: () => {
         checkItems(all);
-        const labels = new Set(all.filter((g) => cur(g, "role") === "value").map((g) => cur(g, "assay_label") || assayLabels()[0]));
-        for (const a of labels) {
-          const prim = all.filter((g) => cur(g, "role") === "value" && (cur(g, "assay_label") || assayLabels()[0]) === a && cur(g, "block_role") === "primary");
-          if (prim.length > 1) throw new Error(`Only one primary block per assay (${a}).`);
-        }
+        if (!all.some((g) => cur(g, "role") === "value" && cur(g, "keep") !== false)) throw new Error("Keep at least one value block.");
         return { items: itemDecisions(all) };
       },
     };
@@ -829,7 +904,7 @@
   function stepSamples() {
     const d = S.draft, lay = layout(), body = [];
     if (lay === "samples_in_columns") {
-      const prim = Object.keys(d.groups).filter((g) => D(g).role === "value" && D(g).block_role === "primary");
+      const prim = Object.keys(d.groups).filter((g) => D(g).role === "value" && D(g).keep !== false);
       S.local.rules = S.local.rules || {};
       for (const gid of prim) {
         const base = d.sample_rules[gid] || { strip_prefix: "", strip_suffix: "" };
@@ -950,10 +1025,10 @@
     S.local.hist = S.local.hist || JSON.parse(JSON.stringify(d.processing_history));
     if (S.local.software == null) S.local.software = d.software_and_version || "";
     if (S.local.notes == null) S.local.notes = d.history_notes || "";
-    const prim = Object.keys(d.groups).filter((g) => D(g).role === "value" && D(g).block_role === "primary");
+    const kept = Object.keys(d.groups).filter((g) => D(g).role === "value" && D(g).keep !== false);
     const body = [];
-    const described = prim.map((g) => D(g).label).filter(Boolean);
-    if (described.length) body.push(el("div", { class: "notice", text: `Main block(s) described as: ${described.map((x) => `“${x}”`).join(", ")}. That is only a description; please answer below.` }));
+    const described = kept.map((g) => D(g).label).filter(Boolean);
+    if (described.length) body.push(el("div", { class: "notice", text: `Value block(s) described as: ${described.map((x) => `“${x}”`).join(", ")}. That is only a description; please answer below.` }));
     for (const q of S.historyQ) {
       const a = S.local.hist[q.id];
       body.push(el("div", { class: "hq" }, el("p", { text: q.question }),
@@ -986,7 +1061,10 @@
       ...d.assays.map((a) => li(`Assay · ${a.assay_label}`, [`${a.omics_type} · ${a.source_software}`, " ",
         ["no", "unsure"].includes(a.in_supported_scope) ? el("span", { class: "badge v-warning", text: "outside current scope" }) : null, " ", provBadge(a.provenance, a.source)])),
       li("Feature ID", layout() === "samples_in_rows" ? "column headers" : d.feature_identity.group_ids.map((g) => G(g).columns[0]).join(" + ") || "—"),
-      ...groups.filter(([, x]) => x.role === "value").map(([g, x]) => li(`Values (${x.block_role})`, [`${x.label || G(g).columns[0]} · ${G(g).n_columns} col · ${x.assay_label}`, " ", provBadge(x.provenance, x.source)])),
+      ...groups.filter(([, x]) => x.role === "value").map(([g, x]) => li(`Values${x.keep === false ? " (excluded)" : ""}`, [`${x.label || G(g).columns[0]} · ${G(g).n_columns} col · ${x.assay_label}`, " ",
+        d.literature?.blocks?.[g] ? el("span", { class: `badge ${(SUG[d.literature.blocks[g].suggested_for_analysis] || SUG.unsure)[1]}`, text: `literature: ${d.literature.blocks[g].suggested_for_analysis}` }) : null, " ",
+        provBadge(x.provenance, x.source)])),
+      li("Literature", d.literature ? `${Object.keys(d.literature.papers || {}).length} paper(s), ${(d.literature.passages || []).length} passage(s) saved for later steps` : "not searched"),
       li("Annotations", `${groups.filter(([, x]) => x.role === "feature_annotation").length}${flags.length ? ` (${flags.map(([g, x]) => `${G(g).columns[0]}: ${x.n_flagged ?? "?"} flagged`).join(", ")})` : ""}`),
       li("Sample info", groups.filter(([, x]) => x.role === "sample_metadata").map(([g, x]) => `${G(g).columns[0]} (${pretty(x.audit_kind || "?")})`).join(", ")
         + (d.metadata?.columns ? ` + ${d.metadata.columns.length - 1} from the metadata file` : "") || "—"),
