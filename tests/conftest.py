@@ -67,8 +67,10 @@ class Flow:
 
     def confirm_all_as_proposed(self):
         d = self.draft
-        self.step("layout", {"layout": d["layout"]["value"], "omics_type": d["omics_type"]["value"],
-                             "source_software": d["source_software"]["value"]})
+        self.step("layout", {"layout": d["layout"]["value"],
+                             "assays": [{k: a.get(k) for k in ("assay_label", "omics_type", "source_software",
+                                                                "in_supported_scope", "scope_reason")}
+                                        for a in d["assays"]]})
         d = self.draft
         dec = {"feature_identity": {"group_ids": d["feature_identity"]["group_ids"]}}
         if d["sample_id_group"]["value"]:
@@ -76,7 +78,15 @@ class Flow:
         self.step("feature_id", dec)
         for st in ("annotations", "values", "samples"):
             if self.draft["steps"][st] != "not_applicable":
-                self.step(st, {})
+                dec = {}
+                if st == "annotations":  # pick a flagged value where none was proposed
+                    items = [{"group_id": gid, "flagged_value": next(v for v in it["flag_values"] if v)}
+                             for gid, it in self.draft["groups"].items()
+                             if it.get("marks_rows_as_suspect") and it.get("flag_values")
+                             and it.get("flagged_value") is None and any(it["flag_values"])]
+                    if items:
+                        dec["items"] = items
+                self.step(st, dec)
         if d["layout"]["value"] == "samples_in_columns":
             self.step("sample_info", {"metadata": {"skip": True}})
         else:

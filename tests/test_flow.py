@@ -30,21 +30,26 @@ def events(tmp, sid):
 def test_A_maxquant(flow, isolated):
     f = flow("A_maxquant_proteinGroups.txt")
     d = f.draft
-    assert d["signature"]["name"] == "maxquant_proteinGroups"
-    assert d["layout"]["provenance"] == "signature"
+    assert d["signature_hint"] == "headers match the known MaxQuant proteinGroups.txt pattern"
+    assert d["layout"]["provenance"] == "ai_proposed_confirmed"          # the hint is not a provenance
     g = d["groups"]
     lfq, inten, pep = gid_of(f, "LFQ intensity S01"), gid_of(f, "Intensity S01"), gid_of(f, "Peptides S01")
     assert g[lfq]["block_role"] == "primary" and g[inten]["block_role"] == "auxiliary"
-    assert g[pep]["measurement_type"] == "count" and g[pep]["validation"]["status"] == "ok"
+    assert g[pep]["role"] == "value" and g[pep]["validation"]["status"] == "ok"
+    assert len({g[x]["assay_label"] for x in (lfq, inten, pep)}) == 1    # one assay, several blocks
     rev, con = gid_of(f, "Reverse"), gid_of(f, "Potential contaminant")
-    assert g[rev]["kind"] == "flag_decoy" and g[con]["kind"] == "flag_contaminant"
-    assert d["flags"][rev] == 3 and d["flags"][con] == 2
+    for x, n in ((rev, 3), (con, 2)):
+        assert g[x]["role"] == "feature_annotation" and g[x]["marks_rows_as_suspect"] is True
+        assert g[x]["flag_values"] == {"": 60 - n, "+": n} and g[x]["flagged_value"] == "+" and g[x]["n_flagged"] == n
     f.confirm_all_as_proposed()
     out = f.finalize()
     schema = out["schema"]
+    assert schema["signature_hint"] == d["signature_hint"]
     assert [b["block_role"] for b in schema["assays"][0]["value_blocks"]].count("primary") == 1
+    assert all(b["label"] for b in schema["assays"][0]["value_blocks"])
     rev_ann = next(a for a in schema["feature_annotations"] if a["column"] == "Reverse")
-    assert rev_ann["n_flagged"] == 3 and rev_ann["provenance"] == "signature"
+    assert rev_ann["marks_rows_as_suspect"] is True and rev_ann["flagged_value"] == "+"
+    assert rev_ann["n_flagged"] == 3 and rev_ann["provenance"] == "ai_proposed_confirmed" and rev_ann["label"]
     vm = rows_of(f.export("value_matrix_A1.csv"))
     assert vm[0] == ["feature_key", "S01", "S02", "S03", "S04", "S05", "S06"]
     assert len(vm) == 61                                      # all 60 proteins kept, incl. decoys/contaminants
@@ -58,16 +63,38 @@ def test_A_maxquant(flow, isolated):
         assert e in ev
 
 
+def test_A_manual_mode_starts_from_signature(flow):
+    f = flow("A_maxquant_proteinGroups.txt", ai=False)
+    d = f.draft
+    assert d["ai"]["used"] is False and d["layout"]["value"] == "samples_in_columns"
+    assert d["layout"]["provenance"] == "computed"
+    g = d["groups"]
+    assert g[gid_of(f, "LFQ intensity S01")]["block_role"] == "primary"
+    assert g[gid_of(f, "Reverse")]["marks_rows_as_suspect"] is True
+    f.confirm_all_as_proposed()
+    schema = f.finalize()["schema"]
+    assert schema["assays"][0]["value_blocks"][0]["provenance"] == "computed"
+
+
+def test_suspect_flag_value_is_chosen_by_the_user(flow):
+    f = flow("A_maxquant_proteinGroups.txt")
+    rev = gid_of(f, "Reverse")
+    f.step("annotations", {"items": [{"group_id": rev, "flagged_value": ""}]})   # user says: empty = flagged
+    assert f.draft["groups"][rev]["n_flagged"] == 57
+    f.step("annotations", {"items": [{"group_id": rev, "marks_rows_as_suspect": False}]})
+    assert "n_flagged" not in f.draft["groups"][rev]
+
+
 # ---------------------------------------------------------------- B: DIA-NN
 
-def test_B_diann_log_scale(flow):
+def test_B_diann(flow):
     f = flow("B_diann_pg_matrix.tsv")
     g = f.draft["groups"]
-    assert g[gid_of(f, "PG.ProteinNames")]["kind"] == "protein_name"
-    assert g[gid_of(f, "PG.Genes")]["kind"] == "gene_symbol"
+    for c in ("PG.ProteinNames", "PG.Genes"):
+        assert g[gid_of(f, c)]["role"] == "feature_annotation" and g[gid_of(f, c)]["label"]
     block = g[gid_of(f, "S01.raw")]
-    assert block["scale"] == "log2" and block["validation"]["status"] == "ok"
-    assert f.draft["samples"]["ids"][:2] == ["S01", "S02"]      # '.raw' stripped
+    assert block["role"] == "value" and block["block_role"] == "primary" and block["validation"]["status"] == "ok"
+    assert f.draft["sample_list"]["ids"][:2] == ["S01", "S02"]      # '.raw' stripped
     f.confirm_all_as_proposed()
     vm = rows_of(f.export("value_matrix_A1.csv")) if f.finalize() else None
     assert "" in [c for r in vm[1:] for c in r[1:]]              # 'NaN' written as empty
@@ -78,15 +105,15 @@ def test_B_diann_log_scale(flow):
 def test_C_mzmine_ai_path(flow):
     f = flow("C_mzmine_feature_table.csv")
     d = f.draft
-    assert d["signature"] is None and d["ai"]["provider"] == "mock"
-    kinds = {c: d["groups"][gid_of(f, c)]["kind"] for c in
-             ("row m/z", "row retention time", "compound_name", "formula", "adduct", "HMDB_ID")}
-    assert kinds == {"row m/z": "mz", "row retention time": "retention_time", "compound_name": "metabolite_name",
-                     "formula": "molecular_formula", "adduct": "adduct", "HMDB_ID": "metabolite_db_id"}
-    st = d["sample_types"]
-    assert st["QC_01"]["type"] == "qc" and st["blank_02"]["type"] == "blank" and st["S01"]["type"] == "study"
+    assert d["signature_hint"] is None and d["ai"]["provider"] == "mock"
+    for c in ("row m/z", "row retention time", "compound_name", "formula", "adduct", "HMDB_ID"):
+        it = d["groups"][gid_of(f, c)]
+        assert it["role"] == "feature_annotation" and it["label"] and it["marks_rows_as_suspect"] is False
+    st = d["samples"]
+    assert st["QC_01"]["is_study_sample"] is False and st["blank_02"]["is_study_sample"] is False
+    assert st["S01"]["is_study_sample"] is True
     # composite key m/z + RT is accepted
-    f.step("layout", {"layout": "samples_in_columns", "omics_type": "metabolomics"})
+    f.step("layout", {"layout": "samples_in_columns"})
     f.step("feature_id", {"feature_identity": {"group_ids": [gid_of(f, "row m/z"), gid_of(f, "row retention time")]}})
     assert f.draft["feature_identity"]["composite"] is True
     assert f.draft["groups"][gid_of(f, "row ID")]["role"] == "feature_annotation"
@@ -97,7 +124,10 @@ def test_C_mzmine_ai_path(flow):
     out = f.finalize()
     assert any(fl["flag"] == "no_sample_metadata" for fl in out["integrity_flags"])
     sm = rows_of(f.export("sample_metadata.csv"))
-    assert len(sm) == 18 and ["QC_01", "qc"] in [r[:2] for r in sm]     # QC kept, flagged
+    assert sm[0][:3] == ["sample_id", "sample_label", "is_study_sample"]
+    assert len(sm) == 18 and ["QC_01", "false"] in [[r[0], r[2]] for r in sm]     # QC kept, labelled
+    samples = {x["sample"]: x for x in out["schema"]["samples"]}
+    assert samples["QC_01"]["is_study_sample"] is False and samples["QC_01"]["provenance"] == "ai_proposed_confirmed"
     vm = rows_of(f.export("value_matrix_A1.csv"))
     assert "|" in vm[1][0]
 
@@ -109,18 +139,19 @@ def test_D_samples_in_rows(flow):
     d = f.draft
     assert d["layout"]["value"] == "samples_in_rows"
     g = d["groups"]
-    for c in ("age", "CD4_count", "iron"):
-        assert g[gid_of(f, c)]["role"] == "sample_metadata" and g[gid_of(f, c)]["kind"] == "covariate_numeric"
+    for c in ("age", "CD4_count", "iron"):             # iron was split out of the metabolite block
+        assert g[gid_of(f, c)]["role"] == "sample_metadata" and g[gid_of(f, c)]["audit_kind"] == "covariate"
     visit = g[gid_of(f, "visit")]
-    assert visit["kind"] == "timepoint" and visit["detail"] == "ordinal_label"
-    assert g[gid_of(f, "severity_group")]["kind"] == "group"
+    assert visit["audit_kind"] == "timepoint" and visit["detail"].startswith("ordinal label")
+    assert g[gid_of(f, "subject_id")]["audit_kind"] == "subject_id"
+    assert g[gid_of(f, "batch")]["audit_kind"] == "batch"
+    assert g[gid_of(f, "severity_group")]["audit_kind"] == "group"
     values = [it for it in g.values() if it["role"] == "value"]
-    assert sorted(it["omics_type"] for it in values) == ["metabolomics", "proteomics"]
+    assert len({it["assay_label"] for it in values}) == 2 and len(d["assays"]) == 2
     assert all(it["block_role"] == "primary" for it in values)
     f.confirm_all_as_proposed()
     out = f.finalize()
-    assert [a["omics_type"]["value"] for a in out["schema"]["assays"]] in (["proteomics", "metabolomics"],
-                                                                           ["metabolomics", "proteomics"])
+    assert len(out["schema"]["assays"]) == 2
     names = out["artifacts"]
     assert "value_matrix_A1.csv" in names and "value_matrix_A2.csv" in names
     m = rows_of(f.export("value_matrix_A1.csv"))
@@ -128,6 +159,8 @@ def test_D_samples_in_rows(flow):
     sm = rows_of(f.export("sample_metadata.csv"))
     assert {"age", "CD4_count", "iron", "visit"} <= set(sm[0])
     assert len(sm) == 41
+    kinds = {x["column"]: x["audit_kind"] for x in out["schema"]["sample_metadata"]}
+    assert kinds["visit"] == "timepoint" and kinds["subject_id"] == "subject_id"
 
 
 # ---------------------------------------------------------------- E: SomaScan-like
@@ -136,10 +169,12 @@ def test_E_somascan(flow):
     f = flow("E_somascan_adat_like.csv")
     g = f.draft["groups"]
     for c in ("PlateScale_Scalar", "HybControlNormScale", "NormScale_20"):
-        assert g[gid_of(f, c)]["kind"] == "technical_numeric"
-    st = f.draft["sample_types"]
-    types = {v["type"] for v in st.values()}
-    assert {"study", "qc", "calibrator", "blank"} <= types
+        assert g[gid_of(f, c)]["role"] == "sample_metadata"            # technical: describes samples
+    st = f.draft["samples"]
+    assert st["SAM001"]["is_study_sample"] is True
+    for sid in ("QC031", "CAL035", "BUF039"):
+        assert st[sid]["is_study_sample"] is False
+    assert len({v["label"] for v in st.values()}) >= 4
 
 
 # ---------------------------------------------------------------- F: long format
@@ -169,9 +204,12 @@ _ORIGINAL_MOCK = mock_llm.MockLLM.respond
 def _wrong(system, prompt):
     base = json.loads(_ORIGINAL_MOCK(system, prompt))
     for g in base["groups"]:
-        if g["role"] == "value":
-            g["measurement_type"] = "count"          # non-integer data: must be downgraded
-    base["groups"].append({"group_id": "g999", "role": "value", "confidence": 0.9, "evidence": "made up"})
+        if g["role"] == "feature_annotation" and "adduct" in g["label"]:
+            g["role"] = "value"                                   # value role on a text column
+        if "formula" in g["label"]:
+            g["role"], g["audit_kind"] = "sample_metadata", "foo"  # invalid closed-field value
+    base["groups"].append({"group_id": "g999", "role": "value", "label": "x", "confidence": 0.9,
+                           "evidence": "made up"})                # hallucinated group
     base["groups"] = [g for g in base["groups"] if g["group_id"] != "g2"]   # a group left out
     return json.dumps(base)
 
@@ -180,12 +218,19 @@ def test_wrong_ai_proposal_is_downgraded(flow, monkeypatch):
     monkeypatch.setattr(mock_llm.MockLLM, "respond", staticmethod(_wrong))
     f = flow("C_mzmine_feature_table.csv")
     d = f.draft
-    block = d["groups"][gid_of(f, "S01 Peak area")]
-    assert block["role"] == "unresolved" and block["validation"]["status"] == "contradicted"
-    assert block["claimed"]["measurement_type"] == "count"
+    adduct = d["groups"][gid_of(f, "adduct")]
+    assert adduct["role"] == "unresolved" and adduct["validation"]["status"] == "contradicted"
+    assert adduct["claimed"]["role"] == "value"
+    formula = d["groups"][gid_of(f, "formula")]
+    assert formula["role"] == "unresolved" and formula["validation"]["status"] == "contradicted"
     assert any(r["group_id"] == "g999" for r in d["rejected"])
     assert d["groups"]["g2"]["role"] == "unresolved"
     assert any("unresolved" in u["what"] for u in d["unresolved"])
+    # the user cannot confirm the contradicted claim either
+    f.step("annotations", {"items": [{"group_id": gid_of(f, "adduct"), "role": "value"}]}, expect=422)
+    f.step("annotations", {"items": [{"group_id": gid_of(f, "adduct"), "role": "feature_annotation",
+                                      "label": "adduct type"}]})
+    assert f.draft["groups"][gid_of(f, "adduct")]["provenance"] == "ai_proposed_corrected"
 
 
 def test_invalid_json_retries_then_manual(flow, monkeypatch):
@@ -206,19 +251,21 @@ def test_ai_off_full_manual_flow(flow):
     d = f.draft
     assert d["layout"]["value"] == "unresolved" and "features usually outnumber" in d["layout"]["hint"]
     assert all(it["role"] == "unresolved" for it in d["groups"].values())
-    f.step("layout", {"layout": "samples_in_columns", "omics_type": "metabolomics", "source_software": "MZmine"})
+    f.step("layout", {"layout": "samples_in_columns",
+                      "assays": [{"assay_label": "LC-MS untargeted", "omics_type": "metabolomics",
+                                  "source_software": "MZmine", "in_supported_scope": "yes"}]})
     items = []
     for g in f.upload["groups"]:
         c = g["columns"][0]
         if g["kind"] == "numeric_block":
-            items.append({"group_id": g["group_id"], "role": "value", "measurement_type": "intensity",
-                          "scale": "linear", "block_role": "primary", "omics_type": "metabolomics"})
+            items.append({"group_id": g["group_id"], "role": "value", "label": "peak area", "block_role": "primary",
+                          "assay_label": "LC-MS untargeted"})
         elif c != "row ID":
-            items.append({"group_id": g["group_id"], "role": "feature_annotation", "kind": "other_annotation"})
+            items.append({"group_id": g["group_id"], "role": "feature_annotation", "label": c})
     f.step("feature_id", {"feature_identity": {"group_ids": [gid_of(f, "row ID")]}})
     f.step("annotations", {"items": [i for i in items if i["role"] == "feature_annotation"]})
     f.step("values", {"items": [i for i in items if i["role"] == "value"]})
-    f.step("samples", {"sample_types": {"QC_01": "qc"}})
+    f.step("samples", {"samples": {"QC_01": {"label": "pooled QC", "is_study_sample": False}}})
     f.step("sample_info", {"metadata": {"skip": True}})
     f.step("history", HISTORY)
     out = f.finalize()
@@ -226,19 +273,36 @@ def test_ai_off_full_manual_flow(flow):
     assert prov["formula"] == "user_set"
     assert out["schema"]["layout"]["provenance"] == "user_set"
     assert out["schema"]["ai"]["enabled"] is False
+    assert out["schema"]["assays"][0]["source_software"] == "MZmine"
+    qc = next(x for x in out["schema"]["samples"] if x["sample"] == "QC_01")
+    assert qc["is_study_sample"] is False and qc["label"] == "pooled QC"
 
 
 def test_provenance_confirmed_vs_corrected(flow):
     f = flow("C_mzmine_feature_table.csv")
     f.confirm_all_as_proposed()
-    f.step("annotations", {"items": [{"group_id": gid_of(f, "adduct"), "kind": "other_annotation"}]})
-    f.step("history", HISTORY)
+    f.step("annotations", {"items": [{"group_id": gid_of(f, "adduct"), "label": "ion species"}]})
     for st in ("values", "samples", "sample_info"):
         if f.draft["steps"][st] == "pending":
             f.step(st, {} if st != "sample_info" else {"metadata": {"skip": True}})
     schema = f.finalize()["schema"]
     prov = {a["column"]: a["provenance"] for a in schema["feature_annotations"]}
     assert prov["adduct"] == "ai_proposed_corrected" and prov["formula"] == "ai_proposed_confirmed"
+
+
+def test_out_of_scope_is_a_notice_not_a_block(flow, monkeypatch):
+    def other(system, prompt):
+        base = json.loads(_ORIGINAL_MOCK(system, prompt))
+        for a in base["assays"]:
+            a.update(omics_type="lipidomics", in_supported_scope="unsure", scope_reason="lipid species names")
+        return json.dumps(base)
+    monkeypatch.setattr(mock_llm.MockLLM, "respond", staticmethod(other))
+    f = flow("C_mzmine_feature_table.csv")
+    assert f.draft["assays"][0]["in_supported_scope"] == "unsure"
+    f.confirm_all_as_proposed()
+    out = f.finalize()
+    fl = next(x for x in out["integrity_flags"] if x["flag"] == "outside_supported_scope")
+    assert "lipidomics" in fl["detail"] and "not yet supported" in fl["detail"]
 
 
 def test_history_must_be_answered_and_no_default(flow):
@@ -255,28 +319,37 @@ def test_values_step_enforces_primary(flow):
 
 def test_layout_change_triggers_reproposal(flow):
     f = flow("C_mzmine_feature_table.csv")
-    r = f.step("layout", {"layout": "samples_in_rows", "omics_type": "metabolomics"})
+    r = f.step("layout", {"layout": "samples_in_rows"})
     assert r["reproposed"] is True
     assert f.draft["layout"]["value"] == "samples_in_rows"
     assert f.draft["steps"]["feature_id"] in ("pending", "not_applicable")
 
 
-def test_reconsider_one_group(flow, monkeypatch):
+def test_disagree_reconsiders_a_whole_step(flow, monkeypatch):
     f = flow("C_mzmine_feature_table.csv")
     seen = {}
 
     def answer(system, prompt):
         digest = json.loads(prompt.split("\n", 1)[1])
-        seen["groups"] = [g["group_id"] for g in digest["groups"]]
-        seen["hint"] = digest["already_confirmed"].get("user_hint_for_this_group")
-        return json.dumps({"groups": [{"group_id": seen["groups"][0], "role": "feature_annotation",
-                                       "kind": "other_annotation", "confidence": 0.9, "evidence": "user hint"}]})
+        seen["groups"] = sorted(g["group_id"] for g in digest["groups"])
+        seen["feedback"] = digest["already_confirmed"].get("user_feedback")
+        return json.dumps({"groups": [{"group_id": gid, "role": "feature_annotation", "label": "ion form",
+                                       "confidence": 0.9, "evidence": "user feedback"} for gid in seen["groups"]]})
     monkeypatch.setattr(mock_llm.MockLLM, "respond", staticmethod(answer))
-    gid = gid_of(f, "adduct")
-    r = f.c.post("/api/reconsider", json={"session_id": f.sid, "group_id": gid, "user_hint": "these are ion forms"})
+    gids = sorted([gid_of(f, "adduct"), gid_of(f, "formula")])
+    r = f.c.post("/api/reconsider", json={"session_id": f.sid, "group_ids": gids, "user_hint": "these are ion forms"})
     assert r.status_code == 200, r.text
-    assert seen == {"groups": [gid], "hint": "these are ion forms"}
-    assert r.json()["draft"]["groups"][gid]["kind"] == "other_annotation"
+    assert seen == {"groups": gids, "feedback": "these are ion forms"}
+    assert all(r.json()["draft"]["groups"][g]["label"] == "ion form" for g in gids)
+    # older single-group form still works
+    r = f.c.post("/api/reconsider", json={"session_id": f.sid, "group_id": gids[0], "user_hint": "x"})
+    assert r.status_code == 200, r.text
+
+
+def test_reconsider_needs_the_ai(flow):
+    f = flow("C_mzmine_feature_table.csv", ai=False)
+    r = f.c.post("/api/reconsider", json={"session_id": f.sid, "group_ids": ["g1"], "user_hint": "x"})
+    assert r.status_code == 422
 
 
 def test_metadata_upload_matching(flow):
@@ -289,18 +362,20 @@ def test_metadata_upload_matching(flow):
     assert rep["near_misses"] == [{"data_id": "S02", "metadata_id": "s02",
                                    "reason": "differs only in case, spaces/underscores or leading zeros"}]
     d = f.draft
-    f.step("layout", {"layout": "samples_in_columns", "omics_type": "proteomics"})
+    f.step("layout", {"layout": "samples_in_columns"})
     f.step("feature_id", {"feature_identity": {"group_ids": d["feature_identity"]["group_ids"]}})
     for st in ("annotations", "values", "samples"):
         f.step(st, {})
     f.step("sample_info", {"metadata": {"accept_near_misses": [["S02", "s02"]],
-                                        "columns": [{"column": "group", "kind": "group"},
-                                                    {"column": "age", "kind": "covariate_numeric"}]}})
+                                        "columns": [{"column": "group", "audit_kind": "group", "label": "arm"},
+                                                    {"column": "age", "audit_kind": "covariate"}]}})
     f.step("history", HISTORY)
     f.finalize()
-    sm = {r[0]: r for r in rows_of(f.export("sample_metadata.csv"))}
-    assert sm["S02"][2] == "ctrl"                       # near miss accepted by the user
-    assert sm["S04"][2] == ""                           # no metadata row: kept, empty
+    rows = rows_of(f.export("sample_metadata.csv"))
+    gi = rows[0].index("group")
+    sm = {r[0]: r for r in rows}
+    assert sm["S02"][gi] == "ctrl"                      # near miss accepted by the user
+    assert sm["S04"][gi] == ""                          # no metadata row: kept, empty
 
 
 def test_example_values_can_be_withheld(flow, monkeypatch):

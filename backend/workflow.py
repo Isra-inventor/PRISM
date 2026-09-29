@@ -3,36 +3,41 @@
 The draft is the single source of truth for a session. The frontend renders
 it; every wizard step sends a decision that is applied here, validated and
 logged. Provenance is derived by comparing the current value with the value
-first proposed and who proposed it.
+first proposed and who proposed it:
+    computed | ai_proposed_confirmed | ai_proposed_corrected | user_set
 """
 
 from __future__ import annotations
 
 import copy
 import json
+import os
 import re
-import shutil
 import threading
 import uuid
 from collections import Counter, OrderedDict
 from pathlib import Path
 
 from . import ai, llm_providers as llm
-from .format_detect import signature_prefill
-from .mock_llm import expand_sample_types
+from .format_detect import signature_hint, signature_prefill
+from .mock_llm import expand_sample_rules
 from .parsing import cell, is_missing, parse_bytes, sanitize_filename
 from .profiling import Columns, apply_rule, build_groups, layout_hints
-from .schema import HISTORY_QUESTIONS, UNRESOLVED, VOCABULARY, kinds_for_role
+from .schema import HISTORY_QUESTIONS, UNRESOLVED, VOCABULARY
 from .session_log import log_event
-from .validation import timepoint_detail, uniqueness, validate_feature_identity, validate_group
-
-import os
+from .validation import timepoint_detail, validate_feature_identity, validate_group
 
 SESSIONS_DIR = Path(os.environ.get("PRISM_SESSIONS_DIR", Path(__file__).parent / "sessions"))
 STEPS = ["layout", "feature_id", "annotations", "values", "samples", "sample_info", "history", "review"]
-GROUP_FIELDS = ("role", "kind", "detail", "measurement_type", "scale", "omics_type", "label", "block_role", "keep")
-_SAMPLE_TYPE_WORDS = [("qc", "qc"), ("pool", "pool"), ("blank", "blank"), ("buffer", "blank"),
-                      ("calib", "calibrator"), ("std", "calibrator")]
+GROUP_FIELDS = ("role", "assay_label", "label", "block_role", "audit_kind", "marks_rows_as_suspect",
+                "flagged_value", "detail", "keep")
+ASSAY_FIELDS = ("assay_label", "omics_type", "source_software", "in_supported_scope", "scope_reason")
+FACT_FIELDS = ("value",)
+FI_FIELDS = ("group_ids", "composite")
+SAMPLE_FIELDS = ("label", "is_study_sample")
+FLAG_MAX_VALUES = 5
+_NON_STUDY = re.compile(r"(?i)(^|[^a-z])(qc|pool|pooled|blank|buffer|calib\w*|std|standard)([^a-z]|$)")
+_FLAG_WORDS = {"+", "x", "yes", "y", "true", "1", "flag", "flagged", "reverse", "rev", "con"}
 _MAX_SESSIONS = 20
 _sessions = OrderedDict()
 _lock = threading.Lock()
@@ -45,12 +50,9 @@ class StepError(Exception):
 # ---------------------------------------------------------------- provenance
 
 def provenance(item, fields):
-    """signature | computed | ai_proposed_confirmed | ai_proposed_corrected | user_set"""
     src = item.get("source") or "none"
     proposed = item.get("proposed") or {}
     changed = any(item.get(f) != proposed.get(f) for f in fields if f in proposed or f in item)
-    if src == "signature":
-        return "user_set" if changed else "signature"
     if src == "computed":
         return "user_set" if changed else "computed"
     if src == "ai":
@@ -63,10 +65,6 @@ def _snap(item, fields):
     return item
 
 
-FACT_FIELDS = ("value",)
-FI_FIELDS = ("group_ids", "composite")
-
-
 # ---------------------------------------------------------------- session
 
 class Session:
@@ -77,16 +75,14 @@ class Session:
         self.table = parse_bytes(filename, raw)
         self.sha = self.table["sha256"]
         self.cols = Columns(self.table)
-        self.base_groups = build_groups(self.cols)
         self.splits = []  # accepted split decisions, re-applied on reload
-        self.groups = copy.deepcopy(self.base_groups)
+        self.groups = build_groups(self.cols)
         self.hints = layout_hints(self.cols, self.groups)
         self.draft = None
         self.digests = []
         self.metadata_table = None
         self.lock = threading.RLock()
 
-    # -- persistence
     def save(self):
         self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / "state.json").write_text(json.dumps({
@@ -99,12 +95,6 @@ class Session:
     @property
     def groups_by_id(self):
         return {g["group_id"]: g for g in self.groups}
-
-    def group_of_column(self, label):
-        for g in self.groups:
-            if label in g["columns"]:
-                return g
-        return None
 
 
 def create_session(filename, raw):
@@ -144,7 +134,7 @@ def get_session(sid):
     md = d / "metadata_source.csv"
     if md.exists() and s.draft and s.draft.get("metadata") and not s.draft["metadata"].get("skipped"):
         t = parse_bytes(s.draft["metadata"]["filename"], md.read_bytes())
-        s.metadata_table = {"table": t, "cols": Columns(t), "groups": []}
+        s.metadata_table = {"table": t, "cols": Columns(t)}
     _remember(s)
     return s
 
@@ -178,9 +168,9 @@ def _apply_split(s, sp):
     return [n["group_id"] for n in new]
 
 
-# ---------------------------------------------------------------- hints for manual mode
+# ---------------------------------------------------------------- hints
 
-def group_hint(g, layout=None):
+def group_hint(g):
     p = g.get("profile") or {}
     if g["kind"] == "numeric_block":
         pat = (g.get("pattern") or {}).get("text")
@@ -190,7 +180,7 @@ def group_hint(g, layout=None):
         return (f"Numeric column: median {p.get('median')}, range {p.get('min')}–{p.get('max')}"
                 + (", whole numbers" if p.get("integer_valued") else "") + ".")
     vals = p.get("values")
-    if vals:
+    if vals and (p.get("unique_ratio") or 0) < 0.5:
         return f"Text with {p.get('n_unique')} distinct values: " + ", ".join(v["value"] for v in vals[:6]) + "."
     return f"Text with {p.get('n_unique')} distinct values ({int((p.get('unique_ratio') or 0) * 100)}% unique)."
 
@@ -201,178 +191,180 @@ def layout_hint_text(h):
     if h["largest_numeric_block_columns"]:
         r = h["rows_to_block_columns_ratio"]
         if r is not None and r >= 1:
-            return (f"{h['n_rows']} rows and a numeric block of {h['largest_numeric_block_columns']} columns: "
+            return (f"{h['n_rows']} rows and {h['numeric_block_columns_total']} columns in numeric blocks: "
                     "features usually outnumber samples, so rows are probably features (samples in columns).")
-        return (f"Only {h['n_rows']} rows but a numeric block of {h['largest_numeric_block_columns']} columns: "
+        return (f"Only {h['n_rows']} rows but {h['numeric_block_columns_total']} columns in numeric blocks: "
                 "rows are probably samples (samples in rows).")
     return "No large block of numeric columns was found."
 
 
+def flag_values(s, gid):
+    """{value: count} for a single column with <= FLAG_MAX_VALUES distinct values (empty = ''), else None."""
+    g = s.groups_by_id[gid]
+    if g["n_columns"] != 1:
+        return None
+    i = g["indices"][0]
+    c = Counter("" if is_missing(cell(r, i)) else cell(r, i).strip() for r in s.table["rows"])
+    return dict(c.most_common()) if len(c) <= FLAG_MAX_VALUES else None
+
+
+def _proposed_flag_value(values):
+    if not values:
+        return None
+    nonempty = [v for v in values if v not in ("", "0", "false", "False", "no", "-")]
+    if len(nonempty) == 1:
+        return nonempty[0]
+    words = [v for v in nonempty if v.lower() in _FLAG_WORDS]
+    return words[0] if len(words) == 1 else None
+
+
 # ---------------------------------------------------------------- building the draft
 
-def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
-    """Signature pre-fill + AI proposal (or manual hints) -> a fresh draft."""
-    sig = signature_prefill(s.table["header"], s.groups)
-    prop, meta, digests = None, {"error": None}, []
-    ok, why = llm.available()
-    use_ai = ai_on and ok
-    if use_ai:
-        fixed = {}
-        if fixed_layout:
-            fixed["layout"] = fixed_layout
-        if sig:
-            fixed.update({"layout": fixed_layout or sig["layout"]["value"], "omics_type": sig["omics_type"]["value"],
-                          "source_software": sig["source_software"]["value"]})
-        prop, meta, digests = ai.propose(s.filename, s.sha, s.groups, s.hints, s.cols, fixed=fixed,
-                                         log=s.log, on_progress=on_progress)
-        if prop.get("splits"):
-            for sp in prop["splits"]:
-                new_ids = _apply_split(s, sp)
-                if new_ids:
-                    s.log("split_applied", {"split": sp, "new_groups": new_ids})
-                    for gid in new_ids:
-                        g = s.groups_by_id[gid]
-                        item = {"role": sp.get("role") or UNRESOLVED, "kind": sp.get("kind"), "detail": None,
-                                "measurement_type": None, "scale": None, "omics_type": None, "label": None,
-                                "confidence": 0.7, "source": "ai",
-                                "evidence": f"Split out of the block on the AI's suggestion: {sp.get('evidence', '')}"}
-                        prop["groups"][gid] = ai.finalize_item(item, g, s.cols, fixed_layout)
-    s.digests = digests
-    d = _empty_draft(s)
-    d["ai"] = {"enabled": bool(ai_on), "available": ok, "unavailable_reason": None if ok else why,
-               "provider": meta.get("provider") or llm.provider_name(), "model": meta.get("model"),
-               "models_used": meta.get("models_used", []), "prompt_version": ai.PROMPT_VERSION,
-               "temperature": llm.TEMPERATURE, "error": meta.get("error"), "cached": meta.get("cached", False)}
-    d["signature"] = {"name": sig["signature"], "platform": sig["platform"], "also_matched": sig["also_matched"]} \
-        if sig else None
-
-    # file-level facts: signature > fixed layout > AI > unresolved (with a deterministic hint)
-    for key in ("layout", "omics_type", "source_software"):
-        item = None
-        if sig and key in sig and not (key == "layout" and fixed_layout):
-            item = dict(sig[key])
-        elif key == "layout" and fixed_layout:
-            item = {"value": fixed_layout, "confidence": 1.0, "evidence": "Confirmed by you.", "source": "user"}
-        elif prop and key in prop:
-            item = dict(prop[key])
-        if item is None:
-            item = {"value": UNRESOLVED if key == "layout" else "unknown", "confidence": 0.0, "evidence": "",
-                    "source": "none"}
-        item.setdefault("validation", {"status": "ok", "messages": []})
-        d[key] = _snap(item, FACT_FIELDS)
-    d["layout"]["hint"] = layout_hint_text(s.hints)
-
-    # groups
-    for g in s.groups:
-        gid = g["group_id"]
-        item = None
-        if sig and gid in sig["groups"]:
-            item = dict(sig["groups"][gid])
-            ai_item = (prop or {}).get("groups", {}).get(gid) or {}
-            for f in ("scale", "omics_type", "measurement_type", "label"):
-                if item.get("role") == "value" and not item.get(f) and ai_item.get(f):
-                    item[f] = ai_item[f]
-            item = ai.finalize_item(_blank(item), g, s.cols, sig["layout"]["value"])
-        elif prop and gid in prop["groups"]:
-            item = _blank(prop["groups"][gid])
-        else:
-            item = ai.unresolved_item("AI is off: choose this role yourself." if not use_ai else
-                                      "No proposal for this group.")
-        item["hint"] = group_hint(g)
-        item.setdefault("keep", True)
-        if item["role"] == "value" and not item.get("omics_type"):
-            item["omics_type"] = d["omics_type"]["value"] if d["omics_type"]["value"] in VOCABULARY["omics_type"] \
-                else "unknown"
-        d["groups"][gid] = item
-    _assign_block_roles(d, s)
-    lay = d["layout"]["value"]
-    for gid, item in d["groups"].items():
-        if item["role"] != UNRESOLVED:  # re-check with the final layout (keeps earlier contradictions)
-            item["validation"] = validate_group(item, s.groups_by_id[gid], s.cols, lay)
-        _snap(item, GROUP_FIELDS)
-
-    # feature identity
-    fi = None
-    if sig and sig.get("feature_identity"):
-        fi = dict(sig["feature_identity"])
-    elif prop and prop.get("feature_identity") and prop["feature_identity"]["group_ids"]:
-        fi = dict(prop["feature_identity"])
-    if fi is None:
-        fid_groups = [gid for gid, it in d["groups"].items() if it["role"] == "feature_id"]
-        fi = {"group_ids": fid_groups, "composite": len(fid_groups) > 1, "confidence": 0.5 if fid_groups else 0.0,
-              "evidence": "Groups labelled as feature ID." if fid_groups else "", "source": "computed" if fid_groups else "none"}
-    fi["validation"] = validate_feature_identity(fi, s.groups_by_id, s.cols, d["layout"]["value"])
-    for gid in fi["group_ids"]:
-        if gid in d["groups"] and d["groups"][gid]["role"] in (UNRESOLVED, "feature_annotation"):
-            d["groups"][gid]["role"] = "feature_id"
-            d["groups"][gid]["proposed"]["role"] = "feature_id"
-    d["feature_identity"] = _snap(fi, FI_FIELDS)
-
-    # sample id column (samples in rows / long)
-    sid_groups = [gid for gid, it in d["groups"].items() if it["role"] == "sample_id"]
-    d["sample_id_group"] = _snap({"value": sid_groups[0] if sid_groups else None,
-                                  "source": d["groups"][sid_groups[0]]["source"] if sid_groups else "none"},
-                                 FACT_FIELDS)
-    # sample name rules for value blocks
-    for g in s.groups:
-        if g.get("sample_id_rule") is not None:
-            d["sample_rules"][g["group_id"]] = _snap(dict(g["sample_id_rule"], source="computed"),
-                                                     ("strip_prefix", "strip_suffix"))
-    d["sample_type_rules"] = (prop or {}).get("sample_types", [])
-    d["clarifying_questions"] = (prop or {}).get("clarifying_questions", [])
-    d["rejected"] = (prop or {}).get("rejected", [])
-    refresh_sample_types(s, d)
-    s.draft = d
-    s.log("proposal", {"ai": d["ai"], "signature": d["signature"],
-                       "groups": {gid: {k: it.get(k) for k in GROUP_FIELDS + ("confidence", "source", "validation")}
-                                  for gid, it in d["groups"].items()},
-                       "layout": d["layout"], "feature_identity": d["feature_identity"]})
-    s.save()
-    return d
-
-
 def _blank(item):
-    base = {"role": UNRESOLVED, "kind": None, "detail": None, "measurement_type": None, "scale": None,
-            "omics_type": None, "label": None, "confidence": 0.0, "evidence": "", "source": "none",
-            "validation": {"status": "ok", "messages": []}}
+    base = {"role": UNRESOLVED, "assay_label": None, "label": "", "block_role": None, "audit_kind": None,
+            "marks_rows_as_suspect": False, "flagged_value": None, "detail": None, "keep": True,
+            "confidence": 0.0, "evidence": "", "source": "none", "validation": {"status": "ok", "messages": []}}
     base.update({k: v for k, v in item.items() if v is not None or k not in base})
     return base
 
 
-def _empty_draft(s):
-    return {
-        "schema_version": "0.2",
-        "groups": {},
-        "sample_rules": {},
-        "sample_types": {},
-        "sample_type_rules": [],
-        "processing_history": {q: {"answer": None, "note": ""} for q, _ in HISTORY_QUESTIONS},
-        "software_and_version": "",
-        "history_notes": "",
-        "metadata": None,
-        "steps": {st: "pending" for st in STEPS},
-    }
+def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
+    """AI proposal (signature appended as a hint) or, when the AI is off or
+    unavailable, the signature pre-fill / manual hints -> a fresh draft."""
+    hint = signature_hint(s.table["header"])
+    ok, why = llm.available()
+    use_ai = ai_on and ok
+    prop, meta, digests = None, {"error": None}, []
+    if use_ai:
+        fixed = {"layout": fixed_layout} if fixed_layout else {}
+        prop, meta, digests = ai.propose(s.filename, s.sha, s.groups, s.hints, s.cols, fixed=fixed, log=s.log,
+                                         on_progress=on_progress, signature_hint=hint)
+        for sp in prop.get("splits", []):
+            new_ids = _apply_split(s, sp)
+            if new_ids:
+                s.log("split_applied", {"split": sp, "new_groups": new_ids})
+                for gid in new_ids:
+                    item = {"role": sp.get("role") or UNRESOLVED, "audit_kind": sp.get("audit_kind"),
+                            "label": sp.get("label") or "", "confidence": 0.7, "source": "ai",
+                            "evidence": f"Split out of the block on the AI's suggestion: {sp.get('evidence', '')}"}
+                    prop["groups"][gid] = ai.finalize_item(_blank(item), s.groups_by_id[gid], s.cols, fixed_layout)
+        if meta.get("error") and not prop.get("layout"):
+            prop = None  # the AI failed entirely: fall back to manual starting points
+    manual = prop is None
+    if manual:
+        prop = signature_prefill(s.table["header"], s.groups) or {}
+    s.digests = digests
+
+    d = {"schema_version": "0.2.1", "groups": {}, "sample_rules": {}, "samples": {}, "sample_rules_ai": [],
+         "processing_history": {q: {"answer": None, "note": ""} for q, _ in HISTORY_QUESTIONS},
+         "software_and_version": "", "history_notes": "", "metadata": None,
+         "steps": {st: "pending" for st in STEPS}, "signature_hint": hint}
+    d["ai"] = {"enabled": bool(ai_on), "available": ok, "unavailable_reason": None if ok else why,
+               "used": use_ai and not manual, "provider": meta.get("provider") or llm.provider_name(),
+               "model": meta.get("model"), "models_used": meta.get("models_used", []),
+               "prompt_version": ai.PROMPT_VERSION, "temperature": llm.TEMPERATURE, "error": meta.get("error"),
+               "cached": meta.get("cached", False)}
+
+    # layout
+    if fixed_layout:
+        lay = {"value": fixed_layout, "confidence": 1.0, "evidence": "Chosen by you.", "source": "user"}
+    elif prop.get("layout"):
+        lay = dict(prop["layout"])
+    else:
+        lay = {"value": UNRESOLVED, "confidence": 0.0, "evidence": "", "source": "none"}
+    lay.setdefault("validation", {"status": "ok", "messages": []})
+    lay["hint"] = layout_hint_text(s.hints)
+    d["layout"] = _snap(lay, FACT_FIELDS)
+    layout = lay["value"]
+
+    # assays
+    assays = [dict(a) for a in prop.get("assays", [])]
+    if not assays:
+        assays = [{"assay_label": "assay 1", "omics_type": "unknown", "source_software": "unknown",
+                   "in_supported_scope": "unsure", "scope_reason": "not described yet", "confidence": 0.0,
+                   "evidence": "", "source": "none"}]
+    d["assays"] = [_snap(a, ASSAY_FIELDS) for a in assays]
+
+    # groups
+    labels = [a["assay_label"] for a in d["assays"]]
+    for g in s.groups:
+        gid = g["group_id"]
+        if gid in prop.get("groups", {}):
+            item = _blank(prop["groups"][gid])
+        else:
+            item = _blank({"evidence": ("AI is off: choose this role yourself." if not use_ai else
+                                        "No proposal for this group."), "source": "none"})
+        item["hint"] = group_hint(g)
+        if item["role"] == "value" and item.get("assay_label") not in labels:
+            item["assay_label"] = labels[0]
+        _attach_flags(s, gid, item)
+        d["groups"][gid] = item
+    _assign_block_roles(d, s)
+    for gid, item in d["groups"].items():
+        if item["role"] != UNRESOLVED:
+            item["validation"] = validate_group(item, s.groups_by_id[gid], s.cols, layout)
+        _snap(item, GROUP_FIELDS)
+
+    # feature identity: first assay that names one, or the groups labelled feature_id
+    fi_ids = next((a.get("feature_group_ids") for a in assays if a.get("feature_group_ids")), None)
+    if fi_ids:
+        fi = {"group_ids": fi_ids, "composite": len(fi_ids) > 1, "confidence": assays[0].get("confidence", 0),
+              "evidence": assays[0].get("evidence", ""), "source": assays[0].get("source", "ai")}
+    elif prop.get("feature_identity"):
+        fi = dict(prop["feature_identity"])
+    else:
+        ids = [gid for gid, it in d["groups"].items() if it["role"] == "feature_id"]
+        fi = {"group_ids": ids, "composite": len(ids) > 1, "confidence": 0.5 if ids else 0.0,
+              "evidence": "Groups labelled as feature ID." if ids else "", "source": "computed" if ids else "none"}
+    for gid in fi["group_ids"]:
+        if d["groups"][gid]["role"] in (UNRESOLVED, "feature_annotation"):
+            d["groups"][gid]["role"] = d["groups"][gid]["proposed"]["role"] = "feature_id"
+    fi["validation"] = validate_feature_identity(fi, s.groups_by_id, s.cols, layout)
+    d["feature_identity"] = _snap(fi, FI_FIELDS)
+
+    sid_groups = [gid for gid, it in d["groups"].items() if it["role"] == "sample_id"]
+    d["sample_id_group"] = _snap({"value": sid_groups[0] if sid_groups else None,
+                                  "source": d["groups"][sid_groups[0]]["source"] if sid_groups else "none"},
+                                 FACT_FIELDS)
+    for g in s.groups:
+        if g.get("sample_id_rule") is not None:
+            d["sample_rules"][g["group_id"]] = _snap(dict(g["sample_id_rule"], source="computed"),
+                                                     ("strip_prefix", "strip_suffix"))
+    d["sample_rules_ai"] = prop.get("samples", [])
+    d["clarifying_questions"] = prop.get("clarifying_questions", [])
+    d["rejected"] = prop.get("rejected", [])
+    refresh_samples(s, d)
+    s.draft = d
+    s.log("proposal", {"ai": d["ai"], "signature_hint": hint, "layout": d["layout"], "assays": d["assays"],
+                       "groups": {gid: {k: it.get(k) for k in GROUP_FIELDS + ("confidence", "source", "validation")}
+                                  for gid, it in d["groups"].items()},
+                       "feature_identity": d["feature_identity"]})
+    s.save()
+    return d
+
+
+def _attach_flags(s, gid, item):
+    item["flag_values"] = flag_values(s, gid) if item.get("marks_rows_as_suspect") else None
+    if item.get("marks_rows_as_suspect") and item.get("flagged_value") is None:
+        item["flagged_value"] = _proposed_flag_value(item["flag_values"])
 
 
 def _assign_block_roles(d, s):
-    """At most one primary value block per omics type: keep a signature's choice,
-    otherwise the widest block becomes primary (computed); others auxiliary."""
-    by_omics = {}
+    """At most one primary value block per assay: keep what was proposed,
+    otherwise the widest block becomes primary; others auxiliary."""
+    by_assay = {}
     for gid, it in d["groups"].items():
         if it["role"] == "value":
-            by_omics.setdefault(it.get("omics_type") or "unknown", []).append(gid)
-    for omics, gids in by_omics.items():
+            by_assay.setdefault(it.get("assay_label") or "assay", []).append(gid)
+    for gids in by_assay.values():
         primaries = [g for g in gids if d["groups"][g].get("block_role") == "primary"]
         if not primaries:
             best = max(gids, key=lambda g: (s.groups_by_id[g]["n_columns"], -min(s.groups_by_id[g]["indices"])))
             primaries = [best]
             d["groups"][best]["block_role"] = "primary"
-            if d["groups"][best].get("source") != "signature":
-                d["groups"][best]["block_role_source"] = "computed"
         for g in gids:
-            if g not in primaries[:1]:
-                if d["groups"][g].get("block_role") in (None, "primary"):
-                    d["groups"][g]["block_role"] = "auxiliary"
+            if g != primaries[0] and d["groups"][g].get("block_role") in (None, "primary"):
+                d["groups"][g]["block_role"] = "auxiliary"
 
 
 # ---------------------------------------------------------------- samples
@@ -390,14 +382,12 @@ def sample_ids(s, d, gid=None):
     lay = layout_of(d)
     if lay == "samples_in_columns":
         out = []
-        blocks = [gid] if gid else primary_blocks(s, d)
-        for b in blocks:
+        for b in ([gid] if gid else primary_blocks(s, d)):
             g = s.groups_by_id.get(b)
             if not g:
                 continue
             rule = d["sample_rules"].get(b) or {"strip_prefix": "", "strip_suffix": ""}
-            names = [apply_rule(s.table["header"][i], rule) for i in g["indices"]]
-            out.extend(n for n in names if n not in out)
+            out.extend(n for n in (apply_rule(s.table["header"][i], rule) for i in g["indices"]) if n not in out)
         return out
     sg = (d.get("sample_id_group") or {}).get("value")
     if not sg or sg not in s.groups_by_id:
@@ -405,61 +395,57 @@ def sample_ids(s, d, gid=None):
     i = s.groups_by_id[sg]["indices"][0]
     vals = [cell(r, i).strip() for r in s.table["rows"]]
     if lay == "long":
-        seen = []
-        for v in vals:
-            if v not in seen:
-                seen.append(v)
-        return seen
+        return list(OrderedDict.fromkeys(vals))
     return vals
 
 
-def refresh_sample_types(s, d):
-    """(Re)compute proposed sample types for the current sample IDs, keeping
-    anything the user already set."""
+def refresh_samples(s, d):
+    """(Re)compute each sample's label and is_study_sample, keeping user edits."""
     ids = sample_ids(s, d)
-    rules = expand_sample_types(d.get("sample_type_rules", []), ids)
+    rules = expand_sample_rules(d.get("sample_rules_ai", []), ids)
     type_col = None
-    if layout_of(d) in ("samples_in_rows", "long"):
+    if layout_of(d) == "samples_in_rows":
         for gid, it in d["groups"].items():
-            if it["role"] == "sample_metadata" and it.get("kind") == "sample_type":
+            if it["role"] == "sample_metadata" and it.get("audit_kind") == "sample_type":
                 type_col = s.groups_by_id[gid]["indices"][0]
     col_vals = {}
-    if type_col is not None and layout_of(d) == "samples_in_rows":
+    if type_col is not None:
         for r, sid in zip(s.table["rows"], ids):
             col_vals[sid] = cell(r, type_col).strip()
-    old = d.get("sample_types", {})
+    old = d.get("samples", {})
     new = {}
     for sid in ids:
         if sid in old and old[sid].get("user_edited"):
             new[sid] = old[sid]
             continue
-        t, src, ev, conf = None, "computed", "", 0.5
-        if sid in col_vals:
-            v = col_vals[sid].lower()
-            t = {"sample": "study", "study": "study", "qc": "qc", "pool": "pool", "blank": "blank",
-                 "buffer": "blank", "calibrator": "calibrator", "calib": "calibrator"}.get(v)
-            if t:
-                ev = f"Sample type column says '{col_vals[sid]}'."
-        if t is None and sid in rules:
-            t, src, ev, conf = rules[sid]["type"], "ai", rules[sid]["evidence"], rules[sid]["confidence"]
-        if t is None:
-            low = sid.lower()
-            for w, typ in _SAMPLE_TYPE_WORDS:
-                if re.search(rf"(^|[^a-z]){w}", low):
-                    t, ev = typ, f"Sample name contains '{w}'."
-                    break
-        if t is None:
-            t, ev = "study", "No QC / blank / pool / calibrator hint in the name."
-        new[sid] = _snap({"type": t, "source": src, "evidence": ev, "confidence": conf}, ("type",))
-    d["sample_types"] = new
+        v = col_vals.get(sid)
+        if v and v in rules:  # the AI described this sample-type value
+            r = rules[v]
+            item = {"label": r["label"] or v, "is_study_sample": r["is_study_sample"], "source": "ai",
+                    "evidence": f"Sample type column says '{v}'. {r['evidence']}", "confidence": r["confidence"]}
+        elif v:
+            item = {"label": v, "is_study_sample": not _NON_STUDY.search(v), "source": "computed",
+                    "evidence": f"Sample type column says '{v}'.", "confidence": 0.6}
+        elif sid in rules:
+            r = rules[sid]
+            item = {"label": r["label"], "is_study_sample": r["is_study_sample"], "source": "ai",
+                    "evidence": r["evidence"], "confidence": r["confidence"]}
+        elif _NON_STUDY.search(sid):
+            m = _NON_STUDY.search(sid).group(2)
+            item = {"label": m.lower(), "is_study_sample": False, "source": "computed",
+                    "evidence": f"Sample name contains '{m}'.", "confidence": 0.6}
+        else:
+            item = {"label": "study sample", "is_study_sample": True, "source": "computed",
+                    "evidence": "No QC / blank / pool / calibrator hint in the name.", "confidence": 0.5}
+        new[sid] = _snap(item, SAMPLE_FIELDS)
+    d["samples"] = new
 
 
 # ---------------------------------------------------------------- confirming steps
 
 def step_applicable(s, d, step):
-    lay = layout_of(d)
     if step == "annotations":
-        return lay != "samples_in_rows" or any(it["role"] == "feature_annotation" for it in d["groups"].values())
+        return layout_of(d) != "samples_in_rows" or any(it["role"] == "feature_annotation" for it in d["groups"].values())
     return True
 
 
@@ -476,6 +462,10 @@ def confirm_step(s, step, decision, on_progress=None):
         raise
 
 
+def _clean(text, limit=300):
+    return (str(text) if text is not None else "").strip()[:limit]
+
+
 def _confirm_step(s, step, decision, on_progress=None):
     d = s.draft
     before = copy.deepcopy(d)
@@ -486,19 +476,37 @@ def _confirm_step(s, step, decision, on_progress=None):
         lay = decision.get("layout")
         if lay not in VOCABULARY["layout"]:
             raise StepError("Choose one of the three layouts.")
-        if decision.get("omics_type") not in VOCABULARY["omics_type"]:
-            raise StepError("Choose an omics type.")
         if lay != d["layout"]["value"]:
-            # re-propose everything with the layout fixed as confirmed
             build_draft(s, ai_on=d["ai"]["enabled"], fixed_layout=lay, on_progress=on_progress)
             d = s.draft
             reproposed = True
         d["layout"]["value"] = lay
-        d["omics_type"]["value"] = decision["omics_type"]
-        d["source_software"]["value"] = (decision.get("source_software") or "unknown").strip() or "unknown"
-        for gid, it in d["groups"].items():
-            if it["role"] == "value" and (it.get("omics_type") in (None, "unknown")):
-                it["omics_type"] = decision["omics_type"]
+
+    if "assays" in decision:
+        new = decision["assays"]
+        if not new:
+            raise StepError("Describe at least one assay.")
+        for k, a in enumerate(new):
+            label = _clean(a.get("assay_label"), 120)
+            if not label:
+                raise StepError("Every assay needs a label.")
+            if k < len(d["assays"]):
+                old = d["assays"][k]
+                if old["assay_label"] != label:
+                    for it in d["groups"].values():
+                        if it.get("assay_label") == old["assay_label"]:
+                            it["assay_label"] = label
+            else:
+                old = _snap({"source": "user", "confidence": 1.0, "evidence": "Added by you."}, ASSAY_FIELDS)
+                d["assays"].append(old)
+            old["assay_label"] = label
+            old["omics_type"] = _clean(a.get("omics_type"), 80) or "unknown"
+            old["source_software"] = _clean(a.get("source_software"), 120) or "unknown"
+            if a.get("in_supported_scope") in VOCABULARY["in_supported_scope"]:
+                old["in_supported_scope"] = a["in_supported_scope"]
+            if "scope_reason" in a:
+                old["scope_reason"] = _clean(a.get("scope_reason"))
+        del d["assays"][len(new):]
 
     if "items" in decision:
         for ed in decision["items"]:
@@ -508,37 +516,49 @@ def _confirm_step(s, step, decision, on_progress=None):
             it = d["groups"][gid]
             for f in GROUP_FIELDS:
                 if f in ed:
-                    if f == "role" and ed[f] != it["role"]:
+                    val = ed[f]
+                    if f in ("label", "assay_label", "detail"):
+                        val = _clean(val) or None if f != "label" else _clean(val)
+                    if f in ("keep", "marks_rows_as_suspect"):
+                        val = bool(val)
+                    if f == "role" and val != it["role"]:
                         roles_changed = True
-                    it[f] = ed[f]
-            if it["role"] not in ("feature_annotation", "sample_metadata"):
-                it["kind"] = None
-            elif it.get("kind") not in kinds_for_role(it["role"]):
-                it["kind"] = None
-            if it["role"] != "value":
-                for f in ("measurement_type", "scale", "block_role"):
-                    it[f] = None
-            elif not it.get("block_role"):
-                it["block_role"] = "auxiliary"
-            if it["role"] == "sample_metadata" and it.get("kind") == "timepoint" and not it.get("detail"):
-                it["detail"] = timepoint_detail(s.cols.digests[s.groups_by_id[gid]["indices"][0]]) \
-                    if s.groups_by_id[gid]["n_columns"] == 1 else None
+                    it[f] = val
+            ai.normalize_item(it)
+            if it["role"] == "value":
+                if not it.get("block_role"):
+                    it["block_role"] = "auxiliary"
+                if not it.get("assay_label"):
+                    it["assay_label"] = d["assays"][0]["assay_label"]
+                if it["assay_label"] not in [a["assay_label"] for a in d["assays"]]:
+                    d["assays"].append(_snap({"assay_label": it["assay_label"], "omics_type": "unknown",
+                                              "source_software": "unknown", "in_supported_scope": "unsure",
+                                              "scope_reason": "", "source": "user", "confidence": 1.0,
+                                              "evidence": "Added by you."}, ASSAY_FIELDS))
+            if it.get("marks_rows_as_suspect") and it.get("flag_values") is None:
+                it["flag_values"] = flag_values(s, gid)
+            if it["role"] == "sample_metadata" and it.get("audit_kind") == "timepoint" and not it.get("detail") \
+                    and s.groups_by_id[gid]["n_columns"] == 1:
+                it["detail"] = timepoint_detail(s.cols.digests[s.groups_by_id[gid]["indices"][0]])
             it["validation"] = validate_group(it, s.groups_by_id[gid], s.cols, layout_of(d))
+            if it["validation"]["status"] == "contradicted":
+                raise StepError(f"{', '.join(s.groups_by_id[gid]['columns'][:2])}: "
+                                + " ".join(it["validation"]["messages"]))
 
     if "feature_identity" in decision:
-        fi = decision["feature_identity"]
-        gids = [g for g in fi.get("group_ids", []) if g in d["groups"]]
+        gids = [g for g in decision["feature_identity"].get("group_ids", []) if g in d["groups"]]
         d["feature_identity"]["group_ids"] = gids
         d["feature_identity"]["composite"] = len(gids) > 1
         for gid, it in d["groups"].items():
             if gid in gids and it["role"] != "feature_id":
-                it["role"], it["kind"] = "feature_id", None
+                it["role"] = "feature_id"
+                ai.normalize_item(it)
                 roles_changed = True
             elif gid not in gids and it["role"] == "feature_id":
-                it["role"], it["kind"] = "feature_annotation", "other_annotation"
+                it["role"] = "feature_annotation"
                 roles_changed = True
-        d["feature_identity"]["validation"] = validate_feature_identity(d["feature_identity"], s.groups_by_id, s.cols,
-                                                                        layout_of(d))
+        d["feature_identity"]["validation"] = validate_feature_identity(d["feature_identity"], s.groups_by_id,
+                                                                        s.cols, layout_of(d))
 
     if "sample_id_group" in decision:
         gid = decision["sample_id_group"]
@@ -546,11 +566,12 @@ def _confirm_step(s, step, decision, on_progress=None):
             raise StepError(f"Unknown group '{gid}'.")
         for g2, it in d["groups"].items():
             if it["role"] == "sample_id" and g2 != gid:
-                it["role"], it["kind"] = "sample_metadata", "other_sample_metadata"
+                it["role"], it["audit_kind"] = "sample_metadata", "other"
         if gid:
-            d["groups"][gid]["role"], d["groups"][gid]["kind"] = "sample_id", None
-            d["groups"][gid]["validation"] = validate_group(d["groups"][gid], s.groups_by_id[gid], s.cols,
-                                                            layout_of(d))
+            it = d["groups"][gid]
+            it["role"] = "sample_id"
+            ai.normalize_item(it)
+            it["validation"] = validate_group(it, s.groups_by_id[gid], s.cols, layout_of(d))
         d["sample_id_group"]["value"] = gid
 
     if "sample_rules" in decision:
@@ -559,30 +580,32 @@ def _confirm_step(s, step, decision, on_progress=None):
                 d["sample_rules"][gid]["strip_prefix"] = rule.get("strip_prefix", "")
                 d["sample_rules"][gid]["strip_suffix"] = rule.get("strip_suffix", "")
 
-    if "sample_types" in decision:
-        for sid, t in decision["sample_types"].items():
-            if t not in VOCABULARY["sample_type"]:
-                raise StepError(f"'{t}' is not a sample type.")
-            if sid in d["sample_types"] and d["sample_types"][sid]["type"] != t:
-                d["sample_types"][sid]["type"] = t
-                d["sample_types"][sid]["user_edited"] = True
+    if "samples" in decision:
+        for sid, ed in decision["samples"].items():
+            if sid in d["samples"]:
+                it = d["samples"][sid]
+                if "label" in ed:
+                    it["label"] = _clean(ed["label"], 120)
+                if "is_study_sample" in ed:
+                    it["is_study_sample"] = bool(ed["is_study_sample"])
+                it["user_edited"] = True
 
     if "processing_history" in decision:
         ph = decision["processing_history"]
         for q, _ in HISTORY_QUESTIONS:
-            a = (ph.get(q) or {})
+            a = ph.get(q) or {}
             if a.get("answer") not in VOCABULARY["yes_no_unsure"]:
                 raise StepError("Answer every processing-history question (yes, no or not sure).")
-            d["processing_history"][q] = {"answer": a["answer"], "note": (a.get("note") or "").strip()}
-        d["software_and_version"] = (ph.get("software_and_version") or "").strip()
-        d["history_notes"] = (ph.get("notes") or "").strip()
+            d["processing_history"][q] = {"answer": a["answer"], "note": _clean(a.get("note"))}
+        d["software_and_version"] = _clean(ph.get("software_and_version"))
+        d["history_notes"] = _clean(ph.get("notes"), 2000)
 
     if "metadata" in decision:
         apply_metadata_decision(s, d, decision["metadata"])
 
     _check_step(s, d, step)
     _assign_block_roles(d, s)
-    refresh_sample_types(s, d)
+    refresh_samples(s, d)
     d["steps"][step] = "confirmed"
     if roles_changed and not reproposed:
         idx = STEPS.index(step)
@@ -615,17 +638,15 @@ def _check_step(s, d, step):
     if step == "feature_id" and lay == "long":
         if not d["sample_id_group"]["value"]:
             raise StepError("Choose the column that names the sample on each row.")
-        dup = long_duplicates(s, d)
-        if dup:
-            d["long_duplicates"] = dup
+        d["long_duplicates"] = long_duplicates(s, d)
     if step == "values":
-        per = Counter(it.get("omics_type") or "unknown" for it in d["groups"].values()
+        per = Counter(it.get("assay_label") for it in d["groups"].values()
                       if it["role"] == "value" and it.get("block_role") == "primary")
         if not per:
             raise StepError("Mark at least one value block as primary.")
-        too_many = [o for o, n in per.items() if n > 1]
+        too_many = [a for a, n in per.items() if n > 1]
         if too_many:
-            raise StepError(f"Only one primary block per omics type (more than one for: {', '.join(too_many)}).")
+            raise StepError(f"Only one primary block per assay (more than one for: {', '.join(too_many)}).")
     if step == "samples" and lay in ("samples_in_rows", "long") and not d["sample_id_group"]["value"]:
         raise StepError("Choose the column that identifies each sample.")
 
@@ -640,15 +661,17 @@ def _diff(before, after):
         if ch:
             out.append({"group_id": gid, "changes": ch, "proposal": it.get("proposed"),
                         "provenance": provenance(it, GROUP_FIELDS)})
-    for key in ("layout", "omics_type", "source_software"):
-        if before[key]["value"] != after[key]["value"]:
-            out.append({"field": key, "from": before[key]["value"], "to": after[key]["value"],
-                        "proposal": after[key].get("proposed"), "provenance": provenance(after[key], FACT_FIELDS)})
+    if before["layout"]["value"] != after["layout"]["value"]:
+        out.append({"field": "layout", "from": before["layout"]["value"], "to": after["layout"]["value"],
+                    "provenance": provenance(after["layout"], FACT_FIELDS)})
+    if [a.get("assay_label") for a in before["assays"]] != [a.get("assay_label") for a in after["assays"]] or \
+            any(b.get(f) != a.get(f) for b, a in zip(before["assays"], after["assays"]) for f in ASSAY_FIELDS):
+        out.append({"field": "assays", "from": [{f: a.get(f) for f in ASSAY_FIELDS} for a in before["assays"]],
+                    "to": [{f: a.get(f) for f in ASSAY_FIELDS} for a in after["assays"]]})
     return out
 
 
 def long_duplicates(s, d):
-    """(feature, sample) pairs occurring more than once in a long table."""
     fid = [i for gid in d["feature_identity"]["group_ids"] for i in s.groups_by_id[gid]["indices"]]
     sg = d["sample_id_group"]["value"]
     if not fid or not sg:
@@ -663,68 +686,90 @@ def long_duplicates(s, d):
                         "in this version. Nothing was aggregated.")}
 
 
-# ---------------------------------------------------------------- reconsider
+# ---------------------------------------------------------------- reconsider (one group or a whole step)
 
-def reconsider(s, gid, hint, on_progress=None):
+def reconsider(s, gids, hint, on_progress=None):
     d = s.draft
-    if gid not in d["groups"]:
-        raise StepError(f"Unknown group '{gid}'.")
+    gids = [g for g in (gids if isinstance(gids, (list, tuple)) else [gids]) if g]
+    unknown = [g for g in gids if g not in d["groups"]]
+    if not gids or unknown:
+        raise StepError(f"Unknown group(s): {', '.join(unknown) or 'none given'}.")
     ok, why = llm.available()
     if not (ok and d["ai"]["enabled"]):
         raise StepError("The AI is off or unavailable: " + (why or "turn it on to ask it to reconsider."))
-    fixed = {"layout": d["layout"]["value"], "omics_type": d["omics_type"]["value"],
-             "confirmed_groups": {g: {k: it.get(k) for k in ("role", "kind", "measurement_type", "scale")}
-                                  for g, it in d["groups"].items() if g != gid and it["role"] != UNRESOLVED},
-             "user_hint_for_this_group": (hint or "").strip()[:500],
-             "instruction": f"Reconsider group {gid} only, taking the user's hint into account."}
+    fixed = {"layout": d["layout"]["value"],
+             "assays": [{f: a.get(f) for f in ASSAY_FIELDS} for a in d["assays"]],
+             "confirmed_groups": {g: {k: it.get(k) for k in ("role", "label", "audit_kind", "block_role")}
+                                  for g, it in d["groups"].items() if g not in gids and it["role"] != UNRESOLVED},
+             "user_feedback": _clean(hint, 1000),
+             "instruction": ("The user disagrees with the previous proposal for these groups. Reconsider only "
+                             "them, taking the user's feedback into account.")}
     prop, meta, digests = ai.propose(s.filename, s.sha, s.groups, s.hints, s.cols, fixed=fixed,
-                                     group_ids={gid}, log=s.log, on_progress=on_progress)
-    new = prop["groups"].get(gid)
-    if meta.get("error") or new is None:
-        raise StepError("The AI could not answer: " + (meta.get("error") or "no label returned"))
-    old = d["groups"][gid]
-    new = _blank(new)
-    new["hint"] = old.get("hint")
-    new["keep"] = old.get("keep", True)
-    if new["role"] == "value":
-        new["block_role"] = old.get("block_role") or "auxiliary"
-        new["omics_type"] = new.get("omics_type") or old.get("omics_type")
-    _snap(new, GROUP_FIELDS)
-    d["groups"][gid] = new
-    s.log("reconsider", {"group_id": gid, "user_hint": hint, "old": {k: old.get(k) for k in GROUP_FIELDS},
-                         "new": {k: new.get(k) for k in GROUP_FIELDS}, "validation": new["validation"]})
+                                     group_ids=set(gids), log=s.log, on_progress=on_progress,
+                                     signature_hint=d.get("signature_hint"))
+    if meta.get("error"):
+        raise StepError("The AI could not answer: " + meta["error"])
+    labels = [a["assay_label"] for a in d["assays"]]
+    changed = {}
+    for gid in gids:
+        new = prop["groups"].get(gid)
+        if new is None:
+            continue
+        old = d["groups"][gid]
+        new = _blank(new)
+        new["hint"], new["keep"] = old.get("hint"), old.get("keep", True)
+        if new["role"] == "value":
+            new["block_role"] = new.get("block_role") or old.get("block_role") or "auxiliary"
+            if new.get("assay_label") not in labels:
+                new["assay_label"] = old.get("assay_label") if old.get("assay_label") in labels else labels[0]
+        _attach_flags(s, gid, new)
+        _snap(new, GROUP_FIELDS)
+        d["groups"][gid] = new
+        changed[gid] = {"old": {k: old.get(k) for k in GROUP_FIELDS}, "new": {k: new.get(k) for k in GROUP_FIELDS}}
+    _assign_block_roles(d, s)
+    s.log("reconsider", {"group_ids": gids, "user_feedback": hint, "changes": changed})
     s.save()
-    return {"draft": public_draft(s), "digest": digests[0] if digests else None}
+    return {"draft": public_draft(s), "digest": digests[0] if digests else None,
+            "questions": prop.get("clarifying_questions", [])}
 
 
 # ---------------------------------------------------------------- sample metadata file (samples in columns)
 
 def _norm_id(x):
-    x = x.strip().lower()
-    x = re.sub(r"[\s_\-.]+", "", x)
+    x = re.sub(r"[\s_\-.]+", "", x.strip().lower())
     return re.sub(r"(?<![0-9])0+(?=[0-9])", "", x)
 
 
 def upload_metadata(s, filename, raw):
+    from .mock_llm import _NUM_RULES, _TEXT_RULES, _first
     t = parse_bytes(sanitize_filename(filename), raw)
     cols = Columns(t)
-    groups = [g for g in build_groups(cols)]
     data_ids = sample_ids(s, s.draft)
     best, best_hits = 0, -1
     for i in range(len(t["header"])):
-        vals = {cell(r, i).strip() for r in t["rows"]}
-        hits = len(vals & set(data_ids))
+        hits = len({cell(r, i).strip() for r in t["rows"]} & set(data_ids))
         if hits > best_hits:
             best, best_hits = i, hits
-    s.metadata_table = {"table": t, "cols": cols, "groups": groups}
-    meta = {"filename": sanitize_filename(filename), "id_column": t["header"][best],
-            "columns": [{"column": cols.labels[i], "index": i, "hint": group_hint(
-                {"kind": "single_column", "type": cols.digests[i]["type"], "profile": cols.digests[i],
-                 "n_columns": 1}), "role": "sample_metadata" if i != best else "sample_id",
-                "kind": None, "detail": None, "keep": True} for i in range(len(t["header"]))],
-            "accepted_near_misses": [], "skipped": False}
-    _guess_metadata_kinds(meta, cols)
-    meta["report"] = match_report(data_ids, [cell(r, best).strip() for r in t["rows"]])
+    s.metadata_table = {"table": t, "cols": cols}
+    columns = []
+    for i in range(len(t["header"])):
+        dg = cols.digests[i]
+        c = {"column": cols.labels[i], "index": i, "role": "sample_id" if i == best else "sample_metadata",
+             "hint": group_hint({"kind": "single_column", "type": dg["type"], "profile": dg, "n_columns": 1}),
+             "audit_kind": None, "label": "", "detail": None, "keep": True, "source": "computed"}
+        if i != best:
+            rule = _first(c["column"], _NUM_RULES if dg["type"] == "numeric" else _TEXT_RULES)
+            if rule and rule[0] == "sample_metadata":
+                c["audit_kind"], c["label"] = rule[2], rule[1]
+            else:
+                c["audit_kind"], c["label"] = "covariate", c["column"]
+            if c["audit_kind"] == "timepoint":
+                c["detail"] = timepoint_detail(dg)
+        c["proposed"] = {"audit_kind": c["audit_kind"], "label": c["label"]}
+        columns.append(c)
+    meta = {"filename": sanitize_filename(filename), "id_column": t["header"][best], "columns": columns,
+            "accepted_near_misses": [], "skipped": False,
+            "report": match_report(data_ids, [cell(r, best).strip() for r in t["rows"]])}
     s.draft["metadata"] = meta
     s.log("metadata_upload", {"filename": meta["filename"], "id_column": meta["id_column"],
                               "report": {k: v for k, v in meta["report"].items() if k != "matched"}})
@@ -732,38 +777,16 @@ def upload_metadata(s, filename, raw):
     return public_draft(s)
 
 
-def _guess_metadata_kinds(meta, cols):
-    from .mock_llm import _TEXT_RULES, _NUM_RULES, _first
-    for c in meta["columns"]:
-        if c["role"] == "sample_id":
-            continue
-        d = cols.digests[c["index"]]
-        rule = _first(c["column"], _NUM_RULES if d["type"] == "numeric" else _TEXT_RULES)
-        if rule and rule[0] == "sample_metadata":
-            c["kind"] = rule[1]
-            c["source"] = "computed"
-        else:
-            c["kind"] = "covariate_numeric" if d["type"] == "numeric" else None
-            c["source"] = "computed" if c["kind"] else "none"
-        if c["kind"] == "timepoint":
-            c["detail"] = timepoint_detail(d)
-        c["proposed"] = {"kind": c["kind"], "role": c["role"]}
-
-
 def match_report(data_ids, meta_ids):
     ds, ms = set(data_ids), set(i for i in meta_ids if i)
-    matched = sorted(ds & ms)
     only_data = [i for i in data_ids if i not in ms]
     only_meta = [i for i in meta_ids if i and i not in ds]
     norm_meta = {}
     for m in only_meta:
         norm_meta.setdefault(_norm_id(m), []).append(m)
-    near = []
-    for dd in only_data:
-        for m in norm_meta.get(_norm_id(dd), []):
-            near.append({"data_id": dd, "metadata_id": m,
-                         "reason": "differs only in case, spaces/underscores or leading zeros"})
-    return {"matched": matched, "n_matched": len(matched), "only_in_data": only_data,
+    near = [{"data_id": dd, "metadata_id": m, "reason": "differs only in case, spaces/underscores or leading zeros"}
+            for dd in only_data for m in norm_meta.get(_norm_id(dd), [])]
+    return {"matched": sorted(ds & ms), "n_matched": len(ds & ms), "only_in_data": only_data,
             "only_in_metadata": only_meta, "near_misses": near}
 
 
@@ -779,42 +802,45 @@ def apply_metadata_decision(s, d, md):
     by_col = {c["column"]: c for c in meta["columns"]}
     for ed in md.get("columns", []):
         c = by_col.get(ed.get("column"))
-        if c and c["role"] != "sample_id":
-            c["kind"] = ed.get("kind")
-            c["keep"] = bool(ed.get("keep", True))
-            if c["kind"] not in VOCABULARY["sample_metadata_kind"]:
-                raise StepError(f"Choose a kind for metadata column '{c['column']}'.")
+        if not c or c["role"] == "sample_id":
+            continue
+        if ed.get("audit_kind") not in VOCABULARY["audit_kind"]:
+            raise StepError(f"Choose an audit kind for metadata column '{c['column']}'.")
+        c["audit_kind"] = ed["audit_kind"]
+        c["label"] = _clean(ed.get("label", c["label"]))
+        c["detail"] = _clean(ed.get("detail", c.get("detail"))) or None
+        c["keep"] = bool(ed.get("keep", True))
 
 
 # ---------------------------------------------------------------- public view
 
 def public_draft(s):
-    """Draft + derived facts for the frontend (provenance, sample ids, groups)."""
+    """Draft + derived facts for the frontend (provenance, sample ids, labels in use)."""
     d = s.draft
     out = copy.deepcopy(d)
-    for gid, it in out["groups"].items():
+    for it in out["groups"].values():
         it["provenance"] = provenance(it, GROUP_FIELDS)
-    for key in ("layout", "omics_type", "source_software"):
-        out[key]["provenance"] = provenance(out[key], FACT_FIELDS)
+        if it.get("marks_rows_as_suspect") and it.get("flag_values") and it.get("flagged_value") is not None:
+            it["n_flagged"] = it["flag_values"].get(it["flagged_value"], 0)
+    out["layout"]["provenance"] = provenance(out["layout"], FACT_FIELDS)
+    for a in out["assays"]:
+        a["provenance"] = provenance(a, ASSAY_FIELDS)
     out["feature_identity"]["provenance"] = provenance(out["feature_identity"], FI_FIELDS)
     ids = sample_ids(s, d)
-    dup = [k for k, n in Counter(ids).items() if n > 1]
-    out["samples"] = {"ids": ids, "n": len(ids), "duplicates": dup}
+    out["sample_list"] = {"ids": ids, "n": len(ids), "duplicates": [k for k, n in Counter(ids).items() if n > 1]}
     out["blocks_samples"] = {gid: sample_ids(s, d, gid) for gid, it in d["groups"].items()
                              if it["role"] == "value" and layout_of(d) == "samples_in_columns"}
-    for sid, st in out["sample_types"].items():
-        st["provenance"] = provenance(st, ("type",))
+    for st in out["samples"].values():
+        st["provenance"] = provenance(st, SAMPLE_FIELDS)
+    out["suggestions"] = {  # labels already used in this session (for the open text fields)
+        "label": sorted({it["label"] for it in d["groups"].values() if it.get("label")}),
+        "assay_label": [a["assay_label"] for a in d["assays"]],
+        "omics_type": sorted({a["omics_type"] for a in d["assays"]} | {"proteomics", "metabolomics"}),
+        "source_software": sorted({a["source_software"] for a in d["assays"]} - {"unknown"}),
+        "sample_label": sorted({x["label"] for x in d["samples"].values() if x.get("label")}),
+    }
     out["unresolved"] = unresolved_items(s, d)
-    out["flags"] = {gid: flag_counts(s, gid) for gid, it in d["groups"].items()
-                    if (it.get("kind") or "").startswith("flag_")}
     return out
-
-
-def flag_counts(s, gid):
-    g = s.groups_by_id[gid]
-    i = g["indices"][0]
-    n = sum(1 for r in s.table["rows"] if not is_missing(cell(r, i)) and cell(r, i).strip() not in ("0", "false", "False"))
-    return n
 
 
 def unresolved_items(s, d):
@@ -822,13 +848,14 @@ def unresolved_items(s, d):
     if d["layout"]["value"] not in VOCABULARY["layout"]:
         out.append({"step": "layout", "what": "Layout is not decided."})
     for gid, it in d["groups"].items():
+        name = ", ".join(s.groups_by_id[gid]["columns"][:2]) + (" ..." if s.groups_by_id[gid]["n_columns"] > 2 else "")
         if it["role"] == UNRESOLVED:
-            out.append({"step": step_for_group(s, d, gid), "group_id": gid,
-                        "what": f"Role of {', '.join(s.groups_by_id[gid]['columns'][:2])}"
-                                + (" ..." if s.groups_by_id[gid]["n_columns"] > 2 else "") + " is unresolved."})
-        elif it["role"] in ("feature_annotation", "sample_metadata") and not it.get("kind"):
-            out.append({"step": step_for_group(s, d, gid), "group_id": gid,
-                        "what": f"Kind of '{s.groups_by_id[gid]['columns'][0]}' is not chosen."})
+            out.append({"step": step_for_group(s, d, gid), "group_id": gid, "what": f"Role of {name} is unresolved."})
+        elif it["role"] == "sample_metadata" and it.get("audit_kind") not in VOCABULARY["audit_kind"]:
+            out.append({"step": "sample_info", "group_id": gid, "what": f"Audit kind of '{name}' is not chosen."})
+        elif it.get("marks_rows_as_suspect") and it.get("flag_values") and it.get("flagged_value") is None:
+            out.append({"step": "annotations", "group_id": gid,
+                        "what": f"Choose which value of '{name}' means 'flagged'."})
     lay = layout_of(d)
     if lay in ("samples_in_columns", "long") and not d["feature_identity"]["group_ids"]:
         out.append({"step": "feature_id", "what": "Feature identity is not chosen."})
@@ -838,10 +865,8 @@ def unresolved_items(s, d):
         out.append({"step": "feature_id", "what": d["long_duplicates"]["message"]})
     if not primary_blocks(s, d):
         out.append({"step": "values", "what": "No primary value block."})
-    for q, _ in HISTORY_QUESTIONS:
-        if not d["processing_history"][q]["answer"]:
-            out.append({"step": "history", "what": "Processing-history questions are not all answered."})
-            break
+    if any(not d["processing_history"][q]["answer"] for q, _ in HISTORY_QUESTIONS):
+        out.append({"step": "history", "what": "Processing-history questions are not all answered."})
     for st in STEPS[:-1]:
         if d["steps"][st] == "pending":
             out.append({"step": st, "what": f"Step '{st.replace('_', ' ')}' is not confirmed yet."})
@@ -849,9 +874,7 @@ def unresolved_items(s, d):
 
 
 def step_for_group(s, d, gid):
-    it = d["groups"][gid]
-    g = s.groups_by_id[gid]
-    lay = layout_of(d)
+    it, g, lay = d["groups"][gid], s.groups_by_id[gid], layout_of(d)
     role = it["role"]
     if role == "feature_id":
         return "feature_id"
@@ -859,11 +882,10 @@ def step_for_group(s, d, gid):
         return "annotations"
     if role == "value":
         return "values"
-    if role in ("sample_id", "sample_metadata"):
-        return "sample_info" if role == "sample_metadata" else "samples"
-    if role == "ignore":
-        return "values" if g["type"] == "numeric" else ("sample_info" if lay == "samples_in_rows" else "annotations")
-    # unresolved: numeric blocks -> values; numeric singles -> sample info in rows layout, else annotations
+    if role == "sample_id":
+        return "samples"
+    if role == "sample_metadata":
+        return "sample_info"
     if g["kind"] == "numeric_block":
         return "values"
     if lay == "samples_in_rows":

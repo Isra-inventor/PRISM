@@ -137,6 +137,7 @@ class Columns:
             d["frac_numeric"] = _r(len(nums) / n_present)
         if 0 < n_unique <= TEXT_EXAMPLES_MAX_UNIQUE:
             d["values"] = [{"value": v, "count": c} for v, c in counts.most_common()]
+        d["value_shapes"] = value_shapes(counts)
         return d
 
     def is_numeric(self, i):
@@ -144,6 +145,39 @@ class Columns:
 
 
 # ---------------------------------------------------------------- name patterns
+
+_LEAD = re.compile(r"^[^0-9]{1,6}")
+
+
+def _mask(s):
+    s = re.sub(r"[0-9]", "#", s)
+    s = re.sub(r"[a-z]", "a", s)
+    return re.sub(r"[A-Z]", "A", s)
+
+
+def value_shapes(counts, top=3):
+    """The format of a text column's values without the values themselves:
+    digits -> '#', letters -> 'a' / 'A'. A leading non-digit prefix shared by at
+    least half of the values (e.g. 'cg', 'OTU_', 'ENSG') is kept as is, since it
+    names the ID system rather than an individual entry."""
+    n = sum(counts.values())
+    if not n:
+        return []
+    leads = Counter()
+    for v, c in counts.items():
+        m = _LEAD.match(v)
+        if m and re.search(r"[0-9]", v):
+            leads[m.group(0)] += c
+    shared = {p for p, c in leads.items() if c >= 0.5 * n}
+    shapes = Counter()
+    for v, c in counts.items():
+        m = _LEAD.match(v)
+        if m and m.group(0) in shared:
+            shapes[m.group(0) + _mask(v[m.end():])] += c
+        else:
+            shapes[_mask(v)] += c
+    return [{"shape": s[:40], "count": c} for s, c in shapes.most_common(top)]
+
 
 def _split_points(name, regex):
     return [(m.start(), m.end()) for m in regex.finditer(name)]
@@ -200,7 +234,7 @@ def _best_family(names_by_idx, compatible=None):
             continue
         if re.search(r"\d", pat) and sum(1 for r in res if r.lower() in pattern_words) >= 0.5 * len(res):
             continue  # a per-sample slice, e.g. suffix ' S01' over 'Intensity S01', 'iBAQ S01', ...
-        if _mixes_subfamilies(members, names_by_idx, cands):
+        if _mixes_subfamilies(members, names_by_idx, cands, (side, pat)):
             continue
         if compatible is not None and not compatible(members):
             continue
@@ -208,12 +242,33 @@ def _best_family(names_by_idx, compatible=None):
     return None
 
 
-def _mixes_subfamilies(members, names_by_idx, cands):
+_DESIGN_CODE = re.compile(r"(?i)[a-z]{0,5}[\s_.\-]?\d+")
+
+
+def _design_code_only(parent, sub):
+    """True if the sub-family pattern differs from the parent only by a short
+    code with a number (a day, visit, batch or plate such as 'D7', 'T2', 'B03'):
+    those are parts of the sample names, not another measurement family."""
+    (s1, p1), (s2, p2) = parent, sub
+    if s1 != s2:
+        return False
+    if s1 == "prefix" and p2.startswith(p1):
+        diff = p2[len(p1):]
+    elif s1 == "suffix" and p2.endswith(p1):
+        diff = p2[:len(p2) - len(p1)]
+    else:
+        return False
+    return bool(_DESIGN_CODE.fullmatch(diff.strip(" _.-:|/\\")))
+
+
+def _mixes_subfamilies(members, names_by_idx, cands, parent=None):
     """True if a smaller family inside `members` has (letter-containing) sample
     names that all re-appear among the other members: the candidate mixes
     several measurement families of the same samples."""
     for (s2, p2), m2 in cands.items():
         if not m2 < members:
+            continue
+        if parent is not None and _design_code_only(parent, (s2, p2)):
             continue
         sample_names = {_residual(names_by_idx[i], s2, p2) for i in m2}
         if not all(re.search(r"[A-Za-z]", n) for n in sample_names):
@@ -317,7 +372,7 @@ def _split_deviants(cols, members, exempt_sample_words=False):
         if exempt_sample_words and _SAMPLE_WORDS.search(cols.header[i]):
             keep.append(i)
             continue
-        if med is not None and p["lmed"] is not None and abs(p["lmed"] - med) / scale > 3:
+        if med is not None and p["lmed"] is not None and abs(p["lmed"] - med) > max(3 * scale, 1.0):
             reasons.append("typical value far from the rest of the family")
         if (majority_int and not p["int"]) or (majority_float and p["int"]):
             reasons.append("integer / non-integer differs from the rest of the family")

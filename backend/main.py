@@ -4,8 +4,9 @@ Run from the repository root:
     python -m uvicorn backend.main:app --reload
 then open http://127.0.0.1:8000
 
-Flow: upload (parse + profile + group, deterministic) -> propose (signature
-pre-fill, AI labels the groups, every claim validated) -> the wizard confirms
+Flow: upload (parse + profile + group, deterministic) -> propose (the AI labels
+the groups, briefed by backend/briefing.md; every claim validated; without the AI
+a known-format signature gives the manual starting point) -> the wizard confirms
 each step -> finalize (schema.json + canonical tables). Everything is logged to
 backend/logs/<session_id>.jsonl.
 """
@@ -18,7 +19,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -233,7 +234,8 @@ async def confirm_step(req: StepRequest):
 
 class ReconsiderRequest(BaseModel):
     session_id: str
-    group_id: str
+    group_ids: List[str] = []
+    group_id: Optional[str] = None  # older clients: a single group
     user_hint: str = ""
     progress_id: Optional[str] = None
 
@@ -242,7 +244,7 @@ def _do_reconsider(req):
     s = session_or_404(req.session_id)
     with s.lock:
         try:
-            return workflow.reconsider(s, req.group_id, req.user_hint, on_progress=ai_progress(req.progress_id))
+            return workflow.reconsider(s, req.group_ids or [req.group_id], req.user_hint, on_progress=ai_progress(req.progress_id))
         except workflow.StepError as e:
             raise HTTPException(422, str(e))
 

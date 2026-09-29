@@ -13,9 +13,9 @@ import io
 from collections import Counter, OrderedDict
 
 from .parsing import cell, is_missing
-from .schema import SCHEMA_VERSION, UNSUPPORTED_NOTICE, VOCABULARY
-from .workflow import (FACT_FIELDS, FI_FIELDS, GROUP_FIELDS, layout_of, long_duplicates, provenance,
-                       sample_ids, unresolved_items)
+from .schema import SCHEMA_VERSION
+from .workflow import (ASSAY_FIELDS, FACT_FIELDS, FI_FIELDS, GROUP_FIELDS, SAMPLE_FIELDS, layout_of,
+                       long_duplicates, provenance, sample_ids, unresolved_items)
 
 
 class OutputError(Exception):
@@ -39,14 +39,17 @@ def _fact(item):
 
 
 def _assays(s, d):
-    """Value groups (primary / auxiliary) grouped by omics type -> ordered assays."""
-    assays = OrderedDict()
+    """Value groups (primary / auxiliary) grouped by assay label, in the order of d['assays']."""
+    assays = OrderedDict((a["assay_label"], (a, [])) for a in d["assays"])
     for g in s.groups:
         it = d["groups"][g["group_id"]]
         if it["role"] != "value" or it.get("block_role") == "excluded":
             continue
-        om = it.get("omics_type") or d["omics_type"]["value"]
-        assays.setdefault(om, []).append(g)
+        lab = it.get("assay_label") or d["assays"][0]["assay_label"]
+        if lab not in assays:
+            assays[lab] = ({"assay_label": lab, "omics_type": "unknown", "source_software": "unknown",
+                            "in_supported_scope": "unsure", "scope_reason": "", "source": "user"}, [])
+        assays[lab][1].append(g)
     return assays
 
 
@@ -74,7 +77,7 @@ def build(s):
     feature_rows_all = []
     fk_idx = feature_key_indices(s, d)
     block_n = 0
-    for a_n, (omics, gs) in enumerate(assays.items(), 1):
+    for a_n, (a_label, (assay, gs)) in enumerate(assays.items(), 1):
         aid = f"A{a_n}"
         blocks = []
         primary = None
@@ -91,9 +94,8 @@ def build(s):
                 "columns": g["columns"],
                 "sample_id_rule": {"strip_prefix": rule.get("strip_prefix", ""),
                                    "strip_suffix": rule.get("strip_suffix", "")} if lay == "samples_in_columns" else None,
-                "measurement_type": {"value": it.get("measurement_type") or "unknown", "label": it.get("label"),
-                                     "confidence": it.get("confidence"), "provenance": provenance(it, GROUP_FIELDS)},
-                "scale": {"value": it.get("scale") or "unknown", "provenance": provenance(it, GROUP_FIELDS)},
+                "label": it.get("label") or "", "confidence": it.get("confidence"),
+                "provenance": provenance(it, GROUP_FIELDS),
                 "profile": prof,
             })
             if it["block_role"] == "primary":
@@ -136,9 +138,12 @@ def build(s):
         fi = d["feature_identity"]
         schema_assays.append({
             "assay_id": aid,
-            "omics_type": {"value": omics, "provenance": provenance(d["omics_type"], FACT_FIELDS)
-                           if omics == d["omics_type"]["value"] else provenance(d["groups"][g["group_id"]], GROUP_FIELDS)},
-            "source_software": _fact(d["source_software"]),
+            "assay_label": a_label,
+            "omics_type": assay.get("omics_type") or "unknown",
+            "source_software": assay.get("source_software") or "unknown",
+            "in_supported_scope": assay.get("in_supported_scope") or "unsure",
+            "scope_reason": assay.get("scope_reason") or "",
+            "provenance": provenance(assay, ASSAY_FIELDS),
             "feature_identity": ({"columns": [c for gid in fi["group_ids"] for c in s.groups_by_id[gid]["columns"]],
                                   "composite": len(fk_idx) > 1, "provenance": provenance(fi, FI_FIELDS)}
                                  if lay != "samples_in_rows" else
@@ -148,8 +153,11 @@ def build(s):
             "n_features": len(feat_keys),
             "n_samples": len(sids),
         })
-        if omics not in VOCABULARY["supported_downstream"]:
-            flags.append({"flag": "unsupported_omics_type", "assay": aid, "detail": UNSUPPORTED_NOTICE})
+        if assay.get("in_supported_scope") in ("no", "unsure"):
+            flags.append({"flag": "outside_supported_scope", "assay": aid,
+                          "detail": f"Recognized as {assay.get('omics_type') or 'unknown'} "
+                                    f"(scope: {assay.get('in_supported_scope')}) - not yet supported by PRISM's audit. "
+                                    + (assay.get("scope_reason") or "")})
 
     # feature metadata
     ann = [(gid, it) for gid, it in d["groups"].items()
@@ -196,7 +204,7 @@ def build(s):
 
     # sample metadata
     sids = sample_ids(s, d)
-    st = d["sample_types"]
+    st = d["samples"]
     smd_cols, smd_vals = [], {}
     meta_groups = [(s.groups_by_id[gid], it) for gid, it in d["groups"].items()
                    if it["role"] == "sample_metadata" and it.get("keep", True)]
@@ -245,9 +253,9 @@ def build(s):
         flags.append({"flag": "no_sample_metadata",
                       "detail": "No sample metadata file was provided (step skipped)."})
     artifacts["sample_metadata.csv"] = _csv(
-        ["sample_id", "sample_type"] + smd_cols,
-        [[sid, st.get(sid, {}).get("type", "unknown")] + [smd_vals.get(sid, {}).get(c, "") for c in smd_cols]
-         for sid in sids])
+        ["sample_id", "sample_label", "is_study_sample"] + smd_cols,
+        [[sid, st.get(sid, {}).get("label", ""), "true" if st.get(sid, {}).get("is_study_sample", True) else "false"]
+         + [smd_vals.get(sid, {}).get(c, "") for c in smd_cols] for sid in sids])
 
     # parse-level integrity flags
     pr = s.table["parse_report"]
@@ -268,25 +276,26 @@ def build(s):
         "file_sha256": s.sha,
         "layout": _fact(d["layout"]),
         "assays": schema_assays,
-        "feature_annotations": [
-            {"column": c, "kind": it.get("kind") or ("feature_id" if it["role"] == "feature_id" else None),
-             "keep": it.get("keep", True), "provenance": provenance(it, GROUP_FIELDS),
-             **({"n_flagged": _flagged(s, i)} if (it.get("kind") or "").startswith("flag_") else {})}
-            for gid, it in d["groups"].items() if it["role"] in ("feature_annotation", "feature_id")
-            for c, i in zip(s.groups_by_id[gid]["columns"], s.groups_by_id[gid]["indices"])],
+        "feature_annotations": [_annotation(s, gid, it, c, i)
+                                for gid, it in d["groups"].items() if it["role"] in ("feature_annotation", "feature_id")
+                                for c, i in zip(s.groups_by_id[gid]["columns"], s.groups_by_id[gid]["indices"])],
         "sample_metadata": [
-            {"column": c, "kind": it.get("kind"), **({"detail": it["detail"]} if it.get("detail") else {}),
-             "provenance": provenance(it, GROUP_FIELDS)}
+            {"column": c, "audit_kind": it.get("audit_kind"), "label": it.get("label") or "",
+             **({"detail": it["detail"]} if it.get("detail") else {}),
+             "keep": it.get("keep", True), "source": "data_file", "provenance": provenance(it, GROUP_FIELDS)}
             for gid, it in d["groups"].items() if it["role"] == "sample_metadata"
             for c in s.groups_by_id[gid]["columns"]] + (
-            [{"column": c["column"], "kind": c["kind"], "source": "metadata_file", "provenance":
-              ("computed" if c.get("proposed", {}).get("kind") == c["kind"] and c.get("source") == "computed" else "user_set")}
-             for c in (meta or {}).get("columns", []) if c["role"] != "sample_id" and c.get("keep", True)]
+            [{"column": c["column"], "audit_kind": c["audit_kind"], "label": c.get("label") or "",
+              **({"detail": c["detail"]} if c.get("detail") else {}), "keep": c.get("keep", True),
+              "source": "metadata_file",
+              "provenance": ("computed" if all(c.get("proposed", {}).get(k) == c.get(k) for k in ("audit_kind", "label"))
+                             else "user_set")}
+             for c in (meta or {}).get("columns", []) if c["role"] != "sample_id"]
             if meta and not meta.get("skipped") else []),
         "sample_id": ({"column": s.groups_by_id[d["sample_id_group"]["value"]]["columns"][0]}
                       if d["sample_id_group"]["value"] else {"from": "value column headers"}),
-        "sample_types": [{"sample_id": sid, "type": v["type"], "provenance": provenance(v, ("type",))}
-                         for sid, v in st.items()],
+        "samples": [{"sample": sid, "label": v.get("label") or "", "is_study_sample": bool(v.get("is_study_sample", True)),
+                     "provenance": provenance(v, SAMPLE_FIELDS)} for sid, v in st.items()],
         "excluded_columns": _excluded(s, d),
         "processing_history": dict(d["processing_history"], software_and_version=d.get("software_and_version", ""),
                                    notes=d.get("history_notes", "")),
@@ -295,14 +304,25 @@ def build(s):
         "ai": {"provider": d["ai"]["provider"], "model": d["ai"].get("model"),
                "models_used": d["ai"].get("models_used", []), "prompt_version": d["ai"]["prompt_version"],
                "temperature": d["ai"]["temperature"], "enabled": d["ai"]["enabled"]},
-        "signature": d.get("signature"),
+        "signature_hint": d.get("signature_hint"),
+        "clarifying_questions": d.get("clarifying_questions", []),
         "log_ref": f"{s.sid}.jsonl",
     }
     return schema, artifacts, flags
 
 
-def _flagged(s, i):
-    return sum(1 for r in s.table["rows"] if not is_missing(cell(r, i)) and cell(r, i).strip() not in ("0", "false"))
+def _annotation(s, gid, it, column, i):
+    out = {"column": column, "label": it.get("label") or "", "is_feature_id": it["role"] == "feature_id",
+           "marks_rows_as_suspect": bool(it.get("marks_rows_as_suspect")), "keep": it.get("keep", True),
+           "provenance": provenance(it, GROUP_FIELDS)}
+    if it.get("marks_rows_as_suspect"):
+        fv = it.get("flag_values")
+        out["flag_values"] = fv
+        out["flagged_value"] = it.get("flagged_value")
+        if it.get("flagged_value") is not None:
+            out["n_flagged"] = sum(1 for r in s.table["rows"]
+                                   if ("" if is_missing(cell(r, i)) else cell(r, i).strip()) == it["flagged_value"])
+    return out
 
 
 def _excluded(s, d):

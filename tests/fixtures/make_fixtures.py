@@ -148,6 +148,30 @@ def messy():
     w("G_messy_parsing.csv", ["id", "value", "value", "", "note"], rows, ";")
 
 
+def h_16s_otu(rng):
+    """QIIME-style 16S OTU count table: out of PRISM's current scope."""
+    ranks = ["k__Bacteria", "p__Firmicutes", "c__Clostridia", "o__Clostridiales", "f__Lachnospiraceae"]
+    genera = ["g__Blautia", "g__Roseburia", "g__Dorea", "g__Coprococcus", "g__Faecalibacterium", "g__"]
+    samples = [f"Stool.D{d}.{s}" for s in ("A", "B", "C", "D") for d in (0, 7, 14)]
+    rows = []
+    for k in range(80):
+        counts = [0 if rng.random() < 0.45 else int(10 ** rng.uniform(0, 3.5)) for _ in samples]
+        rows.append([f"OTU_{k + 1}"] + counts + ["; ".join(ranks + [genera[k % len(genera)]])])
+    w("H_16S_otu_table.tsv", ["#OTU ID"] + samples + ["taxonomy"], rows, "\t")
+
+
+def i_methylation(rng):
+    """Illumina-style methylation beta-value matrix: out of PRISM's current scope."""
+    samples = [f"GSM{2100450 + i}" for i in range(12)]
+    rows = []
+    for k in range(200):
+        base = rng.choice([0.05, 0.5, 0.9])
+        rows.append([f"cg{rng.randrange(10 ** 7, 3 * 10 ** 7):08d}"]
+                    + ["NA" if rng.random() < 0.01 else f"{min(0.999, max(0.001, rng.gauss(base, 0.05))):.4f}"
+                       for _ in samples])
+    w("I_methylation_beta.csv", ["ID_REF"] + samples, rows)
+
+
 if __name__ == "__main__":
     rng = random.Random(42)
     a_maxquant(rng)
@@ -157,4 +181,6 @@ if __name__ == "__main__":
     e_somascan(rng)
     f_long(rng)
     messy()
+    h_16s_otu(random.Random(16))
+    i_methylation(random.Random(450))
     print("fixtures written to", HERE)

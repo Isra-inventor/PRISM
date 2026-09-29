@@ -5,9 +5,11 @@ column names and aggregated statistics. Never raw rows. Example values only
 for low-cardinality text columns (<= 20 distinct values), and only when
 AI_SEND_EXAMPLE_VALUES is on (default).
 
-What comes back is parsed strictly (Pydantic), then every claim is checked
-against the data (validation.py). Contradicted claims become 'unresolved';
-unknown group ids are rejected; missing groups are unresolved.
+The prompt is a briefing (briefing.md + the closed sets + the current scope)
+rather than enumerated categories: descriptive fields are free text.
+What comes back is parsed strictly (Pydantic) and checked structurally
+(validation.py): unknown group ids are rejected, missing groups and values
+outside the closed sets become 'unresolved'.
 """
 
 from __future__ import annotations
@@ -15,7 +17,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import threading
 import traceback
 from pathlib import Path
 from typing import List, Optional
@@ -23,7 +24,8 @@ from typing import List, Optional
 from pydantic import BaseModel, ValidationError
 
 from . import llm_providers as llm
-from .schema import ALL_KINDS, DEFINITIONS, PROMPT_VERSION, UNRESOLVED, VOCABULARY
+from .config import SCOPE_DESCRIPTION
+from .schema import DEFINITIONS, PROMPT_VERSION, UNRESOLVED, VOCABULARY
 from .validation import timepoint_detail, validate_feature_identity, validate_group
 
 CACHE_DIR = Path(os.environ.get("PRISM_CACHE_DIR", Path(__file__).parent / "cache"))
@@ -60,6 +62,8 @@ def _group_digest(g, examples):
     if not examples or (prof.get("unique_ratio") or 0) >= 0.5:
         # identifier-like columns (e.g. patient codes) never send example values
         prof.pop("values", None)
+    if not examples:
+        prof.pop("value_shapes", None)
     d["profile"] = prof
     if g.get("sample_names"):
         d["sample_names_after_stripping_pattern"] = g["sample_names"][:SAMPLE_NAMES_IN_DIGEST]
@@ -69,11 +73,12 @@ def _group_digest(g, examples):
     return d
 
 
-def build_digest(filename, groups, hints, fixed=None, group_ids=None):
+def build_digest(filename, groups, hints, fixed=None, group_ids=None, signature_hint=None):
     examples = send_examples()
     chosen = [g for g in groups if group_ids is None or g["group_id"] in group_ids]
     return {
-        "file": {"name_extension": Path(filename).suffix.lower(), "layout_hints": hints},
+        "file": {"name_extension": Path(filename).suffix.lower(), "layout_hints": hints,
+                 "signature_hint": signature_hint},
         "already_confirmed": fixed or {},
         "groups": [_group_digest(g, examples) for g in chosen],
         "settings": {"example_values_sent": examples, "raw_rows_sent": False},
@@ -86,88 +91,87 @@ def digest_hash(digest):
 
 # ---------------------------------------------------------------- prompt
 
-def _defs(keys):
-    return "\n".join(f"- {k}: {DEFINITIONS[k]}" for k in keys if k in DEFINITIONS)
+BRIEFING = (Path(__file__).parent / "briefing.md").read_text(encoding="utf-8")
 
 
-SYSTEM_PROMPT = f"""You help a scientist confirm the structure of a quantified omics table \
-(proteomics, metabolomics, ...). The columns were already grouped by deterministic code. \
-You receive a JSON digest: layout hints and, per group, its name pattern, some column names \
-and computed statistics. You never see raw data rows.
+def system_prompt():
+    closed = VOCABULARY
+    return f"""{BRIEFING}
 
-Your task: label every group, and propose file-level facts.
-- layout: one of {VOCABULARY['layout']}.
-- omics_type: one of {VOCABULARY['omics_type']}.
-- source_software: the software that produced the file if the column names reveal it, else "unknown".
-- feature_identity: the group_id(s) whose values identify each feature (several = composite key, \
-e.g. m/z + retention time). Use [] when feature names are column headers (samples in rows).
-- groups: for EVERY group in the digest, exactly one entry with:
-  role: one of {VOCABULARY['column_role']}
-  kind: for role feature_annotation one of {VOCABULARY['feature_annotation_kind']}; \
-for role sample_metadata one of {VOCABULARY['sample_metadata_kind']}; otherwise null.
-  detail: for kind timepoint one of {VOCABULARY['timepoint_detail']}; otherwise null.
-  measurement_type (role value only): one of {VOCABULARY['measurement_type']}.
-  scale (role value only): one of {VOCABULARY['scale']}.
-  omics_type (role value only): omics type of this block (a file can hold several assays).
-  label (role value only): short human name, e.g. "LFQ intensity", "Peak area".
-  confidence: 0-1, your probability that the entry is right.
-  evidence: one sentence citing only facts present in the digest (names, statistics).
-  suggest_split: null, or a list of column names inside a multi-column group that do not \
-belong with the rest (e.g. a clinical covariate such as age or serum iron inside a block of \
-metabolite columns), with suggest_split_role/suggest_split_kind for them. Code decides.
-- sample_types: sample names or glob patterns (e.g. "QC_*") that are QC / pool / blank / \
-calibrator samples, each with type from {VOCABULARY['sample_type']}.
-- clarifying_questions: questions you cannot resolve from the digest.
+## Current scope of PRISM's later steps
+{SCOPE_DESCRIPTION}
+Anything else must still be recognized and described, but flagged in_supported_scope "no" (or
+"unsure") with a short scope_reason.
 
-Definitions:
-{_defs(['feature_id', 'feature_annotation', 'value', 'sample_id', 'sample_metadata', 'ignore',
-        'flag_decoy', 'flag_contaminant', 'flag_other', 'group', 'technical_numeric', 'timepoint',
-        'covariate_numeric', 'samples_in_columns', 'samples_in_rows', 'long'])}
+## Closed fields (use exactly these values; code branches on them)
+- layout: {closed['layout']}
+- role: {closed['column_role']}
+- block_role (role value only): {closed['block_role']}. At most one primary block per assay.
+- audit_kind (role sample_metadata only, else null): {closed['audit_kind']} ('other' is the escape hatch)
+- in_supported_scope: {closed['in_supported_scope']}
+- marks_rows_as_suspect (feature_annotation only): true when the column flags rows as decoy /
+  contaminant / otherwise suspect.
+- is_study_sample: false for QC, blank, pool, calibrator and similar injections.
 
-Rules:
-- Use only the closed vocabularies above. When unsure, answer "unresolved" / "unknown" \
-rather than guess. Never invent, merge or split groups; only label the given group_ids.
-- Never decide which variable is the research outcome (use kind "group" only as a candidate).
-- Never give preprocessing or statistical advice.
-- Features usually outnumber samples. In a samples-in-columns table, per-sample column families \
-are role value and single numeric columns describing features are feature_annotation. In a \
-samples-in-rows table, single numeric columns are usually sample_metadata (covariates, technical \
-values) and wide numeric blocks are role value.
-- Respect everything listed under already_confirmed."""
+## Open fields (free text, your own words)
+assay_label, omics_type, source_software (add "(unconfirmed)" when inferred from names),
+scope_reason, and every group label. A value block's label should describe the measurement and
+what the statistics suggest, e.g. "LFQ intensity, apparently raw linear scale (median 2.1e7,
+18% zeros)". A time point's label should say what kind of time it is, e.g. "visit label T1/T2
+(ordinal)".
+
+## Output
+- layout, with confidence and evidence.
+- assays: one entry per assay (a file can hold several, e.g. proteins and metabolites side by
+  side). feature_identity lists the group_ids whose values identify each feature (several =
+  composite key such as m/z + retention time); use [] when feature names are column headers.
+- groups: exactly one entry for EVERY group in the digest. Value groups name their assay_label.
+  suggest_split may list column names inside a multi-column group that do not belong (e.g. a
+  clinical covariate among metabolites), with suggest_split_role / suggest_split_audit_kind /
+  suggest_split_label for them.
+- samples: sample names or glob patterns (e.g. "QC_*") with a label and is_study_sample.
+- clarifying_questions for anything you cannot resolve from the digest.
+- Respect everything under already_confirmed."""
 
 
 def response_schema():
     s = lambda **k: dict(type="STRING", **k)
     n = lambda: {"type": "NUMBER"}
-    fact = {"type": "OBJECT", "properties": {"value": s(), "confidence": n(), "evidence": s()},
-            "required": ["value", "confidence", "evidence"]}
+    b = lambda **k: dict(type="BOOLEAN", **k)
+    fact = {"type": "OBJECT", "properties": {"value": s(enum=VOCABULARY["layout"]), "confidence": n(),
+                                             "evidence": s()}, "required": ["value", "confidence", "evidence"]}
+    assay = {"type": "OBJECT", "properties": {
+        "assay_label": s(), "omics_type": s(), "source_software": s(),
+        "in_supported_scope": s(enum=VOCABULARY["in_supported_scope"]), "scope_reason": s(),
+        "feature_identity": {"type": "OBJECT", "properties": {
+            "group_ids": {"type": "ARRAY", "items": s()}, "composite": b()}, "required": ["group_ids"]},
+        "confidence": n(), "evidence": s()},
+        "required": ["assay_label", "omics_type", "in_supported_scope", "confidence", "evidence"]}
     group = {"type": "OBJECT", "properties": {
         "group_id": s(),
         "role": s(enum=VOCABULARY["column_role"]),
-        "kind": s(enum=ALL_KINDS, nullable=True),
-        "detail": s(enum=VOCABULARY["timepoint_detail"], nullable=True),
-        "measurement_type": s(enum=VOCABULARY["measurement_type"], nullable=True),
-        "scale": s(enum=VOCABULARY["scale"], nullable=True),
-        "omics_type": s(enum=VOCABULARY["omics_type"], nullable=True),
-        "label": s(nullable=True),
+        "assay_label": s(nullable=True),
+        "label": s(),
+        "block_role": s(enum=VOCABULARY["block_role"], nullable=True),
+        "audit_kind": s(enum=VOCABULARY["audit_kind"], nullable=True),
+        "marks_rows_as_suspect": b(nullable=True),
         "confidence": n(),
         "evidence": s(),
         "suggest_split": {"type": "ARRAY", "items": s(), "nullable": True},
         "suggest_split_role": s(enum=VOCABULARY["column_role"], nullable=True),
-        "suggest_split_kind": s(enum=ALL_KINDS, nullable=True),
-    }, "required": ["group_id", "role", "confidence", "evidence"]}
+        "suggest_split_audit_kind": s(enum=VOCABULARY["audit_kind"], nullable=True),
+        "suggest_split_label": s(nullable=True),
+    }, "required": ["group_id", "role", "label", "confidence", "evidence"]}
     return {"type": "OBJECT", "properties": {
-        "layout": fact, "omics_type": fact, "source_software": fact,
-        "feature_identity": {"type": "OBJECT", "properties": {
-            "group_ids": {"type": "ARRAY", "items": s()}, "composite": {"type": "BOOLEAN"},
-            "confidence": n(), "evidence": s()}, "required": ["group_ids", "confidence", "evidence"]},
+        "layout": fact,
+        "assays": {"type": "ARRAY", "items": assay},
         "groups": {"type": "ARRAY", "items": group},
-        "sample_types": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
-            "pattern_or_sample": s(), "type": s(enum=VOCABULARY["sample_type"]),
-            "confidence": n(), "evidence": s()}, "required": ["pattern_or_sample", "type"]}},
+        "samples": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+            "pattern_or_sample": s(), "label": s(), "is_study_sample": b(),
+            "confidence": n(), "evidence": s()}, "required": ["pattern_or_sample", "label", "is_study_sample"]}},
         "clarifying_questions": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
             "group_id": s(nullable=True), "question": s()}, "required": ["question"]}},
-    }, "required": ["groups"]}
+    }, "required": ["layout", "assays", "groups"]}
 
 
 # ---------------------------------------------------------------- parsing (Pydantic)
@@ -181,6 +185,15 @@ class Fact(BaseModel):
 class FeatureIdentity(BaseModel):
     group_ids: List[str] = []
     composite: Optional[bool] = False
+
+
+class Assay(BaseModel):
+    assay_label: str
+    omics_type: str = "unknown"
+    source_software: Optional[str] = "unknown"
+    in_supported_scope: str = "unsure"
+    scope_reason: Optional[str] = ""
+    feature_identity: Optional[FeatureIdentity] = None
     confidence: float = 0.0
     evidence: str = ""
 
@@ -188,22 +201,23 @@ class FeatureIdentity(BaseModel):
 class GroupLabel(BaseModel):
     group_id: str
     role: str
-    kind: Optional[str] = None
-    detail: Optional[str] = None
-    measurement_type: Optional[str] = None
-    scale: Optional[str] = None
-    omics_type: Optional[str] = None
-    label: Optional[str] = None
+    assay_label: Optional[str] = None
+    label: Optional[str] = ""
+    block_role: Optional[str] = None
+    audit_kind: Optional[str] = None
+    marks_rows_as_suspect: Optional[bool] = None
     confidence: float = 0.0
     evidence: str = ""
     suggest_split: Optional[List[str]] = None
     suggest_split_role: Optional[str] = None
-    suggest_split_kind: Optional[str] = None
+    suggest_split_audit_kind: Optional[str] = None
+    suggest_split_label: Optional[str] = None
 
 
-class SampleTypeRule(BaseModel):
+class SampleRule(BaseModel):
     pattern_or_sample: str
-    type: str
+    label: str = ""
+    is_study_sample: bool = True
     confidence: float = 0.0
     evidence: str = ""
 
@@ -215,11 +229,9 @@ class Question(BaseModel):
 
 class AIResponse(BaseModel):
     layout: Optional[Fact] = None
-    omics_type: Optional[Fact] = None
-    source_software: Optional[Fact] = None
-    feature_identity: Optional[FeatureIdentity] = None
+    assays: List[Assay] = []
     groups: List[GroupLabel] = []
-    sample_types: List[SampleTypeRule] = []
+    samples: List[SampleRule] = []
     clarifying_questions: List[Question] = []
 
 
@@ -267,7 +279,7 @@ def ask(digest, sha, log=None, mock_fn=None):
     last_err = None
     for attempt in (1, 2):
         try:
-            raw, m = llm.complete_json(SYSTEM_PROMPT, prompt, response_schema(), mock_fn)
+            raw, m = llm.complete_json(system_prompt(), prompt, response_schema(), mock_fn)
         except llm.LLMError as e:
             meta["error"] = str(e)
             llm.say(f"FAILED: {e}")
@@ -302,35 +314,34 @@ def ask(digest, sha, log=None, mock_fn=None):
 
 # ---------------------------------------------------------------- validate & merge
 
-def _fact(f, source):
-    if f is None:
-        return None
-    return {"value": f.value, "confidence": _clamp(f.confidence), "evidence": f.evidence, "source": source}
+GROUP_KEYS = ("role", "assay_label", "label", "block_role", "audit_kind", "marks_rows_as_suspect")
 
 
 def validate_response(resp, groups, cols, layout=None):
-    """AIResponse -> proposal dict with per-item validation. Unknown group ids are
-    rejected; contradicted items become unresolved; missing groups are unresolved."""
+    """AIResponse -> proposal. Unknown group ids are rejected; values outside
+    the closed sets and contradicted claims become unresolved."""
     by_id = {g["group_id"]: g for g in groups}
-    layout = layout or (resp.layout.value if resp.layout else None)
-    out = {"groups": {}, "rejected": [], "sample_types": [], "clarifying_questions": [], "splits": []}
-    for key in ("layout", "omics_type", "source_software"):
-        f = _fact(getattr(resp, key), "ai")
-        if f:
-            allowed = {"layout": VOCABULARY["layout"], "omics_type": VOCABULARY["omics_type"]}.get(key)
-            if allowed and f["value"] not in allowed:
-                f = {"value": UNRESOLVED, "confidence": 0.0, "source": "ai", "evidence": f["evidence"],
-                     "validation": {"status": "contradicted",
-                                    "messages": [f"'{f['value']}' is not an allowed {key}."]}}
-            out[key] = f
-    if resp.feature_identity is not None:
-        fi = resp.feature_identity
-        item = {"group_ids": fi.group_ids, "composite": bool(fi.composite or len(fi.group_ids) > 1),
-                "confidence": _clamp(fi.confidence), "evidence": fi.evidence, "source": "ai"}
-        item["validation"] = validate_feature_identity(item, by_id, cols, layout)
-        if item["validation"]["status"] == "contradicted":
-            item["group_ids"] = []
-        out["feature_identity"] = item
+    out = {"groups": {}, "rejected": [], "samples": [], "clarifying_questions": [], "splits": [], "assays": []}
+    if resp.layout is not None:
+        out["layout"] = {"value": resp.layout.value, "confidence": _clamp(resp.layout.confidence),
+                         "evidence": resp.layout.evidence, "source": "ai"}
+        if resp.layout.value not in VOCABULARY["layout"]:
+            out["layout"].update(value=UNRESOLVED, validation={
+                "status": "contradicted", "messages": [f"'{resp.layout.value}' is not an allowed layout."]})
+    layout = layout or (out.get("layout") or {}).get("value")
+    for a in resp.assays:
+        fi = a.feature_identity or FeatureIdentity()
+        bad = [g for g in fi.group_ids if g not in by_id]
+        item = {"assay_label": a.assay_label.strip() or "assay", "omics_type": a.omics_type or "unknown",
+                "source_software": a.source_software or "unknown",
+                "in_supported_scope": a.in_supported_scope if a.in_supported_scope in VOCABULARY["in_supported_scope"]
+                else "unsure", "scope_reason": a.scope_reason or "",
+                "feature_group_ids": [g for g in fi.group_ids if g in by_id],
+                "confidence": _clamp(a.confidence), "evidence": a.evidence, "source": "ai"}
+        if bad:
+            out["rejected"].extend({"group_id": g, "reason": "feature identity names a group that does not exist"}
+                                   for g in bad)
+        out["assays"].append(item)
     for gl in resp.groups:
         if gl.group_id not in by_id:
             out["rejected"].append({"group_id": gl.group_id,
@@ -338,57 +349,67 @@ def validate_response(resp, groups, cols, layout=None):
             continue
         if gl.group_id in out["groups"]:
             continue
-        item = {"role": gl.role, "kind": gl.kind, "detail": gl.detail, "measurement_type": gl.measurement_type,
-                "scale": gl.scale, "omics_type": gl.omics_type, "label": gl.label,
+        item = {"role": gl.role, "assay_label": gl.assay_label, "label": (gl.label or "").strip(),
+                "block_role": gl.block_role, "audit_kind": gl.audit_kind,
+                "marks_rows_as_suspect": bool(gl.marks_rows_as_suspect),
                 "confidence": _clamp(gl.confidence), "evidence": gl.evidence, "source": "ai"}
-        if gl.role != "value":
-            for k in ("measurement_type", "scale", "label"):
-                item[k] = None
         out["groups"][gl.group_id] = finalize_item(item, by_id[gl.group_id], cols, layout)
         if gl.suggest_split:
             out["splits"].append({"group_id": gl.group_id, "columns": gl.suggest_split,
-                                  "role": gl.suggest_split_role or UNRESOLVED, "kind": gl.suggest_split_kind,
-                                  "evidence": gl.evidence})
-    out["sample_types"] = [{"pattern_or_sample": s.pattern_or_sample, "type": s.type,
-                            "confidence": _clamp(s.confidence), "evidence": s.evidence, "source": "ai"}
-                           for s in resp.sample_types if s.type in VOCABULARY["sample_type"]]
+                                  "role": gl.suggest_split_role or UNRESOLVED, "audit_kind": gl.suggest_split_audit_kind,
+                                  "label": gl.suggest_split_label or "", "evidence": gl.evidence})
+    out["samples"] = [{"pattern_or_sample": x.pattern_or_sample, "label": x.label, "is_study_sample": x.is_study_sample,
+                       "confidence": _clamp(x.confidence), "evidence": x.evidence, "source": "ai"} for x in resp.samples]
     out["clarifying_questions"] = [q.model_dump() for q in resp.clarifying_questions]
     return out
 
 
+def normalize_item(item):
+    """Drop fields that do not apply to the role (keeps the item consistent)."""
+    role = item.get("role")
+    if role != "value":
+        item["block_role"] = None
+        if role not in ("feature_annotation",):
+            item["assay_label"] = item.get("assay_label") if role == "feature_id" else None
+    if role != "sample_metadata":
+        item["audit_kind"] = None
+    if role != "feature_annotation":
+        item["marks_rows_as_suspect"] = False
+    return item
+
+
 def finalize_item(item, group, cols, layout=None):
-    """Validate one group item; contradicted -> unresolved (claim kept for display)."""
-    if item.get("role") == "sample_metadata" and item.get("kind") == "timepoint" and group["n_columns"] == 1:
-        auto = timepoint_detail(cols.digests[group["indices"][0]])
-        if not item.get("detail") and auto:
-            item["detail"] = auto
+    """Structural validation; contradicted -> unresolved (the claim is kept for display)."""
+    item = normalize_item(item)
     v = validate_group(item, group, cols, layout)
     item["validation"] = v
     if v["status"] == "contradicted":
-        item["claimed"] = {k: item.get(k) for k in ("role", "kind", "measurement_type", "scale")}
+        item["claimed"] = {k: item.get(k) for k in ("role", "block_role", "audit_kind", "label")}
         item["role"] = UNRESOLVED
+    if item.get("role") == "sample_metadata" and item.get("audit_kind") == "timepoint" and group["n_columns"] == 1:
+        item.setdefault("detail", timepoint_detail(cols.digests[group["indices"][0]]))
     return item
 
 
 def unresolved_item(evidence, source="none"):
-    return {"role": UNRESOLVED, "kind": None, "detail": None, "measurement_type": None, "scale": None,
-            "omics_type": None, "label": None, "confidence": 0.0, "evidence": evidence, "source": source,
+    return {"role": UNRESOLVED, "assay_label": None, "label": "", "block_role": None, "audit_kind": None,
+            "marks_rows_as_suspect": False, "confidence": 0.0, "evidence": evidence, "source": source,
             "validation": {"status": "ok", "messages": []}}
 
 
 def propose(filename, sha, groups, hints, cols, fixed=None, group_ids=None, log=None, on_progress=None,
-            mock_fn=None):
+            mock_fn=None, signature_hint=None):
     """Ask the AI about all (or some) groups, in batches for very wide files.
     Returns (proposal, meta, digests)."""
     targets = [g for g in groups if group_ids is None or g["group_id"] in group_ids]
     batches = [targets[i:i + GROUPS_PER_CALL] for i in range(0, len(targets), GROUPS_PER_CALL)] or [[]]
-    merged = {"groups": {}, "rejected": [], "sample_types": [], "clarifying_questions": [], "splits": []}
+    merged = {"groups": {}, "rejected": [], "samples": [], "clarifying_questions": [], "splits": [], "assays": []}
     metas, digests = [], []
     fixed = dict(fixed or {})
     for n, batch in enumerate(batches, 1):
         if on_progress:
             on_progress(n - 1, len(batches), f"AI batch {n}/{len(batches)}: {len(batch)} column group(s)")
-        digest = build_digest(filename, groups, hints, fixed, {g["group_id"] for g in batch})
+        digest = build_digest(filename, groups, hints, fixed, {g["group_id"] for g in batch}, signature_hint)
         digests.append(digest)
         _ctx_set(on_progress, n, len(batches))
         try:
@@ -402,15 +423,17 @@ def propose(filename, sha, groups, hints, cols, fixed=None, group_ids=None, log=
                     f"AI unavailable: {meta['error']}. Choose this role yourself.")
             continue
         part = validate_response(resp, groups, cols, fixed.get("layout"))
-        for key in ("layout", "omics_type", "source_software", "feature_identity"):
-            if key in part and key not in merged:
-                merged[key] = part[key]
-                if key != "feature_identity":
-                    fixed.setdefault(key, part[key]["value"])
+        if "layout" in part and "layout" not in merged:
+            merged["layout"] = part["layout"]
+            fixed.setdefault("layout", part["layout"]["value"])
+        known = {a["assay_label"] for a in merged["assays"]}
+        merged["assays"].extend(a for a in part["assays"] if a["assay_label"] not in known)
+        if merged["assays"]:
+            fixed["assays_so_far"] = [a["assay_label"] for a in merged["assays"]]
         for g in batch:
             merged["groups"][g["group_id"]] = part["groups"].get(g["group_id"]) or unresolved_item(
                 "The AI returned no label for this group.", "ai")
-        for k in ("rejected", "sample_types", "clarifying_questions", "splits"):
+        for k in ("rejected", "samples", "clarifying_questions", "splits"):
             merged[k].extend(part[k])
         if log:
             log("validation_result", {"batch": n, "groups": {gid: it["validation"] for gid, it in part["groups"].items()},

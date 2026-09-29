@@ -6,10 +6,10 @@ import random
 
 import pytest
 
-from backend.format_detect import match_signatures, signature_prefill
+from backend.format_detect import match_signatures, signature_hint, signature_prefill
 from backend.parsing import InputError, parse_bytes, parse_number
 from backend.profiling import profile_table
-from backend.validation import validate_group
+from backend.validation import timepoint_detail, validate_group
 from conftest import fixture_bytes
 
 
@@ -131,15 +131,24 @@ def test_signature_requires_all_columns():
     assert match_signatures(["protein ids", "reverse"]) == []
 
 
-def test_maxquant_prefill():
+def test_maxquant_prefill_is_manual_starting_point():
     t, cols, groups, _ = load("A_maxquant_proteinGroups.txt")
     p = signature_prefill(t["header"], groups)
     g = p["groups"]
-    assert g[by_col(groups, "Reverse")["group_id"]]["kind"] == "flag_decoy"
-    assert g[by_col(groups, "Potential contaminant")["group_id"]]["kind"] == "flag_contaminant"
+    rev, con = g[by_col(groups, "Reverse")["group_id"]], g[by_col(groups, "Potential contaminant")["group_id"]]
+    assert rev["role"] == con["role"] == "feature_annotation"
+    assert rev["marks_rows_as_suspect"] is True and con["marks_rows_as_suspect"] is True
     assert g[by_col(groups, "LFQ intensity S01")["group_id"]]["block_role"] == "primary"
-    assert g[by_col(groups, "Peptides S01")["group_id"]]["measurement_type"] == "count"
+    assert g[by_col(groups, "Peptides S01")["group_id"]]["block_role"] == "auxiliary"
+    assert all(it["source"] == "computed" for it in g.values())
     assert p["layout"]["value"] == "samples_in_columns"
+    assert p["assays"][0]["in_supported_scope"] == "yes"
+
+
+def test_signature_hint_is_one_sentence():
+    t, _, _, _ = load("A_maxquant_proteinGroups.txt")
+    assert signature_hint(t["header"]) == "headers match the known MaxQuant proteinGroups.txt pattern"
+    assert signature_hint(["a", "b"]) is None
 
 
 def test_mzmine_headers_do_not_match_v1_signature():
@@ -147,41 +156,42 @@ def test_mzmine_headers_do_not_match_v1_signature():
     assert match_signatures(t["header"]) == []
 
 
-# ---------------------------------------------------------------- validation rules
-
-def _item(**k):
-    base = {"role": "value", "kind": None, "measurement_type": "intensity", "scale": "linear", "label": ""}
-    base.update(k)
-    return base
-
-
-def test_count_on_non_integers_is_contradicted():
-    t, cols, groups, _ = load("A_maxquant_proteinGroups.txt")
-    g = blocks(groups)["LFQ intensity "]
-    res = validate_group(_item(measurement_type="count"), dict(g, profile=dict(g["profile"], integer_valued=False)), cols)
-    assert res["status"] == "contradicted"
-    assert validate_group(_item(measurement_type="count"), blocks(groups)["Peptides "], cols)["status"] == "ok"
-
-
-def test_scale_warnings():
-    t, cols, groups, _ = load("B_diann_pg_matrix.tsv")
-    g = next(x for x in groups if x["n_columns"] == 8)
-    assert validate_group(_item(scale="log2"), g, cols)["status"] == "ok"
-    assert validate_group(_item(scale="linear"), g, cols)["status"] == "warning"
-    _, cols2, groups2, _ = load("A_maxquant_proteinGroups.txt")
-    assert validate_group(_item(scale="log2"), blocks(groups2)["LFQ intensity "], cols2)["status"] == "warning"
-
+# ---------------------------------------------------------------- validation rules (structure only)
 
 def test_value_role_on_text_is_contradicted_and_id_checks():
     t, cols, groups, _ = load("D_samples_in_rows_multiomics.csv")
     assert validate_group({"role": "value"}, by_col(groups, "visit"), cols)["status"] == "contradicted"
-    subj = by_col(groups, "subject_id")
-    assert validate_group({"role": "sample_id"}, subj, cols)["status"] == "warning"   # repeats
-    samp = by_col(groups, "sample_id")
-    res = validate_group({"role": "sample_metadata", "kind": "subject_id"}, samp, cols)
-    assert "sample ID" in res["messages"][0]
-    visit = validate_group({"role": "sample_metadata", "kind": "timepoint", "detail": "date"}, by_col(groups, "visit"), cols)
-    assert visit["status"] == "warning"
     proteins = next(g for g in groups if g["n_columns"] == 25)
-    assert validate_group({"role": "value", "measurement_type": "proportion_or_relative_abundance"},
-                          proteins, cols)["status"] == "contradicted"
+    assert validate_group({"role": "value", "block_role": "primary"}, proteins, cols)["status"] == "ok"
+    assert validate_group({"role": "value", "block_role": "main"}, proteins, cols)["status"] == "contradicted"
+    subj = by_col(groups, "subject_id")
+    assert validate_group({"role": "sample_id"}, subj, cols)["status"] == "warning"   # repeats: warning only
+    assert validate_group({"role": "sample_id"}, by_col(groups, "sample_id"), cols)["status"] == "ok"
+
+
+def test_closed_fields_must_be_in_their_sets():
+    t, cols, groups, _ = load("D_samples_in_rows_multiomics.csv")
+    visit = by_col(groups, "visit")
+    assert validate_group({"role": "sample_metadata", "audit_kind": "timepoint"}, visit, cols)["status"] == "ok"
+    assert validate_group({"role": "sample_metadata", "audit_kind": "foo"}, visit, cols)["status"] == "contradicted"
+    assert validate_group({"role": "descriptor"}, visit, cols)["status"] == "contradicted"
+    # free-text labels are never checked
+    assert validate_group({"role": "sample_metadata", "audit_kind": "timepoint", "label": "anything at all"},
+                          visit, cols)["status"] == "ok"
+
+
+def test_timepoint_detail_is_computed():
+    t, cols, groups, _ = load("D_samples_in_rows_multiomics.csv")
+    assert timepoint_detail(cols.digests[by_col(groups, "visit")["indices"][0]]).startswith("ordinal label")
+    assert timepoint_detail(cols.digests[by_col(groups, "age")["indices"][0]]) == "numeric"
+
+
+def test_out_of_scope_tables_group_into_one_block():
+    """Sample names carrying a design code (Stool.D0.A, Stool.D7.A, ...) are one block,
+    not one family per day; sparse count columns are not split as deviants."""
+    _, _, groups, _ = load("H_16S_otu_table.tsv")
+    nb = [g for g in groups if g["kind"] == "numeric_block"]
+    assert len(nb) == 1 and nb[0]["n_columns"] == 12
+    _, _, groups, _ = load("I_methylation_beta.csv")
+    nb = [g for g in groups if g["kind"] == "numeric_block"]
+    assert len(nb) == 1 and nb[0]["n_columns"] == 12

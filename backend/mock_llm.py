@@ -10,39 +10,40 @@ import fnmatch
 import json
 import re
 
+# text columns: regex on the name -> (role, label, audit_kind, marks_rows_as_suspect)
 _TEXT_RULES = [
-    (r"reverse|decoy", ("feature_annotation", "flag_decoy")),
-    (r"contaminant", ("feature_annotation", "flag_contaminant")),
-    (r"only identified by site", ("feature_annotation", "flag_other")),
-    (r"^(sample.?type|type)$", ("sample_metadata", "sample_type")),
-    (r"gene", ("feature_annotation", "gene_symbol")),
-    (r"majority protein|protein.?ids?$|protein.?group|accession|^protein$", ("feature_annotation", "protein_accession")),
-    (r"protein.?name|description|entry.?name", ("feature_annotation", "protein_name")),
-    (r"sequence|peptide", ("feature_annotation", "peptide_sequence")),
-    (r"formula", ("feature_annotation", "molecular_formula")),
-    (r"adduct", ("feature_annotation", "adduct")),
-    (r"hmdb|kegg|chebi|pubchem|inchi", ("feature_annotation", "metabolite_db_id")),
-    (r"compound|metabolite|^name$", ("feature_annotation", "metabolite_name")),
-    (r"subject|patient|donor|participant", ("sample_metadata", "subject_id")),
-    (r"visit|time.?point|^day|^week|^time$", ("sample_metadata", "timepoint")),
-    (r"batch", ("sample_metadata", "batch")),
-    (r"plate|slide", ("sample_metadata", "plate_or_slide")),
-    (r"group|severity|arm|treatment|condition|diagnosis|status", ("sample_metadata", "group")),
-    (r"sex|gender", ("sample_metadata", "covariate_categorical")),
-    (r"rowcheck|check|flag", ("sample_metadata", "other_sample_metadata")),
-    (r"fasta|header", ("feature_annotation", "other_annotation")),
+    (r"reverse|decoy", ("feature_annotation", "decoy hit flag", None, True)),
+    (r"contaminant", ("feature_annotation", "contaminant flag", None, True)),
+    (r"only identified by site", ("feature_annotation", "identified only by site flag", None, True)),
+    (r"^(sample.?type|type)$", ("sample_metadata", "sample type", "sample_type", False)),
+    (r"gene", ("feature_annotation", "gene symbol", None, False)),
+    (r"majority protein|protein.?ids?$|protein.?group|accession|^protein$", ("feature_annotation", "protein accession", None, False)),
+    (r"protein.?name|description|entry.?name", ("feature_annotation", "protein name", None, False)),
+    (r"sequence|peptide", ("feature_annotation", "peptide sequence", None, False)),
+    (r"formula", ("feature_annotation", "molecular formula", None, False)),
+    (r"adduct", ("feature_annotation", "ion adduct", None, False)),
+    (r"hmdb|kegg|chebi|pubchem|inchi", ("feature_annotation", "metabolite database id", None, False)),
+    (r"compound|metabolite|^name$|taxonom|genus|species", ("feature_annotation", "feature name", None, False)),
+    (r"subject|patient|donor|participant", ("sample_metadata", "subject identifier", "subject_id", False)),
+    (r"visit|time.?point|^day|^week|^time$", ("sample_metadata", "time point", "timepoint", False)),
+    (r"batch", ("sample_metadata", "batch", "batch", False)),
+    (r"plate|slide", ("sample_metadata", "plate / slide", "batch", False)),
+    (r"group|severity|arm|treatment|condition|diagnosis|status", ("sample_metadata", "group-like variable", "group", False)),
+    (r"sex|gender", ("sample_metadata", "sex", "covariate", False)),
+    (r"rowcheck|check|flag", ("sample_metadata", "quality flag", "other", False)),
+    (r"fasta|header", ("feature_annotation", "FASTA header", None, False)),
 ]
 _NUM_RULES = [
-    (r"m/z|^mz$|mass", ("feature_annotation", "mz")),
-    (r"retention|^rt$", ("feature_annotation", "retention_time")),
-    (r"score|q.?value|pep$|probability", ("feature_annotation", "identification_score")),
-    (r"coverage", ("feature_annotation", "sequence_coverage")),
-    (r"peptides", ("feature_annotation", "peptide_count")),
-    (r"^age$|bmi|cd4|iron|weight|height|crp", ("sample_metadata", "covariate_numeric")),
-    (r"scale|norm", ("sample_metadata", "technical_numeric")),
-    (r"order|injection", ("sample_metadata", "run_order")),
-    (r"batch", ("sample_metadata", "batch")),
-    (r"slide|plate", ("sample_metadata", "plate_or_slide")),
+    (r"m/z|^mz$|mass", ("feature_annotation", "m/z", None, False)),
+    (r"retention|^rt$", ("feature_annotation", "retention time", None, False)),
+    (r"score|q.?value|pep$|probability", ("feature_annotation", "identification score", None, False)),
+    (r"coverage", ("feature_annotation", "sequence coverage", None, False)),
+    (r"peptides", ("feature_annotation", "peptide count", None, False)),
+    (r"^age$|bmi|cd4|iron|weight|height|crp", ("sample_metadata", "numeric clinical covariate", "covariate", False)),
+    (r"scale|norm", ("sample_metadata", "technical scale factor", "other", False)),
+    (r"order|injection", ("sample_metadata", "run order", "run_order", False)),
+    (r"batch", ("sample_metadata", "batch", "batch", False)),
+    (r"slide|plate", ("sample_metadata", "plate / slide", "batch", False)),
 ]
 _COVARIATE_NAMES = re.compile(r"(?i)^(age|bmi|cd4.*|iron|weight|height|crp|sex)$")
 
@@ -61,7 +62,7 @@ def _names(g):
 
 def _omics(names):
     joined = " ".join(names).lower()
-    if re.search(r"seq\.|lfq|ibaq|intensity|^p\d|protein|pg\.", joined) or all(
+    if re.search(r"seq\.|lfq|ibaq|intensity|protein|pg\.", joined) or all(
             re.match(r"^[opq]\d[a-z0-9]{3}\d", n.lower()) or re.match(r"^p\d{5}", n.lower()) for n in names):
         return "proteomics"
     return "metabolomics"
@@ -82,96 +83,96 @@ class MockLLM:
                 layout = "samples_in_rows"
             else:
                 layout = "samples_in_columns"
-        groups, sample_types, fid = [], [], []
-        omics_seen = []
+        groups, samples, fid, assays = [], [], [], {}
+        file_omics = _omics([n for g in digest["groups"] for n in _names(g)])
+        has_lfq = any("lfq" in (g.get("pattern") or "").lower() for g in digest["groups"])
         for g in digest["groups"]:
             names = _names(g)
             name = names[0] if names else ""
             prof = g.get("profile") or {}
-            entry = {"group_id": g["group_id"], "role": "unresolved", "kind": None, "detail": None,
-                     "measurement_type": None, "scale": None, "omics_type": None, "label": None,
-                     "confidence": 0.6, "evidence": "mock rule", "suggest_split": None}
-            if g["kind"] == "numeric_block" and not _first(g.get("pattern") or "", [(r"scale|norm", 1)]):
-                om = _omics(names)
-                omics_seen.append(om)
-                logscale = (not prof.get("integer_valued") and (prof.get("p99") or 0) < 40
-                            and (prof.get("median") or 0) > 5)
-                entry.update(role="value", omics_type=om, label=(g.get("pattern") or "values").strip(),
-                             measurement_type="intensity", scale="log2" if logscale else "linear",
-                             confidence=0.85, evidence=f"{g['n_columns']} numeric columns sharing a pattern")
+            e = {"group_id": g["group_id"], "role": "unresolved", "assay_label": None, "label": "",
+                 "block_role": None, "audit_kind": None, "marks_rows_as_suspect": False,
+                 "confidence": 0.6, "evidence": "mock rule", "suggest_split": None}
+            if g["kind"] == "numeric_block" and not re.search(r"scale|norm", (g.get("pattern") or "").lower()):
+                om = _omics(names) if layout == "samples_in_rows" else file_omics
+                label = om
+                assays.setdefault(label, om)
+                pat = (g.get("pattern") or "").lower()
+                block_role = "primary" if "lfq" in pat else ("auxiliary" if has_lfq else None)
+                logscale = (not prof.get("integer_valued") and (prof.get("p99") or 0) < 40 and (prof.get("median") or 0) > 5)
+                e.update(role="value", assay_label=label, block_role=block_role,
+                         label=f"{(g.get('pattern') or 'values').strip()}, apparently {'log' if logscale else 'linear'} "
+                               f"scale (median {prof.get('median')})",
+                         confidence=0.85, evidence=f"{g['n_columns']} numeric columns; median {prof.get('median')}")
                 if layout == "samples_in_rows":
                     split = [n for n in (g.get("columns") or []) if _COVARIATE_NAMES.match(n)]
                     if split:
-                        entry.update(suggest_split=split, suggest_split_role="sample_metadata",
-                                     suggest_split_kind="covariate_numeric")
+                        e.update(suggest_split=split, suggest_split_role="sample_metadata",
+                                 suggest_split_audit_kind="covariate", suggest_split_label="numeric clinical covariate")
                 for sn in g.get("sample_names_after_stripping_pattern") or []:
-                    for pat, t in (("qc", "qc"), ("blank", "blank"), ("pool", "pool"), ("calib", "calibrator")):
+                    for pat, lab in (("qc", "QC injection"), ("blank", "blank"), ("pool", "pooled sample"),
+                                     ("calib", "calibrator")):
                         if sn.lower().startswith(pat):
-                            sample_types.append({"pattern_or_sample": sn, "type": t, "confidence": 0.8,
-                                                 "evidence": f"sample name starts with '{pat}'"})
+                            samples.append({"pattern_or_sample": sn, "label": lab, "is_study_sample": False,
+                                            "confidence": 0.8, "evidence": f"sample name starts with '{pat}'"})
             elif g["kind"] == "numeric_block":
-                entry.update(role="sample_metadata" if layout == "samples_in_rows" else "feature_annotation",
-                             kind="technical_numeric" if layout == "samples_in_rows" else "other_annotation",
-                             confidence=0.7, evidence="scale-factor-like columns")
+                if layout == "samples_in_rows":
+                    e.update(role="sample_metadata", audit_kind="other", label="technical scale factors",
+                             confidence=0.7, evidence="scale-factor-like names")
+                else:
+                    e.update(role="feature_annotation", label="numeric feature annotations", confidence=0.5)
             elif layout == "long" and g["type"] == "numeric":
-                entry.update(role="value", measurement_type="intensity", scale="linear", label=name,
-                             omics_type="unknown", confidence=0.7, evidence="the single numeric column of a long table")
+                e.update(role="value", assay_label="assay", label=f"{name} (single value column)",
+                         confidence=0.7, evidence="the single numeric column of a long table")
+                assays.setdefault("assay", "unknown")
             elif layout == "long" and re.search(r"(?i)sample|run|file", name):
-                entry.update(role="sample_id", confidence=0.7, evidence=f"column name '{name}'")
-            elif g["type"] == "numeric":
-                rule = _first(name, _NUM_RULES)
-                if re.match(r"(?i)^(row.?id|id)$", name):
-                    rule = ("feature_id", None) if layout != "samples_in_rows" else ("ignore", None)
-                if rule:
-                    role, kind = rule
-                    if layout == "samples_in_rows" and role == "feature_annotation":
-                        role, kind = "sample_metadata", "other_sample_metadata"
-                    if layout != "samples_in_rows" and role == "sample_metadata" and kind != "covariate_numeric":
-                        role, kind = "feature_annotation", "other_annotation"
-                    entry.update(role=role, kind=kind, confidence=0.8, evidence=f"column name '{name}'")
-                elif layout == "samples_in_columns":
-                    entry.update(role="feature_annotation", kind="other_annotation", confidence=0.5,
-                                 evidence="single numeric column in a feature table")
+                e.update(role="sample_id", label="sample name", confidence=0.7, evidence=f"column name '{name}'")
             else:
-                rule = _first(name, _TEXT_RULES)
+                rules = _NUM_RULES if g["type"] == "numeric" else _TEXT_RULES
+                rule = _first(name, rules)
                 uniq = prof.get("unique_ratio") == 1
-                if layout == "samples_in_rows" and uniq and re.search(r"(?i)sample|^id$", name):
-                    rule = ("sample_id", None)
+                if g["type"] == "numeric" and re.match(r"(?i)^(row.?id|id)$", name):
+                    rule = ("feature_id", "row id", None, False) if layout != "samples_in_rows" else ("ignore", "row index", None, False)
+                if g["type"] != "numeric" and layout == "samples_in_rows" and uniq and re.search(r"(?i)sample|^id$", name):
+                    rule = ("sample_id", "sample identifier", None, False)
                 if rule:
-                    role, kind = rule
-                    if role == "feature_annotation" and layout == "samples_in_rows":
-                        role, kind = "sample_metadata", "other_sample_metadata"
-                    if kind == "timepoint":
-                        entry["detail"] = "ordinal_label"
-                    entry.update(role=role, kind=kind, confidence=0.8, evidence=f"column name '{name}'")
-                    if kind == "protein_accession" and not fid and (uniq or layout == "long") \
-                            and layout != "samples_in_rows":
+                    role, label, kind, suspect = rule
+                    if layout == "samples_in_rows" and role == "feature_annotation":
+                        role, kind = "sample_metadata", "other"
+                    if layout == "samples_in_columns" and role == "sample_metadata":
+                        role, kind = "feature_annotation", None
+                    e.update(role=role, label=label, audit_kind=kind, marks_rows_as_suspect=suspect,
+                             confidence=0.8, evidence=f"column name '{name}'")
+                    if label == "protein accession" and not fid and (uniq or layout == "long") and layout != "samples_in_rows":
                         fid = [g["group_id"]]
-                        entry.update(role="feature_id", kind=None)
+                        e["role"] = "feature_id"
                     if kind == "sample_type":
                         for v in prof.get("values") or []:
-                            t = {"qc": "qc", "calibrator": "calibrator", "buffer": "blank", "blank": "blank",
-                                 "pool": "pool", "sample": "study"}.get(v["value"].lower())
-                            if t:
-                                sample_types.append({"pattern_or_sample": v["value"], "type": t,
-                                                     "confidence": 0.7, "evidence": "sample type column value"})
-            if entry["role"] == "feature_id" and not fid:
+                            study = v["value"].lower() in ("sample", "study")
+                            samples.append({"pattern_or_sample": v["value"], "label": v["value"], "is_study_sample": study,
+                                            "confidence": 0.7, "evidence": "sample type column value"})
+                elif g["type"] == "numeric" and layout == "samples_in_columns":
+                    e.update(role="feature_annotation", label="numeric feature annotation", confidence=0.5)
+            if e["role"] == "feature_id" and not fid:
                 fid = [g["group_id"]]
-            groups.append(entry)
-        omics = max(set(omics_seen), key=omics_seen.count) if omics_seen else "unknown"
+            elif e["role"] == "feature_id" and g["group_id"] not in fid:
+                e["role"] = "feature_annotation"
+            groups.append(e)
+        if not assays:
+            assays["assay"] = "unknown"
         return json.dumps({
             "layout": {"value": layout, "confidence": 0.8, "evidence": "mock: from layout hints"},
-            "omics_type": {"value": omics, "confidence": 0.7, "evidence": "mock: from column names"},
-            "source_software": {"value": "unknown", "confidence": 0.0, "evidence": "mock"},
-            "feature_identity": {"group_ids": fid, "composite": len(fid) > 1, "confidence": 0.7,
-                                 "evidence": "mock: identifier-like column"},
+            "assays": [{"assay_label": lab, "omics_type": om, "source_software": "unknown",
+                        "in_supported_scope": "yes" if om in ("proteomics", "metabolomics") else "unsure",
+                        "scope_reason": "mock", "feature_identity": {"group_ids": fid, "composite": len(fid) > 1},
+                        "confidence": 0.7, "evidence": "mock: from column names"} for lab, om in assays.items()],
             "groups": groups,
-            "sample_types": sample_types,
+            "samples": samples,
             "clarifying_questions": [],
         })
 
 
-def expand_sample_types(rules, sample_ids):
+def expand_sample_rules(rules, sample_ids):
     """Glob patterns / exact names -> {sample_id: rule}."""
     out = {}
     for r in rules:
