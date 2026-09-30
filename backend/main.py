@@ -144,7 +144,7 @@ def session_log(sid: str):
 def _group_public(g):
     return {k: g.get(k) for k in ("group_id", "columns", "indices", "n_columns", "kind", "origin", "pattern", "type",
                                   "profile", "histogram", "sample_id_rule", "sample_names", "split_from",
-                                  "split_reasons")}
+                                  "merged_from")}
 
 
 def session_payload(s):
@@ -166,14 +166,13 @@ def _do_upload(filename, raw, pid):
         s = workflow.create_session(filename, raw)
     except InputError as e:
         raise HTTPException(415, str(e))
-    set_progress(pid, stage="detecting", percent=9, message=f"Profiled {len(s.table['header'])} columns into "
-                                                            f"{len(s.groups)} groups")
+    set_progress(pid, stage="detecting", percent=9, message=f"Profiled {len(s.table['header'])} columns")
     s.log("upload", {"filename": s.filename, "bytes": len(raw), "sha256": s.sha,
                      "n_rows": len(s.table["rows"]), "n_columns": len(s.table["header"]),
                      "header": s.table["header"]})
     s.log("parse_report", s.table["parse_report"])
-    s.log("groups", {"groups": [{k: g.get(k) for k in ("group_id", "columns", "kind", "origin", "pattern")}
-                                for g in s.groups], "layout_hints": s.hints})
+    s.log("facts", {"layout_hints": s.hints, "shared_name_parts": [
+        {"column": c, **a} for c, a in zip(s.cols.labels, s.affixes)]})
     return session_payload(s)
 
 
@@ -255,6 +254,70 @@ def _do_reconsider(req):
 @app.post("/api/reconsider")
 async def reconsider(req: ReconsiderRequest):
     return await run(req.progress_id, _do_reconsider, req)
+
+
+class MergeRequest(BaseModel):
+    session_id: str
+    group_ids: List[str]
+    user_hint: str = ""
+
+
+class SplitRequest(BaseModel):
+    session_id: str
+    group_id: str
+    columns: List[str]
+
+
+class GroupColumnsRequest(BaseModel):
+    session_id: str
+    columns: List[str]
+    reason: str = ""
+
+
+def _structure_op(req, fn, *args):
+    s = session_or_404(req.session_id)
+    with s.lock:
+        if s.draft is None:
+            raise HTTPException(409, "Run /api/propose first.")
+        try:
+            res = fn(s, *args)
+        except workflow.StepError as e:
+            raise HTTPException(422, str(e))
+        if "draft" in res:
+            res["session"] = session_payload(s)
+        return res
+
+
+class SessionRequest(BaseModel):
+    session_id: str
+
+
+@app.post("/api/consolidate")
+async def consolidate(req: SessionRequest):
+    """Retry the cross-chunk consolidation call (e.g. after a quota error)."""
+    return await run_in_threadpool(_structure_op, req, workflow.retry_consolidation)
+
+
+@app.post("/api/merge-check")
+async def merge_check(req: MergeRequest):
+    """'These groups are the same thing': the AI's opinion only; nothing is applied."""
+    return await run_in_threadpool(_structure_op, req, workflow.merge_check, req.group_ids, req.user_hint)
+
+
+@app.post("/api/merge")
+async def merge(req: MergeRequest):
+    """Your decision: merge these groups (applied by code only on this confirmation)."""
+    return await run_in_threadpool(_structure_op, req, workflow.merge_groups, req.group_ids, req.user_hint)
+
+
+@app.post("/api/split")
+async def split(req: SplitRequest):
+    return await run_in_threadpool(_structure_op, req, workflow.split_columns, req.group_id, req.columns)
+
+
+@app.post("/api/group-columns")
+async def group_columns(req: GroupColumnsRequest):
+    return await run_in_threadpool(_structure_op, req, workflow.group_columns, req.columns, req.reason)
 
 
 class LiteratureRequest(BaseModel):

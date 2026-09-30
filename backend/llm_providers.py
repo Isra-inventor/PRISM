@@ -33,7 +33,9 @@ DEFAULT_MODELS = {
     "mock": ["mock-llm-1"],
 }
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-REQUEST_TIMEOUT_S = 45    # a model slower than this is skipped for the next one
+# a model slower than this is skipped for the next one; grouping answers list every
+# column name, so a chunk of 150 columns needs more time than labelling did
+REQUEST_TIMEOUT_S = int(os.environ.get("PRISM_AI_TIMEOUT_S") or 120)
 RETRY_STATUS = {429, 500, 502, 503, 504}
 RETRY_DELAYS_S = (2,)
 MAX_RATE_LIMIT_WAITS = 3

@@ -13,3 +13,8 @@ SCOPE_DESCRIPTION = os.environ.get("PRISM_SCOPE_DESCRIPTION") or (
     "XCMS/MZmine-style tables, and platform exports such as SomaScan), including paired and "
     "longitudinal designs."
 )
+
+# Prompt size limit for the grouping call: files with more columns are sent to the
+# AI in chunks of this many columns (plus one consolidation call). It is an
+# infrastructure constraint, NOT a claim about how big a column family can be.
+GROUPING_CHUNK_SIZE = int(os.environ.get("PRISM_GROUPING_CHUNK_SIZE") or 150)

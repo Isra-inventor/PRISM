@@ -1,15 +1,21 @@
-"""AI layer (spec 4): label pre-built column groups from a statistics digest.
+"""AI layer: the AI groups the columns and labels the groups, from facts.
 
-What is sent: file-level layout hints and, per group, its name pattern, a few
-column names and aggregated statistics. Never raw rows. Example values only
-for low-cardinality text columns (<= 20 distinct values), and only when
-AI_SEND_EXAMPLE_VALUES is on (default).
+What is sent: file-level layout hints and, per column, its name, position and
+computed statistics, plus the name parts it shares with other columns
+(shared_prefix / shared_suffix: a fact, not a grouping). Never raw rows.
+Example values only for low-cardinality text columns (<= 20 distinct values),
+and only when AI_SEND_EXAMPLE_VALUES is on (default).
 
-The prompt is a briefing (briefing.md + the closed sets + the current scope)
-rather than enumerated categories: descriptive fields are free text.
+Grouping is judgment, so it is the AI's proposal (v2.2): which columns are one
+family, what each group is. Wide files are sent in chunks of
+config.GROUPING_CHUNK_SIZE columns (a prompt size limit) and a consolidation
+call lets the AI join families split across chunks. Code only applies
+proposals whose ids and column names exist (grouping.py) and puts every column
+nobody mentioned into its own 'unresolved' group.
+
 What comes back is parsed strictly (Pydantic) and checked structurally
-(validation.py): unknown group ids are rejected, missing groups and values
-outside the closed sets become 'unresolved'.
+(validation.py): values outside the closed sets and contradicted claims
+become 'unresolved'.
 """
 
 from __future__ import annotations
@@ -23,14 +29,13 @@ from typing import List, Optional
 
 from pydantic import BaseModel, ValidationError
 
-from . import llm_providers as llm
-from .config import SCOPE_DESCRIPTION
+from . import grouping, llm_providers as llm
+from .config import GROUPING_CHUNK_SIZE, SCOPE_DESCRIPTION
+from .profiling import chunk_columns, common_pattern
 from .schema import DEFINITIONS, PROMPT_VERSION, UNRESOLVED, VOCABULARY
 from .validation import timepoint_detail, validate_feature_identity, validate_group
 
 CACHE_DIR = Path(os.environ.get("PRISM_CACHE_DIR", Path(__file__).parent / "cache"))
-GROUPS_PER_CALL = 120
-SAMPLE_NAMES_IN_DIGEST = 300
 
 
 def send_examples():
@@ -39,50 +44,32 @@ def send_examples():
 
 # ---------------------------------------------------------------- digest
 
-def _group_digest(g, examples):
-    d = {
-        "group_id": g["group_id"],
-        "kind": g["kind"],
-        "type": g["type"],
-        "n_columns": g["n_columns"],
-        "pattern": (g.get("pattern") or {}).get("text"),
-        "pattern_side": (g.get("pattern") or {}).get("side"),
-        "origin": g["origin"],
-    }
-    cols = g["columns"]
-    if len(cols) <= 5 or (not g.get("pattern") and len(cols) <= 500):
-        # no shared name pattern: the names are the only semantic signal (headers, not data)
-        d["columns"] = cols
-    else:
-        d["first_columns"] = cols[:3]
-        d["last_columns"] = cols[-2:]
-    prof = dict(g.get("profile") or {})
-    prof.pop("column", None)
-    prof.pop("position", None)
-    if not examples or (prof.get("unique_ratio") or 0) >= 0.5:
+def column_digest(cols, i, affix, examples):
+    d = dict(cols.digests[i])
+    if not examples or (d.get("unique_ratio") or 0) >= 0.5:
         # identifier-like columns (e.g. patient codes) never send example values
-        prof.pop("values", None)
+        d.pop("values", None)
     if not examples:
-        prof.pop("value_shapes", None)
-    d["profile"] = prof
-    if g.get("sample_names"):
-        d["sample_names_after_stripping_pattern"] = g["sample_names"][:SAMPLE_NAMES_IN_DIGEST]
-    if g.get("split_from"):
-        d["split_from"] = g["split_from"]
-        d["split_reasons"] = g.get("split_reasons")
+        d.pop("value_shapes", None)
+    d["shared_prefix"] = affix.get("shared_prefix")
+    d["shared_suffix"] = affix.get("shared_suffix")
     return d
 
 
-def build_digest(filename, groups, hints, fixed=None, group_ids=None, signature_hint=None):
+def build_digest(filename, cols, affixes, hints, indices, fixed=None, signature_hint=None, chunk=None):
     examples = send_examples()
-    chosen = [g for g in groups if group_ids is None or g["group_id"] in group_ids]
-    return {
+    d = {
         "file": {"name_extension": Path(filename).suffix.lower(), "layout_hints": hints,
-                 "signature_hint": signature_hint},
+                 "signature_hint": signature_hint, "n_columns_in_file": len(cols.header)},
         "already_confirmed": fixed or {},
-        "groups": [_group_digest(g, examples) for g in chosen],
+        "columns": [column_digest(cols, i, affixes[i], examples) for i in indices],
         "settings": {"example_values_sent": examples, "raw_rows_sent": False},
     }
+    if chunk:
+        d["chunk"] = {"index": chunk[0], "of": chunk[1], "n_columns": len(indices),
+                      "note": ("Only these columns are in this call. Group them; a separate step joins "
+                               "families that were split across chunks.")}
+    return d
 
 
 def digest_hash(digest):
@@ -121,14 +108,32 @@ what the statistics suggest, e.g. "LFQ intensity, apparently raw linear scale (m
 
 ## Output
 - layout, with confidence and evidence.
+- groups: YOU group the columns. A group is a set of columns that are one kind of thing: one
+  measurement taken for many samples (e.g. "LFQ intensity S01" ... "LFQ intensity S24"), one
+  block of features measured in every sample, or a single annotation / sample column (a group
+  of one). Give each group your own short group_id (g1, g2, ...) and list its exact column
+  names in `columns`. Every column in the digest must be in exactly one group; code turns a
+  column you leave out into an unresolved group of its own.
+  shared_prefix / shared_suffix only say which literal name parts a column shares with others;
+  they are hints, not groups. Names without shared text (Pt003_visit1, 004-w1, Glucose,
+  Lactate) can still be one family when the statistics agree; columns with a shared prefix can
+  still be different things. Do not put different kinds of thing in one group (e.g. a clinical
+  covariate among metabolites, a total over all samples next to the per-sample columns).
+  Put several columns in one group only when they are the SAME measurement or attribute
+  repeated across samples (in samples-in-rows files: the same kind of feature measured in every
+  sample). QC, blank, pool and calibrator samples of that measurement belong in the same group
+  as the study samples; describe them in `samples`, not with separate groups (e.g. "QC_01 Peak
+  area", "blank_01 Peak area" and "S01 Peak area" are ONE group: peak area for every sample). Every other column
+  is a group of its own: do not bundle different annotations, identifiers or flag columns
+  together, because each needs its own role, label and (for flags) its own flagged value.
+  Role feature_id is only for the column(s) that identify each row; names, formulas and database
+  IDs of a feature are feature_annotation. Value groups name their assay_label.
+- propose_merge: only if two of your own groups turn out to be one family.
+- suggest_split (with suggest_split_role / _audit_kind / _label): columns inside a group that
+  are a different kind of thing; used when you are asked to reconsider an existing group.
 - assays: one entry per assay (a file can hold several, e.g. proteins and metabolites side by
-  side). feature_identity lists the group_ids whose values identify each feature (several =
+  side). feature_identity lists YOUR group_ids whose values identify each feature (several =
   composite key such as m/z + retention time); use [] when feature names are column headers.
-- groups: exactly one entry for EVERY group in the digest. Value groups name their assay_label.
-  When a multi-column group contains columns that are a different kind of thing (e.g. a
-  clinical covariate among metabolites), list their exact column names in suggest_split, with
-  suggest_split_role / suggest_split_audit_kind / suggest_split_label for them. Do not only
-  mention it in the label: code splits the group only when suggest_split names the columns.
 - samples: sample names or glob patterns (e.g. "QC_*") with a label and is_study_sample.
 - clarifying_questions for anything you cannot resolve from the digest.
 - literature_queries: 1-3 Europe PMC search queries that would find papers analysing data like
@@ -152,6 +157,7 @@ def response_schema():
         "required": ["assay_label", "omics_type", "in_supported_scope", "confidence", "evidence"]}
     group = {"type": "OBJECT", "properties": {
         "group_id": s(),
+        "columns": {"type": "ARRAY", "items": s()},
         "role": s(enum=VOCABULARY["column_role"]),
         "assay_label": s(nullable=True),
         "label": s(),
@@ -163,7 +169,7 @@ def response_schema():
         "suggest_split_role": s(enum=VOCABULARY["column_role"], nullable=True),
         "suggest_split_audit_kind": s(enum=VOCABULARY["audit_kind"], nullable=True),
         "suggest_split_label": s(nullable=True),
-    }, "required": ["group_id", "role", "label", "confidence", "evidence"]}
+    }, "required": ["group_id", "columns", "role", "label", "confidence", "evidence"]}
     return {"type": "OBJECT", "properties": {
         "layout": fact,
         "assays": {"type": "ARRAY", "items": assay},
@@ -174,7 +180,31 @@ def response_schema():
         "clarifying_questions": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
             "group_id": s(nullable=True), "question": s()}, "required": ["question"]}},
         "literature_queries": {"type": "ARRAY", "items": s()},
+        "propose_merge": merges_schema(),
     }, "required": ["layout", "assays", "groups"]}
+
+
+def merges_schema():
+    return {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+        "group_ids": {"type": "ARRAY", "items": {"type": "STRING"}}, "reason": {"type": "STRING"}},
+        "required": ["group_ids", "reason"]}}
+
+
+CONSOLIDATION_PROMPT = """
+
+## This call: which groups are one family?
+You get a compact summary of column groups (id, size, role, label, first / last column names,
+the literal name part the group's columns share, one line of statistics). Return, in
+cross_chunk_merges, the sets of group_ids that are really one family (e.g. the same
+measurement for different samples, proposed separately because the file was sent in chunks).
+Only merge groups that are the same kind of thing; when unsure, do not merge. Explain each
+merge in reason. If a user_hint is given, the user thinks the listed groups are the same thing:
+check it against the summaries and say in comment why you agree or not."""
+
+
+def consolidation_schema():
+    return {"type": "OBJECT", "properties": {"cross_chunk_merges": merges_schema(), "comment": {"type": "STRING"}},
+            "required": ["cross_chunk_merges"]}
 
 
 # ---------------------------------------------------------------- parsing (Pydantic)
@@ -203,6 +233,7 @@ class Assay(BaseModel):
 
 class GroupLabel(BaseModel):
     group_id: str
+    columns: List[str] = []
     role: str
     assay_label: Optional[str] = None
     label: Optional[str] = ""
@@ -229,7 +260,18 @@ class Question(BaseModel):
     question: str
 
 
+class Merge(BaseModel):
+    group_ids: List[str] = []
+    reason: str = ""
+
+
+class ConsolidationResponse(BaseModel):
+    cross_chunk_merges: List[Merge] = []
+    comment: Optional[str] = ""
+
+
 class AIResponse(BaseModel):
+    propose_merge: List[Merge] = []
     layout: Optional[Fact] = None
     assays: List[Assay] = []
     groups: List[GroupLabel] = []
@@ -247,13 +289,23 @@ def _clamp(x):
 
 # ---------------------------------------------------------------- calling
 
-def _cache_key(sha, model_key, digest):
-    return hashlib.sha256(f"{sha}|{PROMPT_VERSION}|{model_key}|{digest_hash(digest)}".encode()).hexdigest()[:40]
+def _cache_key(sha, model_key, digest, kind="digest"):
+    return hashlib.sha256(f"{sha}|{PROMPT_VERSION}|{kind}|{model_key}|{digest_hash(digest)}".encode()).hexdigest()[:40]
 
 
 def ask(digest, sha, log=None, mock_fn=None):
-    """One validated-JSON round trip with a single retry on invalid output.
-    Returns (AIResponse | None, meta). meta has provider, model, error, raw."""
+    return _call(digest, sha, log, mock_fn)
+
+
+def _call(digest, sha, log=None, mock_fn=None, kind="digest"):
+    """One validated-JSON round trip with a single retry on invalid output; cached on
+    disk by file, prompt version, models and the exact payload (so the chunk contents).
+    Returns (parsed | None, meta). meta has provider, model, error, raw."""
+    header, system, schema, model_cls = {
+        "digest": ("Digest (JSON):", system_prompt(), response_schema(), AIResponse),
+        "consolidation": ("Consolidation (JSON):", BRIEFING + CONSOLIDATION_PROMPT, consolidation_schema(),
+                          ConsolidationResponse),
+    }[kind]
     ok, why = llm.available()
     meta = {"provider": llm.provider_name(), "model": llm.model_list()[0] if ok else None,
             "prompt_version": PROMPT_VERSION, "temperature": llm.TEMPERATURE,
@@ -261,17 +313,17 @@ def ask(digest, sha, log=None, mock_fn=None):
     if not ok:
         meta["error"] = why
         return None, meta
-    key = _cache_key(sha, f"{meta['provider']}:{','.join(llm.model_list())}", digest)
+    key = _cache_key(sha, f"{meta['provider']}:{','.join(llm.model_list())}", digest, kind)
     cache_file = CACHE_DIR / f"{key}.json"
-    prompt = "Digest (JSON):\n" + json.dumps(digest, ensure_ascii=False)
+    prompt = header + "\n" + json.dumps(digest, ensure_ascii=False)
     if log:
-        log("ai_request", {"provider": meta["provider"], "models": llm.model_list(),
+        log("ai_request", {"kind": kind, "provider": meta["provider"], "models": llm.model_list(),
                            "prompt_version": PROMPT_VERSION, "temperature": llm.TEMPERATURE,
                            "digest_hash": meta["digest_hash"], "digest": digest})
     if cache_file.exists():
         try:
             cached = json.loads(cache_file.read_text(encoding="utf-8"))
-            parsed = AIResponse.model_validate_json(cached["raw"])
+            parsed = model_cls.model_validate_json(cached["raw"])
             meta.update(model=cached.get("model"), cached=True, raw=cached["raw"])
             llm.say(f"using cached proposal ({cache_file.name})")
             if log:
@@ -282,7 +334,7 @@ def ask(digest, sha, log=None, mock_fn=None):
     last_err = None
     for attempt in (1, 2):
         try:
-            raw, m = llm.complete_json(system_prompt(), prompt, response_schema(), mock_fn)
+            raw, m = llm.complete_json(system, prompt, schema, mock_fn)
         except llm.LLMError as e:
             meta["error"] = str(e)
             llm.say(f"FAILED: {e}")
@@ -300,7 +352,7 @@ def ask(digest, sha, log=None, mock_fn=None):
         try:
             if m["finish_reason"] != "STOP":
                 raise ValueError(f"finish_reason={m['finish_reason']}")
-            parsed = AIResponse.model_validate_json(raw)
+            parsed = model_cls.model_validate_json(raw)
         except (ValueError, ValidationError) as e:
             last_err = f"invalid JSON from the model ({str(e).splitlines()[0][:200]})"
             llm.say(f"attempt {attempt}: {last_err}" + (" -> retrying once" if attempt == 1 else ""))
@@ -315,58 +367,83 @@ def ask(digest, sha, log=None, mock_fn=None):
     return None, meta
 
 
-# ---------------------------------------------------------------- validate & merge
+# ---------------------------------------------------------------- validate & assemble
 
 GROUP_KEYS = ("role", "assay_label", "label", "audit_kind", "marks_rows_as_suspect")
 
 
-def validate_response(resp, groups, cols, layout=None):
-    """AIResponse -> proposal. Unknown group ids are rejected; values outside
-    the closed sets and contradicted claims become unresolved."""
-    by_id = {g["group_id"]: g for g in groups}
-    out = {"groups": {}, "rejected": [], "samples": [], "clarifying_questions": [], "splits": [], "assays": [],
-           "literature_queries": []}
-    if resp.layout is not None:
+def _item(gl):
+    return {"role": gl.role, "assay_label": gl.assay_label, "label": (gl.label or "").strip(),
+            "audit_kind": gl.audit_kind, "marks_rows_as_suspect": bool(gl.marks_rows_as_suspect),
+            "confidence": _clamp(gl.confidence), "evidence": gl.evidence, "source": "ai"}
+
+
+def _split_item(gl, evidence):
+    return {"role": gl.suggest_split_role or UNRESOLVED, "assay_label": gl.assay_label, "audit_kind": gl.suggest_split_audit_kind,
+            "label": gl.suggest_split_label or "", "marks_rows_as_suspect": False, "confidence": 0.7, "source": "ai",
+            "evidence": f"Split out of the group on the AI's suggestion: {evidence}"}
+
+
+def read_chunk(resp, indices, label_to_idx, ns, out):
+    """Validate one chunk's answer into out (layout, assays, pgroups, ...)."""
+    rej = out["rejected"]
+    if resp.layout is not None and "layout" not in out:
         out["layout"] = {"value": resp.layout.value, "confidence": _clamp(resp.layout.confidence),
                          "evidence": resp.layout.evidence, "source": "ai"}
         if resp.layout.value not in VOCABULARY["layout"]:
             out["layout"].update(value=UNRESOLVED, validation={
                 "status": "contradicted", "messages": [f"'{resp.layout.value}' is not an allowed layout."]})
-    layout = layout or (out.get("layout") or {}).get("value")
-    for a in resp.assays:
-        fi = a.feature_identity or FeatureIdentity()
-        bad = [g for g in fi.group_ids if g not in by_id]
-        item = {"assay_label": a.assay_label.strip() or "assay", "omics_type": a.omics_type or "unknown",
-                "source_software": a.source_software or "unknown",
-                "in_supported_scope": a.in_supported_scope if a.in_supported_scope in VOCABULARY["in_supported_scope"]
-                else "unsure", "scope_reason": a.scope_reason or "",
-                "feature_group_ids": [g for g in fi.group_ids if g in by_id],
-                "confidence": _clamp(a.confidence), "evidence": a.evidence, "source": "ai"}
-        if bad:
-            out["rejected"].extend({"group_id": g, "reason": "feature identity names a group that does not exist"}
-                                   for g in bad)
-        out["assays"].append(item)
+    groups = grouping.collect([(gl.group_id, gl.columns, _item(gl)) for gl in resp.groups],
+                              set(indices), label_to_idx, ns, rej)
     for gl in resp.groups:
-        if gl.group_id not in by_id:
-            out["rejected"].append({"group_id": gl.group_id,
-                                    "reason": "This group id does not exist in the digest; the claim was rejected."})
+        if gl.suggest_split and f"{gl.group_id}{ns}" in groups:
+            new = grouping.apply_split(groups, f"{gl.group_id}{ns}", gl.suggest_split, label_to_idx,
+                                       lambda i, gl=gl: _split_item(gl, gl.evidence), rej)
+            if new:
+                out["splits_applied"].append({"group": gl.group_id, "new": new})
+    for m in resp.propose_merge:
+        keep = grouping.apply_merge(groups, [f"{g}{ns}" for g in m.group_ids], m.reason, rej)
+        if keep:
+            out["merges_applied"].append({"group_ids": m.group_ids, "into": keep, "reason": m.reason})
+            for g in m.group_ids:
+                out["alias"][f"{g}{ns}"] = keep
+    out["groups"].update(groups)
+    known = {a["assay_label"] for a in out["assays"]}
+    for a in resp.assays:
+        if (a.assay_label.strip() or "assay") in known:
             continue
-        if gl.group_id in out["groups"]:
-            continue
-        item = {"role": gl.role, "assay_label": gl.assay_label, "label": (gl.label or "").strip(),
-                "audit_kind": gl.audit_kind,
-                "marks_rows_as_suspect": bool(gl.marks_rows_as_suspect),
-                "confidence": _clamp(gl.confidence), "evidence": gl.evidence, "source": "ai"}
-        out["groups"][gl.group_id] = finalize_item(item, by_id[gl.group_id], cols, layout)
-        if gl.suggest_split:
-            out["splits"].append({"group_id": gl.group_id, "columns": gl.suggest_split,
-                                  "role": gl.suggest_split_role or UNRESOLVED, "audit_kind": gl.suggest_split_audit_kind,
-                                  "label": gl.suggest_split_label or "", "evidence": gl.evidence})
-    out["samples"] = [{"pattern_or_sample": x.pattern_or_sample, "label": x.label, "is_study_sample": x.is_study_sample,
-                       "confidence": _clamp(x.confidence), "evidence": x.evidence, "source": "ai"} for x in resp.samples]
-    out["clarifying_questions"] = [q.model_dump() for q in resp.clarifying_questions]
-    out["literature_queries"] = [q.strip()[:200] for q in resp.literature_queries if q and q.strip()][:3]
-    return out
+        fi = a.feature_identity or FeatureIdentity()
+        out["assays"].append({
+            "assay_label": a.assay_label.strip() or "assay", "omics_type": a.omics_type or "unknown",
+            "source_software": a.source_software or "unknown",
+            "in_supported_scope": a.in_supported_scope if a.in_supported_scope in VOCABULARY["in_supported_scope"]
+            else "unsure", "scope_reason": a.scope_reason or "",
+            "feature_pids": [f"{g}{ns}" for g in fi.group_ids],
+            "confidence": _clamp(a.confidence), "evidence": a.evidence, "source": "ai"})
+    out["samples"] += [{"pattern_or_sample": x.pattern_or_sample, "label": x.label, "is_study_sample": x.is_study_sample,
+                        "confidence": _clamp(x.confidence), "evidence": x.evidence, "source": "ai"} for x in resp.samples]
+    out["clarifying_questions"] += [dict(q.model_dump(), group_id=f"{q.group_id}{ns}" if q.group_id else None)
+                                    for q in resp.clarifying_questions]
+    out["literature_queries"] += [q.strip()[:200] for q in resp.literature_queries
+                                  if q and q.strip() and q.strip()[:200] not in out["literature_queries"]][:3]
+
+
+def group_summary(cols, pid, g, chunk=None):
+    """One compact line of facts per group, for the consolidation / merge-check call."""
+    idx = sorted(g["indices"])
+    names = [cols.labels[i] for i in idx]
+    it = g["item"]
+    st = [cols.digests[i] for i in idx]
+    num = [d for d in st if d["type"] == "numeric"]
+    meds = sorted(d.get("median") for d in num if d.get("median") is not None)
+    pat = common_pattern([cols.header[i] for i in idx])
+    stats = ("text" if not num else
+             f"median of column medians {meds[len(meds) // 2] if meds else None}, "
+             f"whole numbers {'yes' if all(d.get('integer_valued') for d in num) else 'no'}, "
+             f"zeros {round(100 * sum(d.get('frac_zero') or 0 for d in num) / len(num))}%")
+    return {"group_id": pid, "chunk": chunk, "n_columns": len(idx), "role": it.get("role"), "label": it.get("label"),
+            "assay_label": it.get("assay_label"), "first_columns": names[:2], "last_column": names[-1],
+            "shared_name_part": pat["text"] if pat else None, "stats": stats}
 
 
 def normalize_item(item):
@@ -391,7 +468,8 @@ def finalize_item(item, group, cols, layout=None):
         item["claimed"] = {k: item.get(k) for k in ("role", "audit_kind", "label")}
         item["role"] = UNRESOLVED
     if item.get("role") == "sample_metadata" and item.get("audit_kind") == "timepoint" and group["n_columns"] == 1:
-        item.setdefault("detail", timepoint_detail(cols.digests[group["indices"][0]]))
+        if not item.get("detail"):
+            item["detail"] = timepoint_detail(cols.digests[group["indices"][0]])
     return item
 
 
@@ -401,56 +479,105 @@ def unresolved_item(evidence, source="none"):
             "validation": {"status": "ok", "messages": []}}
 
 
-def propose(filename, sha, groups, hints, cols, fixed=None, group_ids=None, log=None, on_progress=None,
-            mock_fn=None, signature_hint=None):
-    """Ask the AI about all (or some) groups, in batches for very wide files.
-    Returns (proposal, meta, digests)."""
-    targets = [g for g in groups if group_ids is None or g["group_id"] in group_ids]
-    batches = [targets[i:i + GROUPS_PER_CALL] for i in range(0, len(targets), GROUPS_PER_CALL)] or [[]]
-    merged = {"groups": {}, "rejected": [], "samples": [], "clarifying_questions": [], "splits": [], "assays": [],
-              "literature_queries": []}
-    metas, digests = [], []
+def propose(filename, sha, cols, affixes, hints, indices=None, fixed=None, log=None, on_progress=None,
+            mock_fn=None, signature_hint=None, chunk_size=None):
+    """Ask the AI to group and label the given columns (all by default).
+    Wide sets go in chunks, then one consolidation call. Returns (proposal, meta, digests):
+    proposal["groups"] is pid -> {"indices", "item", "origin"}, covering every column exactly once."""
+    indices = list(range(len(cols.header))) if indices is None else sorted(indices)
+    size = chunk_size or GROUPING_CHUNK_SIZE
+    chunks = chunk_columns(indices, cols.labels, affixes, size)
+    n = len(chunks)
+    label_to_idx = {lab: i for i, lab in enumerate(cols.labels)}
+    out = {"groups": {}, "rejected": [], "samples": [], "clarifying_questions": [], "assays": [],
+           "literature_queries": [], "splits_applied": [], "merges_applied": [], "alias": {}, "chunks": n,
+           "failed_chunks": [], "consolidation_error": None}
+    metas, digests, chunk_of = [], [], {}
     fixed = dict(fixed or {})
-    for n, batch in enumerate(batches, 1):
+    total = n + (1 if n > 1 else 0)
+    for k, chunk in enumerate(chunks, 1):
+        ns = f"_chunk{k}" if n > 1 else ""
         if on_progress:
-            on_progress(n - 1, len(batches), f"AI batch {n}/{len(batches)}: {len(batch)} column group(s)")
-        digest = build_digest(filename, groups, hints, fixed, {g["group_id"] for g in batch}, signature_hint)
+            on_progress(k - 1, total, f"AI call {k}/{total}: grouping and labelling {len(chunk)} column(s)")
+        digest = build_digest(filename, cols, affixes, hints, chunk, fixed, signature_hint, (k, n) if n > 1 else None)
         digests.append(digest)
-        _ctx_set(on_progress, n, len(batches))
+        _ctx_set(on_progress, k, total)
         try:
             resp, meta = ask(digest, sha, log, mock_fn)
         finally:
             _ctx_clear()
         metas.append(meta)
         if resp is None:
-            for g in batch:
-                merged["groups"][g["group_id"]] = unresolved_item(
-                    f"AI unavailable: {meta['error']}. Choose this role yourself.")
+            out["failed_chunks"].append(k)
+            for i in chunk:
+                out["groups"][f"u{i}{ns}"] = {"indices": [i], "origin": "ai_unavailable", "item": unresolved_item(
+                    f"AI unavailable: {meta['error']}. Choose this column's role yourself.")}
             continue
-        part = validate_response(resp, groups, cols, fixed.get("layout"))
-        if "layout" in part and "layout" not in merged:
-            merged["layout"] = part["layout"]
-            fixed.setdefault("layout", part["layout"]["value"])
-        known = {a["assay_label"] for a in merged["assays"]}
-        merged["assays"].extend(a for a in part["assays"] if a["assay_label"] not in known)
-        if merged["assays"]:
-            fixed["assays_so_far"] = [a["assay_label"] for a in merged["assays"]]
-        for g in batch:
-            merged["groups"][g["group_id"]] = part["groups"].get(g["group_id"]) or unresolved_item(
-                "The AI returned no label for this group.", "ai")
-        for k in ("rejected", "samples", "clarifying_questions", "splits"):
-            merged[k].extend(part[k])
-        merged["literature_queries"].extend(q for q in part["literature_queries"] if q not in merged["literature_queries"])
-        if log:
-            log("validation_result", {"batch": n, "groups": {gid: it["validation"] for gid, it in part["groups"].items()},
-                                      "rejected": part["rejected"]})
+        before = set(out["groups"])
+        read_chunk(resp, chunk, label_to_idx, ns, out)
+        for pid in set(out["groups"]) - before:
+            chunk_of[pid] = k
+        if "layout" in out:
+            fixed.setdefault("layout", out["layout"]["value"])
+        if out["assays"]:
+            fixed["assays_so_far"] = [a["assay_label"] for a in out["assays"]]
+    if n > 1 and any(m.get("error") is None for m in metas):
+        if on_progress:
+            on_progress(n, total, f"AI call {total}/{total}: joining families split across {n} chunks")
+        payload = {"groups": [group_summary(cols, pid, g, chunk_of.get(pid)) for pid, g in out["groups"].items()],
+                   "already_confirmed": {"layout": fixed.get("layout")}}
+        digests.append(payload)
+        _ctx_set(on_progress, total, total)
+        try:
+            cresp, cmeta = _call(payload, sha, log, mock_fn, kind="consolidation")
+        finally:
+            _ctx_clear()
+        metas.append(cmeta)
+        out["consolidation_error"] = cmeta.get("error") if cresp is None else None
+        for m in (cresp.cross_chunk_merges if cresp else []):
+            keep = grouping.apply_merge(out["groups"], [out["alias"].get(g, g) for g in m.group_ids], m.reason,
+                                        out["rejected"], where="consolidation")
+            if keep:
+                out["merges_applied"].append({"group_ids": m.group_ids, "into": keep, "reason": m.reason,
+                                              "cross_chunk": True})
+                for g in m.group_ids:
+                    out["alias"][g] = keep
+    if log:
+        log("grouping_result", {"chunks": n, "n_groups": len(out["groups"]), "merges": out["merges_applied"],
+                                "splits": out["splits_applied"], "rejected": out["rejected"]})
     if on_progress:
-        on_progress(len(batches), len(batches), "AI proposal received and checked against the data")
+        on_progress(total, total, "AI proposal received and checked against the data")
     meta = metas[0] if metas else {}
     if any(m.get("error") for m in metas):
         meta = dict(meta, error=next(m["error"] for m in metas if m.get("error")))
     meta["models_used"] = sorted({m.get("model") for m in metas if m.get("model")})
-    return merged, meta, digests
+    meta["calls"] = len(metas)
+    meta["all_failed"] = bool(metas) and all(m.get("error") for m in metas[:n])
+    return out, meta, digests
+
+
+def consolidate(cols, groups, items, sha, log=None, mock_fn=None):
+    """The consolidation call on the current groups (e.g. to retry it after a failure).
+    Returns (merges [(group_ids, reason)], error). Nothing is applied here."""
+    payload = {"groups": [group_summary(cols, gid, {"indices": g["indices"], "item": items[gid]})
+                          for gid, g in groups.items()]}
+    resp, meta = _call(payload, sha, log, mock_fn, kind="consolidation")
+    if resp is None:
+        return [], meta.get("error") or "no answer"
+    return [(m.group_ids, m.reason) for m in resp.cross_chunk_merges], None
+
+
+def merge_check(cols, groups, items, gids, hint, sha, log=None, mock_fn=None):
+    """Ask the AI whether the user's 'these are the same thing' holds. Nothing is applied here."""
+    payload = {"groups": [group_summary(cols, gid, {"indices": groups[gid]["indices"], "item": items[gid]})
+                          for gid in gids],
+               "user_hint": hint or "The user thinks these groups are the same thing."}
+    resp, meta = _call(payload, sha, log, mock_fn, kind="consolidation")
+    if resp is None:
+        return {"agrees": None, "reason": meta.get("error") or "no answer", "comment": ""}
+    want = set(gids)
+    hit = next((m for m in resp.cross_chunk_merges if want <= set(m.group_ids)), None)
+    return {"agrees": hit is not None, "reason": hit.reason if hit else "", "comment": resp.comment or ""}
 
 
 def _ctx_set(on_progress, n, total):

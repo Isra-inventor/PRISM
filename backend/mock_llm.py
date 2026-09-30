@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import fnmatch
 import json
+import math
 import re
 
 # text columns: regex on the name -> (role, label, audit_kind, marks_rows_as_suspect)
@@ -57,7 +58,7 @@ def _first(name, rules):
 
 
 def _names(g):
-    return g.get("columns") or (g.get("first_columns", []) + g.get("last_columns", []))
+    return g["columns"]
 
 
 def _omics(names):
@@ -68,30 +69,107 @@ def _omics(names):
     return "metabolomics"
 
 
+def _family_key(c):
+    """The mock's own reading of the shared-name facts: a prefix cut at its first
+    digit, or a suffix cut after its last digit (e.g. 'LFQ intensity S', ' Peak area')."""
+    keys = []
+    p = (c.get("shared_prefix") or [{}])[0].get("text") or ""
+    p = re.split(r"\d", p, maxsplit=1)[0]
+    s = (c.get("shared_suffix") or [{}])[0].get("text") or ""
+    s = re.split(r"\d", s)[-1] if s else ""
+    for side, k in (("prefix", p), ("suffix", s)):
+        if len(k.strip()) >= 3 and k != c["column"]:
+            rest = c["column"][len(k):] if side == "prefix" else c["column"][:len(c["column"]) - len(k)]
+            if re.search(r"\d", rest):  # the varying part looks like a sample name
+                keys.append((len(k), side, k))
+    return max(keys)[1:] if keys else None
+
+
+def _clusters(cols):
+    """Name-less numeric columns: split at gaps of more than a decade in typical value."""
+    sub = sorted(((math.log10(c["median"]) if (c.get("median") or 0) > 0 else -9), k) for k, c in enumerate(cols))
+    out, cur = [], []
+    for lm, k in sub:
+        if cur and lm - cur[-1][0] > 1.0:
+            out.append([j for _, j in cur])
+            cur = []
+        cur.append((lm, k))
+    if cur:
+        out.append([j for _, j in cur])
+    return out
+
+
+def _group_columns(columns, layout):
+    """-> [(key, [column digests])]: the mock's grouping proposal."""
+    fam, rest = {}, []
+    for c in columns:
+        key = _family_key(c) if c["type"] == "numeric" else None
+        if key:
+            fam.setdefault(key, []).append(c)
+        else:
+            rest.append(c)
+    groups = []
+    for key, cs in fam.items():
+        if len(cs) >= 2:
+            groups.append((key[1], cs))
+        else:
+            rest.extend(cs)
+    singles = []
+    if layout == "samples_in_rows":
+        free = [c for c in rest if c["type"] == "numeric" and not _first(c["column"], _NUM_RULES)
+                and not _COVARIATE_NAMES.match(c["column"]) and not re.match(r"(?i)^(row.?id|id)$", c["column"])]
+        for cl in _clusters(free):
+            if len(cl) >= 2:
+                groups.append(("", [free[k] for k in cl]))
+            else:
+                singles.append(free[cl[0]])
+        rest = [c for c in rest if c not in free] + singles
+    groups += [(None, [c]) for c in rest]
+    return sorted(groups, key=lambda g: min(c["position"] for c in g[1]))
+
+
+def _pseudo_group(gid, key, cs):
+    names = [c["column"] for c in cs]
+    if len(cs) == 1:
+        return {"group_id": gid, "kind": "single_column", "type": cs[0]["type"], "columns": names,
+                "pattern": None, "profile": cs[0], "n_columns": 1}
+    meds = sorted(c.get("median") or 0 for c in cs)
+    prof = {"median": meds[len(meds) // 2], "p99": max(c.get("p99") or 0 for c in cs),
+            "integer_valued": all(c.get("integer_valued") for c in cs)}
+    samples = [n[len(key):] if n.startswith(key or "\0") else (n[:len(n) - len(key)] if key and n.endswith(key) else n)
+               for n in names]
+    return {"group_id": gid, "kind": "numeric_block", "type": "numeric", "columns": names, "pattern": key,
+            "profile": prof, "n_columns": len(cs), "sample_names": [x.strip(" _.-") for x in samples]}
+
+
 class MockLLM:
     @staticmethod
     def respond(system, prompt):
         if prompt.startswith("Literature"):
             return MockLLM.literature(json.loads(prompt.split("\n", 1)[1]))
+        if prompt.startswith("Consolidation"):
+            return MockLLM.consolidate(json.loads(prompt.split("\n", 1)[1]))
         digest = json.loads(prompt.split("\n", 1)[1])
         hints = digest["file"]["layout_hints"]
         fixed = digest.get("already_confirmed") or {}
         layout = fixed.get("layout")
         if not layout:
-            ratio = hints.get("rows_to_block_columns_ratio")
+            ratio = hints.get("rows_to_numeric_columns_ratio")
             if hints.get("long_format_pattern"):
                 layout = "long"
             elif ratio is not None and ratio < 1:
                 layout = "samples_in_rows"
             else:
                 layout = "samples_in_columns"
+        proposed = [_pseudo_group(f"m{k}", key, cs)
+                    for k, (key, cs) in enumerate(_group_columns(digest["columns"], layout), 1)]
         groups, samples, fid, assays = [], [], [], {}
-        file_omics = _omics([n for g in digest["groups"] for n in _names(g)])
-        for g in digest["groups"]:
+        file_omics = _omics([c["column"] for c in digest["columns"]])
+        for g in proposed:
             names = _names(g)
             name = names[0] if names else ""
             prof = g.get("profile") or {}
-            e = {"group_id": g["group_id"], "role": "unresolved", "assay_label": None, "label": "",
+            e = {"group_id": g["group_id"], "columns": names, "role": "unresolved", "assay_label": None, "label": "",
                  "audit_kind": None, "marks_rows_as_suspect": False,
                  "confidence": 0.6, "evidence": "mock rule", "suggest_split": None}
             if g["kind"] == "numeric_block" and not re.search(r"scale|norm", (g.get("pattern") or "").lower()):
@@ -100,15 +178,10 @@ class MockLLM:
                 assays.setdefault(label, om)
                 logscale = (not prof.get("integer_valued") and (prof.get("p99") or 0) < 40 and (prof.get("median") or 0) > 5)
                 e.update(role="value", assay_label=label,
-                         label=f"{(g.get('pattern') or 'values').strip()}, apparently {'log' if logscale else 'linear'} "
-                               f"scale (median {prof.get('median')})",
+                         label=f"{(g.get('pattern') or '').strip() or om} values, apparently "
+                               f"{'log' if logscale else 'linear'} scale",
                          confidence=0.85, evidence=f"{g['n_columns']} numeric columns; median {prof.get('median')}")
-                if layout == "samples_in_rows":
-                    split = [n for n in (g.get("columns") or []) if _COVARIATE_NAMES.match(n)]
-                    if split:
-                        e.update(suggest_split=split, suggest_split_role="sample_metadata",
-                                 suggest_split_audit_kind="covariate", suggest_split_label="numeric clinical covariate")
-                for sn in g.get("sample_names_after_stripping_pattern") or []:
+                for sn in g.get("sample_names") or []:
                     for pat, lab in (("qc", "QC injection"), ("blank", "blank"), ("pool", "pooled sample"),
                                      ("calib", "calibrator")):
                         if sn.lower().startswith(pat):
@@ -134,6 +207,8 @@ class MockLLM:
                     rule = ("feature_id", "row id", None, False) if layout != "samples_in_rows" else ("ignore", "row index", None, False)
                 if g["type"] != "numeric" and layout == "samples_in_rows" and uniq and re.search(r"(?i)sample|^id$", name):
                     rule = ("sample_id", "sample identifier", None, False)
+                if g["type"] != "numeric" and layout == "samples_in_columns" and uniq and re.search(r"(?i)otu|^#|^id_ref$|feature", name):
+                    rule = ("feature_id", "feature identifier", None, False)
                 if rule:
                     role, label, kind, suspect = rule
                     if layout == "samples_in_rows" and role == "feature_annotation":
@@ -169,7 +244,23 @@ class MockLLM:
             "samples": samples,
             "clarifying_questions": [],
             "literature_queries": [],
+            "propose_merge": [],
         })
+
+    @staticmethod
+    def consolidate(payload):
+        groups = payload["groups"]
+        if payload.get("user_hint"):
+            same = len({g["role"] for g in groups}) == 1
+            return json.dumps({"cross_chunk_merges": [{"group_ids": [g["group_id"] for g in groups],
+                                                       "reason": "mock: same role"}] if same else [],
+                               "comment": "mock: roles agree" if same else "mock: different roles"})
+        by = {}
+        for g in groups:
+            if g["role"] == "value":
+                by.setdefault((g["role"], g["label"]), []).append(g["group_id"])
+        return json.dumps({"cross_chunk_merges": [{"group_ids": ids, "reason": "mock: same label across chunks"}
+                                                  for ids in by.values() if len(ids) > 1]})
 
 
 def _literature(payload):

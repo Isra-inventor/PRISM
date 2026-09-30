@@ -18,11 +18,11 @@ import uuid
 from collections import Counter, OrderedDict
 from pathlib import Path
 
-from . import ai, literature, llm_providers as llm
+from . import ai, grouping, literature, llm_providers as llm
 from .format_detect import signature_hint, signature_prefill
 from .mock_llm import expand_sample_rules
 from .parsing import cell, is_missing, parse_bytes, sanitize_filename
-from .profiling import Columns, apply_rule, build_groups, layout_hints
+from .profiling import Columns, apply_rule, layout_hints, make_group, shared_affixes
 from .schema import HISTORY_QUESTIONS, UNRESOLVED, VOCABULARY
 from .session_log import log_event
 from .validation import timepoint_detail, validate_feature_identity, validate_group
@@ -75,9 +75,9 @@ class Session:
         self.table = parse_bytes(filename, raw)
         self.sha = self.table["sha256"]
         self.cols = Columns(self.table)
-        self.splits = []  # accepted split decisions, re-applied on reload
-        self.groups = build_groups(self.cols)
-        self.hints = layout_hints(self.cols, self.groups)
+        self.affixes = shared_affixes(self.cols.labels)   # facts about the names, not groups
+        self.hints = layout_hints(self.cols)
+        self.groups = []   # proposed by the AI (or a known format / you) in build_draft
         self.draft = None
         self.digests = []
         self.metadata_table = None
@@ -86,7 +86,7 @@ class Session:
     def save(self):
         self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / "state.json").write_text(json.dumps({
-            "sid": self.sid, "filename": self.filename, "splits": self.splits, "draft": self.draft,
+            "sid": self.sid, "filename": self.filename, "groups": group_structure(self), "draft": self.draft,
             "digests": self.digests}, ensure_ascii=False), encoding="utf-8")
 
     def log(self, event, payload):
@@ -94,7 +94,11 @@ class Session:
 
     @property
     def groups_by_id(self):
-        return {g["group_id"]: g for g in self.groups}
+        # cached per groups list: every regroup assigns a new list, so identity is enough
+        if getattr(self, "_gbi_src", None) is not self.groups:
+            self._gbi = {g["group_id"]: g for g in self.groups}
+            self._gbi_src = self.groups
+        return self._gbi
 
 
 def create_session(filename, raw):
@@ -128,8 +132,8 @@ def get_session(sid):
         raise KeyError(sid)
     st = json.loads(state.read_text(encoding="utf-8"))
     s = Session(sid, st["filename"], srcs[0].read_bytes())
-    for sp in st.get("splits", []):
-        _apply_split(s, sp)
+    s.groups = [make_group(s.cols, g["group_id"], g["indices"], g.get("origin", "restored"),
+                           **{k: g.get(k) for k in ("split_from", "merged_from")}) for g in st.get("groups", [])]
     s.draft, s.digests = st.get("draft"), st.get("digests", [])
     md = d / "metadata_source.csv"
     if md.exists() and s.draft and s.draft.get("metadata") and not s.draft["metadata"].get("skipped"):
@@ -139,60 +143,48 @@ def get_session(sid):
     return s
 
 
-# ---------------------------------------------------------------- splits (deterministic decision)
+# ---------------------------------------------------------------- groups (proposed, never decided by code)
 
-def _apply_split(s, sp):
-    g = s.groups_by_id.get(sp["group_id"])
-    if g is None or g["n_columns"] < 2:
-        return False
-    cols = [c for c in sp["columns"] if c in g["columns"]]
-    if not cols or g["n_columns"] - len(cols) < 2:
-        return False
-    keep_idx = [i for i, c in zip(g["indices"], g["columns"]) if c not in cols]
-    new = []
-    for c in cols:
-        i = g["indices"][g["columns"].index(c)]
-        d = s.cols.digests[i]
-        new.append({"group_id": f"{g['group_id']}s{len(new) + 1}", "columns": [c], "indices": [i],
-                    "n_columns": 1, "kind": "single_column", "origin": "split_on_ai_suggestion",
-                    "pattern": None, "type": d["type"], "profile": d, "split_from": g["group_id"],
-                    "split_reasons": [sp.get("evidence") or "AI suggested it does not belong to the block"]})
-    from .profiling import block_profile
-    g["indices"] = keep_idx
-    g["columns"] = [s.cols.labels[i] for i in keep_idx]
-    g["n_columns"] = len(keep_idx)
-    g["profile"], g["histogram"] = block_profile(s.cols, keep_idx)
-    s.groups.extend(new)
-    s.groups.sort(key=lambda x: min(x["indices"]))
-    s.splits.append(sp)
-    return [n["group_id"] for n in new]
+def group_structure(s):
+    return [{k: g.get(k) for k in ("group_id", "indices", "origin", "split_from", "merged_from")} for g in s.groups]
 
 
-def _apply_ai_splits(s, prop, layout):
-    """Apply the AI's split suggestions (code decides: see _apply_split) and give
-    each new single-column group the role the AI suggested for it."""
-    new_all = []
-    for sp in prop.get("splits", []):
-        new_ids = _apply_split(s, sp)
-        if new_ids:
-            s.log("split_applied", {"split": sp, "new_groups": new_ids})
-            for gid in new_ids:
-                item = {"role": sp.get("role") or UNRESOLVED, "audit_kind": sp.get("audit_kind"),
-                        "label": sp.get("label") or "", "confidence": 0.7, "source": "ai",
-                        "evidence": f"Split out of the block on the AI's suggestion: {sp.get('evidence', '')}"}
-                prop["groups"][gid] = ai.finalize_item(_blank(item), s.groups_by_id[gid], s.cols, layout)
-            new_all.extend(new_ids)
-    return new_all
+def _next_id(s):
+    nums = [int(g["group_id"][1:]) for g in s.groups if re.fullmatch(r"g\d+", g["group_id"])]
+    return max(nums, default=0) + 1
+
+
+def install_groups(s, pgroups, layout, keep_ids=None, first_id=1):
+    """Turn proposed groups (pid -> {indices, item, origin}) into group records and
+    validated items. Returns (groups, items, id_map)."""
+    order, id_map = grouping.finalize(pgroups, first_id, keep_ids)
+    groups, items = [], {}
+    for pid in order:
+        pg = pgroups[pid]
+        gid = id_map[pid]
+        g = make_group(s.cols, gid, pg["indices"], pg.get("origin", "ai_proposed"),
+                       split_from=id_map.get(pg.get("split_from"), pg.get("split_from")),
+                       merged_from=pg.get("merged_from"))
+        groups.append(g)
+        items[gid] = ai.finalize_item(_blank(dict(pg["item"])), g, s.cols, layout)
+    return groups, items, id_map
+
+
+def _singletons(s, evidence):
+    return {f"u{i}": {"indices": [i], "origin": "manual", "item": dict(grouping.unmentioned_item(), evidence=evidence)}
+            for i in range(len(s.cols.header))}
 
 
 # ---------------------------------------------------------------- hints
 
 def group_hint(g):
     p = g.get("profile") or {}
+    pat = (g.get("pattern") or {}).get("text")
     if g["kind"] == "numeric_block":
-        pat = (g.get("pattern") or {}).get("text")
-        base = f"{g['n_columns']} numeric columns" + (f" sharing '{pat.strip()}'" if pat else " with similar values")
+        base = f"{g['n_columns']} numeric columns" + (f" sharing '{pat.strip()}'" if pat and pat.strip() else "")
         return base + f"; median {p.get('median')}, {int((p.get('frac_zero') or 0) * 100)}% zeros."
+    if g["kind"] == "column_group":
+        return f"{g['n_columns']} columns of mixed types" + (f" sharing '{pat.strip()}'" if pat and pat.strip() else "") + "."
     if g["type"] == "numeric":
         return (f"Numeric column: median {p.get('median')}, range {p.get('min')}–{p.get('max')}"
                 + (", whole numbers" if p.get("integer_valued") else "") + ".")
@@ -205,14 +197,14 @@ def group_hint(g):
 def layout_hint_text(h):
     if h["long_format_pattern"]:
         return "Repeated identifier columns and a single numeric column: this may be a long table."
-    if h["largest_numeric_block_columns"]:
-        r = h["rows_to_block_columns_ratio"]
+    if h["numeric_columns"]:
+        r = h["rows_to_numeric_columns_ratio"]
         if r is not None and r >= 1:
-            return (f"{h['n_rows']} rows and {h['numeric_block_columns_total']} columns in numeric blocks: "
-                    "features usually outnumber samples, so rows are probably features (samples in columns).")
-        return (f"Only {h['n_rows']} rows but {h['numeric_block_columns_total']} columns in numeric blocks: "
+            return (f"{h['n_rows']} rows and {h['numeric_columns']} numeric columns: features usually outnumber "
+                    "samples, so rows are probably features (samples in columns).")
+        return (f"Only {h['n_rows']} rows but {h['numeric_columns']} numeric columns: "
                 "rows are probably samples (samples in rows).")
-    return "No large block of numeric columns was found."
+    return "No numeric columns were found."
 
 
 def flag_values(s, gid):
@@ -254,15 +246,20 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
     prop, meta, digests = None, {"error": None}, []
     if use_ai:
         fixed = {"layout": fixed_layout} if fixed_layout else {}
-        prop, meta, digests = ai.propose(s.filename, s.sha, s.groups, s.hints, s.cols, fixed=fixed, log=s.log,
+        prop, meta, digests = ai.propose(s.filename, s.sha, s.cols, s.affixes, s.hints, fixed=fixed, log=s.log,
                                          on_progress=on_progress, signature_hint=hint)
-        _apply_ai_splits(s, prop, fixed_layout)
-        if meta.get("error") and not prop.get("layout"):
+        if meta.get("all_failed"):
             prop = None  # the AI failed entirely: fall back to manual starting points
     manual = prop is None
     if manual:
-        prop = signature_prefill(s.table["header"], s.groups) or {}
+        prop = signature_prefill(s.table["header"], s.cols) or {
+            "groups": _singletons(s, "AI is off: choose what this column is, and group columns that belong "
+                                     "together (see 'Shared name parts').")}
     s.digests = digests
+    layout0 = fixed_layout or (prop.get("layout") or {}).get("value")
+    s.groups, items, id_map = install_groups(s, prop["groups"], layout0)
+    alias = prop.get("alias", {})
+    to_gid = lambda pid: id_map.get(alias.get(pid, pid)) if pid else None
 
     d = {"schema_version": "0.2.1", "groups": {}, "sample_rules": {}, "samples": {}, "sample_rules_ai": [],
          "processing_history": {q: {"answer": None, "note": ""} for q, _ in HISTORY_QUESTIONS},
@@ -272,7 +269,12 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
                "used": use_ai and not manual, "provider": meta.get("provider") or llm.provider_name(),
                "model": meta.get("model"), "models_used": meta.get("models_used", []),
                "prompt_version": ai.PROMPT_VERSION, "temperature": llm.TEMPERATURE, "error": meta.get("error"),
-               "cached": meta.get("cached", False)}
+               "cached": meta.get("cached", False), "calls": meta.get("calls", 0)}
+    d["grouping"] = {"source": "ai" if not manual else ("signature" if prop.get("signature") else "manual"),
+                     "chunks": prop.get("chunks", 1), "merges_applied": prop.get("merges_applied", []),
+                     "splits_applied": prop.get("splits_applied", []),
+                     "chunk_size": ai.GROUPING_CHUNK_SIZE, "failed_chunks": prop.get("failed_chunks", []),
+                     "consolidation_error": prop.get("consolidation_error")}
 
     # layout
     if fixed_layout:
@@ -298,11 +300,7 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
     labels = [a["assay_label"] for a in d["assays"]]
     for g in s.groups:
         gid = g["group_id"]
-        if gid in prop.get("groups", {}):
-            item = _blank(prop["groups"][gid])
-        else:
-            item = _blank({"evidence": ("AI is off: choose this role yourself." if not use_ai else
-                                        "No proposal for this group."), "source": "none"})
+        item = items[gid]
         item["hint"] = group_hint(g)
         if item["role"] == "value" and item.get("assay_label") not in labels:
             item["assay_label"] = labels[0]
@@ -314,6 +312,8 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
         _snap(item, GROUP_FIELDS)
 
     # feature identity: first assay that names one, or the groups labelled feature_id
+    for a in assays:
+        a["feature_group_ids"] = [g for g in dict.fromkeys(to_gid(p) for p in a.pop("feature_pids", [])) if g]
     fi_ids = next((a.get("feature_group_ids") for a in assays if a.get("feature_group_ids")), None)
     if fi_ids:
         fi = {"group_ids": fi_ids, "composite": len(fi_ids) > 1, "confidence": assays[0].get("confidence", 0),
@@ -341,7 +341,7 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
     d["sample_rules_ai"] = prop.get("samples", [])
     d["literature_queries_ai"] = prop.get("literature_queries", [])
     d["literature"] = None
-    d["clarifying_questions"] = prop.get("clarifying_questions", [])
+    d["clarifying_questions"] = [dict(q, group_id=to_gid(q.get("group_id"))) for q in prop.get("clarifying_questions", [])]
     d["rejected"] = prop.get("rejected", [])
     refresh_samples(s, d)
     s.draft = d
@@ -396,6 +396,15 @@ def refresh_samples(s, d):
     """(Re)compute each sample's label and is_study_sample, keeping user edits."""
     ids = sample_ids(s, d)
     rules = expand_sample_rules(d.get("sample_rules_ai", []), ids)
+    if layout_of(d) == "samples_in_columns":  # the AI may name raw column names instead of sample IDs
+        for gid in value_blocks(s, d):
+            rule = d["sample_rules"].get(gid) or {"strip_prefix": "", "strip_suffix": ""}
+            for i in s.groups_by_id[gid]["indices"]:
+                sid = apply_rule(s.table["header"][i], rule)
+                if sid not in rules:
+                    hit = expand_sample_rules(d.get("sample_rules_ai", []), [s.table["header"][i]])
+                    if hit:
+                        rules[sid] = next(iter(hit.values()))
     type_col = None
     if layout_of(d) == "samples_in_rows":
         for gid, it in d["groups"].items():
@@ -446,12 +455,12 @@ def confirm_step(s, step, decision, on_progress=None):
     """Apply a step decision atomically: on any error the draft is left untouched."""
     if step not in STEPS:
         raise StepError(f"Unknown step '{step}'.")
-    original, groups, splits = s.draft, copy.deepcopy(s.groups), list(s.splits)
+    original, groups = s.draft, copy.deepcopy(s.groups)
     s.draft = copy.deepcopy(original)
     try:
         return _confirm_step(s, step, decision, on_progress)
     except Exception:
-        s.draft, s.groups, s.splits = original, groups, splits
+        s.draft, s.groups = original, groups
         raise
 
 
@@ -674,60 +683,252 @@ def long_duplicates(s, d):
 
 # ---------------------------------------------------------------- reconsider (one group or a whole step)
 
-def reconsider(s, gids, hint, on_progress=None):
-    d = s.draft
-    gids = [g for g in (gids if isinstance(gids, (list, tuple)) else [gids]) if g]
+def _replace_groups(s, d, old_gids, pgroups, why):
+    """Replace groups old_gids by the proposed pgroups (same columns, regrouped).
+    A proposed group with exactly the columns of an old one keeps its id (and the
+    wizard keeps its place); new structures get new ids and their steps reopen."""
+    old = {g: s.groups_by_id[g] for g in old_gids}
+    by_cols = {frozenset(g["indices"]): gid for gid, g in old.items()}
+    keep_ids = {pid: by_cols[frozenset(pg["indices"])] for pid, pg in pgroups.items()
+                if frozenset(pg["indices"]) in by_cols}
+    keep_ids.update({pid: pg["keep_id"] for pid, pg in pgroups.items() if pg.get("keep_id") in old})
+    layout = layout_of(d)
+    old_steps = {step_for_group(s, d, g) for g in old_gids if g in d["groups"]}
+    new_groups, items, id_map = install_groups(s, pgroups, layout, keep_ids, first_id=_next_id(s))
+    s.groups = sorted([g for g in s.groups if g["group_id"] not in old] + new_groups, key=lambda g: min(g["indices"]))
+    labels = [a["assay_label"] for a in d["assays"]]
+    structural = any(g["group_id"] not in old or frozenset(g["indices"]) != frozenset(old[g["group_id"]]["indices"])
+                     for g in new_groups) or len(new_groups) != len(old)
+    reopen = old_steps if structural else set()
+    for g in new_groups:
+        gid, it = g["group_id"], items[g["group_id"]]
+        prev = d["groups"].get(gid)
+        it["hint"] = group_hint(g)
+        if prev is not None:
+            it["keep"] = prev.get("keep", True)   # your keep / exclude choice survives a re-proposal
+        if it["role"] == "value" and it.get("assay_label") not in labels:
+            it["assay_label"] = (prev or {}).get("assay_label") if (prev or {}).get("assay_label") in labels else labels[0]
+        _attach_flags(s, gid, it)
+        if "proposed" not in it:
+            _snap(it, GROUP_FIELDS)
+        d["groups"][gid] = it
+        if g.get("sample_id_rule") is not None and gid not in d["sample_rules"]:
+            d["sample_rules"][gid] = _snap(dict(g["sample_id_rule"], source="computed"), ("strip_prefix", "strip_suffix"))
+        if structural:
+            reopen.add(step_for_group(s, d, gid))
+    gone = [g for g in old if g not in {x["group_id"] for x in new_groups}]
+    for g in gone:
+        d["groups"].pop(g, None)
+        d["sample_rules"].pop(g, None)
+    for g in new_groups:  # a group whose columns changed needs a fresh sample rule
+        if g["group_id"] in old and structural and g.get("sample_id_rule") is not None:
+            d["sample_rules"][g["group_id"]] = _snap(dict(g["sample_id_rule"], source="computed"),
+                                                     ("strip_prefix", "strip_suffix"))
+    d["groups"] = {g["group_id"]: d["groups"][g["group_id"]] for g in s.groups}
+    fi = d["feature_identity"]
+    fi["group_ids"] = [g for g in fi["group_ids"] if g in d["groups"]]
+    if d["sample_id_group"]["value"] not in d["groups"]:
+        d["sample_id_group"]["value"] = None
+    for st in reopen:
+        if st in d["steps"] and d["steps"][st] == "confirmed":
+            d["steps"][st] = "pending"
+    refresh_samples(s, d)
+    s.log("regroup", {"why": why, "old": {g: old[g]["columns"] for g in old},
+                      "new": {g["group_id"]: g["columns"] for g in new_groups}, "reopened_steps": sorted(reopen)})
+    return [g["group_id"] for g in new_groups]
+
+
+def _check_gids(d, gids, at_least=1):
+    gids = [g for g in dict.fromkeys(gids if isinstance(gids, (list, tuple)) else [gids]) if g]
     unknown = [g for g in gids if g not in d["groups"]]
-    if not gids or unknown:
-        raise StepError(f"Unknown group(s): {', '.join(unknown) or 'none given'}.")
+    if len(gids) < at_least or unknown:
+        raise StepError(f"Unknown group(s): {', '.join(unknown) or 'none given'}." if unknown or not gids else
+                        f"Choose at least {at_least} groups.")
+    return gids
+
+
+def reconsider(s, gids, hint, on_progress=None):
+    """Re-ask the AI about these groups' columns with the user's note. It may
+    relabel them, regroup them, split columns out or merge them; code applies the
+    answer only where the column names and ids exist."""
+    d = s.draft
+    gids = _check_gids(d, gids)
     ok, why = llm.available()
     if not (ok and d["ai"]["enabled"]):
         raise StepError("The AI is off or unavailable: " + (why or "turn it on to ask it to reconsider."))
+    others = [(g, it) for g, it in d["groups"].items() if g not in gids and it["role"] != UNRESOLVED]
     fixed = {"layout": d["layout"]["value"],
              "assays": [{f: a.get(f) for f in ASSAY_FIELDS} for a in d["assays"]],
-             "confirmed_groups": {g: {k: it.get(k) for k in ("role", "label", "audit_kind", "keep")}
-                                  for g, it in d["groups"].items() if g not in gids and it["role"] != UNRESOLVED},
+             "current_grouping_of_these_columns": [
+                 {"group_id": g, "columns": s.groups_by_id[g]["columns"],
+                  **{k: d["groups"][g].get(k) for k in ("role", "label", "audit_kind")}} for g in gids],
+             "confirmed_groups_elsewhere": {g: {k: it.get(k) for k in ("role", "label", "audit_kind", "keep")}
+                                            for g, it in others[:200]},
              "user_feedback": _clean(hint, 1000),
-             "instruction": ("The user disagrees with the previous proposal for these groups. Reconsider only "
-                             "them, taking the user's feedback into account.")}
-    prop, meta, digests = ai.propose(s.filename, s.sha, s.groups, s.hints, s.cols, fixed=fixed,
-                                     group_ids=set(gids), log=s.log, on_progress=on_progress,
-                                     signature_hint=d.get("signature_hint"))
-    if meta.get("error"):
-        raise StepError("The AI could not answer: " + meta["error"])
-    labels = [a["assay_label"] for a in d["assays"]]
-    split_ids = _apply_ai_splits(s, prop, d["layout"]["value"])
-    changed = {}
-    for gid in split_ids:
-        new = _blank(prop["groups"][gid])
-        new["hint"] = group_hint(s.groups_by_id[gid])
-        _attach_flags(s, gid, new)
-        d["groups"][gid] = _snap(new, GROUP_FIELDS)
-        changed[gid] = {"old": None, "new": {k: new.get(k) for k in GROUP_FIELDS}}
-    for gid in split_ids:  # the parent block's profile changed
-        parent = s.groups_by_id[gid]["split_from"]
-        if parent in d["groups"]:
-            d["groups"][parent]["hint"] = group_hint(s.groups_by_id[parent])
-    d["groups"] = {g["group_id"]: d["groups"][g["group_id"]] for g in s.groups}  # file order
-    for gid in gids:
-        new = prop["groups"].get(gid)
-        if new is None:
-            continue
-        old = d["groups"][gid]
-        new = _blank(new)
-        new["hint"], new["keep"] = old.get("hint"), old.get("keep", True)
-        if new["role"] == "value":
-            if new.get("assay_label") not in labels:
-                new["assay_label"] = old.get("assay_label") if old.get("assay_label") in labels else labels[0]
-        _attach_flags(s, gid, new)
-        _snap(new, GROUP_FIELDS)
-        d["groups"][gid] = new
-        changed[gid] = {"old": {k: old.get(k) for k in GROUP_FIELDS}, "new": {k: new.get(k) for k in GROUP_FIELDS}}
-    s.log("reconsider", {"group_ids": gids, "user_feedback": hint, "changes": changed, "splits": split_ids})
-    refresh_samples(s, d)
+             "instruction": ("The user disagrees with the previous proposal for these columns. Reconsider only "
+                             "them, taking the user's feedback into account: relabel, regroup, split or merge.")}
+    cols = sorted(i for g in gids for i in s.groups_by_id[g]["indices"])
+    prop, meta, digests = ai.propose(s.filename, s.sha, s.cols, s.affixes, s.hints, indices=cols, fixed=fixed,
+                                     log=s.log, on_progress=on_progress, signature_hint=d.get("signature_hint"))
+    if meta.get("all_failed") or (meta.get("error") and not any(pg["origin"] != "ai_unavailable"
+                                                                 for pg in prop["groups"].values())):
+        raise StepError("The AI could not answer: " + (meta.get("error") or "no answer"))
+    old_cols = {g: set(s.groups_by_id[g]["indices"]) for g in gids}
+    new_ids = _replace_groups(s, d, gids, prop["groups"], {"reconsider": hint})
+    split_ids = [g for g in new_ids if g not in old_cols and s.groups_by_id[g].get("split_from")]
+    s.log("reconsider", {"group_ids": gids, "user_feedback": hint, "result": new_ids,
+                         "rejected": prop.get("rejected"), "merges": prop.get("merges_applied"),
+                         "splits": prop.get("splits_applied")})
     s.save()
     return {"draft": public_draft(s), "digest": digests[0] if digests else None, "split_groups": split_ids,
-            "questions": prop.get("clarifying_questions", [])}
+            "new_groups": new_ids, "questions": prop.get("clarifying_questions", [])}
+
+
+def retry_consolidation(s):
+    """Run the cross-chunk consolidation again on the current groups; merges naming
+    groups that exist are applied (as in the first proposal), others are rejected."""
+    d = s.draft
+    ok, why = llm.available()
+    if not (ok and d["ai"]["enabled"]):
+        raise StepError("The AI is off or unavailable: " + (why or ""))
+    merges, err = ai.consolidate(s.cols, s.groups_by_id, d["groups"], s.sha, log=s.log)
+    if err:
+        raise StepError("The AI could not answer: " + err)
+    applied, rejected = [], []
+    for gids, reason in merges:
+        gids = [g for g in dict.fromkeys(gids)]
+        if len(gids) < 2 or any(g not in d["groups"] for g in gids):
+            rejected.append({"group_ids": gids, "reason": "merge names groups that do not exist", "merge_reason": reason})
+            continue
+        keep = max(gids, key=lambda g: s.groups_by_id[g]["n_columns"])
+        item = copy.deepcopy(d["groups"][keep])
+        pg = {"m": {"indices": [i for g in gids for i in s.groups_by_id[g]["indices"]], "item": item,
+                    "origin": "merged_consolidation", "merged_from": gids, "keep_id": keep}}
+        _replace_groups(s, d, gids, pg, {"consolidation": gids, "reason": reason})
+        applied.append({"group_ids": gids, "into": keep, "reason": reason})
+    d["grouping"]["consolidation_error"] = None
+    d["grouping"]["merges_applied"] = d["grouping"].get("merges_applied", []) + applied
+    d["rejected"] = d.get("rejected", []) + rejected
+    s.log("consolidation_retry", {"applied": applied, "rejected": rejected})
+    s.save()
+    return {"draft": public_draft(s), "merges": applied}
+
+
+def merge_check(s, gids, hint=""):
+    """'These groups are actually the same thing': ask the AI; nothing is applied."""
+    d = s.draft
+    gids = _check_gids(d, gids, 2)
+    ok, why = llm.available()
+    if not (ok and d["ai"]["enabled"]):
+        return {"agrees": None, "reason": "The AI is off: you can merge them yourself.", "comment": ""}
+    res = ai.merge_check(s.cols, s.groups_by_id, d["groups"], gids, _clean(hint, 1000), s.sha, log=s.log)
+    s.log("merge_check", {"group_ids": gids, "user_hint": hint, "result": res})
+    return res
+
+
+def merge_groups(s, gids, why=None):
+    """Your decision: merge these groups into one. The group with the most columns
+    keeps its id and description; the result is re-validated (e.g. text + numbers
+    cannot be a value block)."""
+    d = s.draft
+    gids = _check_gids(d, gids, 2)
+    keep = max(gids, key=lambda g: s.groups_by_id[g]["n_columns"])
+    item = copy.deepcopy(d["groups"][keep])
+    item.update(source="user", evidence=f"Merged by you: {', '.join(gids)}." + (f" {why}" if why else ""))
+    pg = {"m": {"indices": [i for g in gids for i in s.groups_by_id[g]["indices"]], "item": item,
+                "origin": "merged_user", "merged_from": gids, "keep_id": keep}}
+    new = _replace_groups(s, d, gids, pg, {"merge": gids, "reason": why})
+    s.save()
+    return {"draft": public_draft(s), "new_groups": new}
+
+
+def split_columns(s, gid, columns):
+    """Your decision: take these columns out of the group, one group each."""
+    d = s.draft
+    _check_gids(d, [gid])
+    g = s.groups_by_id[gid]
+    take = [g["indices"][g["columns"].index(c)] for c in columns if c in g["columns"]]
+    if not take:
+        raise StepError("Choose at least one column of this group.")
+    if len(take) == g["n_columns"]:
+        raise StepError("That is every column of the group; nothing to take out.")
+    pg = {"r": {"indices": [i for i in g["indices"] if i not in take], "item": copy.deepcopy(d["groups"][gid]),
+                "origin": g["origin"], "keep_id": gid}}
+    for i in take:
+        pg[f"c{i}"] = {"indices": [i], "origin": "split_user", "split_from": gid,
+                       "item": dict(grouping.unmentioned_item(), source="user",
+                                    evidence=f"Taken out of {gid} by you: choose what it is.")}
+    new = _replace_groups(s, d, [gid], pg, {"split": gid, "columns": columns})
+    s.save()
+    return {"draft": public_draft(s), "new_groups": new}
+
+
+def group_columns(s, columns, why=None):
+    """Your decision: these columns are one group (e.g. all columns sharing a name part).
+    They leave their current groups; what is left of those groups stays as it was."""
+    d = s.draft
+    idx = [s.cols.labels.index(c) for c in dict.fromkeys(columns) if c in s.cols.labels]
+    if len(idx) < 2:
+        raise StepError("Choose at least two columns.")
+    owner = {i: g["group_id"] for g in s.groups for i in g["indices"]}
+    touched = list(dict.fromkeys(owner[i] for i in idx))
+    donor = max(touched, key=lambda g: len(set(s.groups_by_id[g]["indices"]) & set(idx)))
+    item = copy.deepcopy(d["groups"][donor])
+    item.update(source="user", evidence="Grouped by you" + (f": {why}" if why else "."))
+    pg = {"new": {"indices": idx, "item": item, "origin": "grouped_user"}}
+    for g in touched:
+        rest = [i for i in s.groups_by_id[g]["indices"] if i not in idx]
+        if rest:
+            pg[f"r{g}"] = {"indices": rest, "item": copy.deepcopy(d["groups"][g]), "origin": s.groups_by_id[g]["origin"],
+                           "keep_id": g}
+    if not any(pg[p].get("keep_id") == donor for p in pg):
+        pg["new"]["keep_id"] = donor
+    new = _replace_groups(s, d, touched, pg, {"group_columns": len(idx), "reason": why})
+    s.save()
+    return {"draft": public_draft(s), "new_groups": new}
+
+
+def name_parts(s, limit=15):
+    """Literal name parts shared by several columns (facts, for grouping by hand)."""
+    seen = getattr(s, "_name_parts", None)
+    if seen is None:
+        seen = s._name_parts = _name_part_index(s)
+    owner = {i: g["group_id"] for g in s.groups for i in g["indices"]}
+    label_idx = {c: i for i, c in enumerate(s.cols.labels)}
+    out = []
+    for v in seen.values():
+        groups = {owner.get(label_idx[c]) for c in v["columns"]}
+        if len(groups) > 1:  # only parts that are not already one group
+            out.append(dict(v, n=len(v["columns"]), n_groups=len(groups)))
+    # display order only: most shared text first (columns x characters); nothing is hidden or grouped
+    out.sort(key=lambda v: (-v["n"] * len(v["text"].strip()), -v["n"]))
+    return out[:limit]
+
+
+def _with_part(s, txt, prefix):
+    """Column labels starting (or ending) with txt, by binary search on sorted names."""
+    import bisect
+    if not hasattr(s, "_sorted_names"):
+        s._sorted_names = (sorted(s.cols.labels), sorted(c[::-1] for c in s.cols.labels))
+    srt = s._sorted_names[0 if prefix else 1]
+    key = txt if prefix else txt[::-1]
+    hit = srt[bisect.bisect_left(srt, key):bisect.bisect_left(srt, key + "\U0010ffff")]
+    return hit if prefix else [c[::-1] for c in hit]
+
+
+def _name_part_index(s):
+    seen = {}
+    for i, a in enumerate(s.affixes):
+        for side in ("shared_prefix", "shared_suffix"):
+            for x in a.get(side) or []:
+                if not x["text"].strip():
+                    continue
+                key = (side, x["text"])
+                if key not in seen:
+                    txt = x["text"]
+                    cols = _with_part(s, txt, side == "shared_prefix")
+                    seen[key] = {"side": "prefix" if side == "shared_prefix" else "suffix", "text": txt, "columns": cols}
+    return seen
 
 
 # ---------------------------------------------------------------- literature (RAG)
@@ -741,7 +942,7 @@ def literature_description(s, d):
         p = g.get("profile") or {}
         blocks.append({"group_id": gid, "assay_label": it.get("assay_label") or d["assays"][0]["assay_label"],
                        "label": it.get("label") or "", "n_columns": g["n_columns"],
-                       "name": literature.block_name(it.get("label"), (g.get("pattern") or {}).get("text")),
+                       "name": literature.block_name(it.get("label"), g.get("pattern")),
                        "stats": {k: p.get(k) for k in ("median", "min", "max", "frac_zero", "frac_na",
                                                         "integer_valued", "log10_span")}})
     return {"layout": d["layout"]["value"],
@@ -889,6 +1090,8 @@ def public_draft(s):
     out["unresolved"] = unresolved_items(s, d)
     out["literature_queries_suggested"] = suggested_queries(s, d) if value_blocks(s, d) else []
     out["literature_enabled"] = literature.enabled()
+    out["name_parts"] = name_parts(s)
+    out["ai_ungrouped"] = [g["group_id"] for g in s.groups if g.get("origin") == "ai_unavailable"]
     return out
 
 

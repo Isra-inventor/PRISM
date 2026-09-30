@@ -151,9 +151,23 @@ def signature_hint(header):
     return f"headers match the known {PLATFORM_LABELS[matched[0]]} pattern"
 
 
-def signature_prefill(header, groups):
-    """Starting point for MANUAL mode (AI off or unavailable), or None.
-    Items carry source 'computed'; the user confirms everything."""
+def _family_of(name, families):
+    """Longest known family pattern this column name carries (exact text; prefix
+    patterns end with a space, suffix patterns start with one)."""
+    best = None
+    for pat in families:
+        hit = name.startswith(pat) if pat.endswith(" ") else name.endswith(pat)
+        if hit and len(name) > len(pat) and (best is None or len(pat) > len(best)):
+            best = pat
+    return best
+
+
+def signature_prefill(header, cols):
+    """Starting point for MANUAL mode (AI off or unavailable), or None. Same shape as
+    an AI proposal: groups are pid -> {indices, item, origin}. The groups come from
+    the known format's exact column names; every other column is its own unresolved
+    group. Items carry source 'computed'; the user confirms everything."""
+    from .grouping import unmentioned_item
     matched = match_signatures(header)
     if not matched:
         return None
@@ -163,47 +177,42 @@ def signature_prefill(header, groups):
     known = KNOWN_COLUMNS.get(name, {})
     families = KNOWN_FAMILIES.get(name, {})
     assay = f"{sig['omics_type']} ({SOFTWARE[name]})"
+    groups, fam_pid = {}, {}
+    item = lambda **k: dict({"confidence": 0.9, "source": "computed", "audit_kind": None, "assay_label": None,
+                             "marks_rows_as_suspect": False}, **k)
+    pg_pos = max((i for i, h in enumerate(header) if h.startswith("PG.")), default=-1)
+    for i, col in enumerate(header):
+        if col in known:
+            role, label, extra = known[col]
+            groups[f"k{i}"] = {"indices": [i], "origin": "signature", "item": item(
+                role=role, label=label, evidence=f"Known {SOFTWARE[name]} column '{col}'.",
+                assay_label=assay if role == "value" else None, **extra)}
+            continue
+        pat = _family_of(col, families) if cols.is_numeric(i) else None
+        if pat is None and name == "diann_pg_matrix" and cols.is_numeric(i) and i > pg_pos:
+            pat = "__diann_samples__"
+        if pat is None:
+            groups[f"u{i}"] = {"indices": [i], "origin": "unmentioned", "item": unmentioned_item()}
+            continue
+        if pat not in fam_pid:
+            fam_pid[pat] = f"fam{len(fam_pid) + 1}"
+            label = families.get(pat, "protein group quantity")
+            groups[fam_pid[pat]] = {"indices": [], "origin": "signature", "item": item(
+                role="value", label=label, assay_label=assay,
+                evidence=(f"{SOFTWARE[name]} per-sample column family '{pat.strip()} ...'." if pat in families else
+                          "DIA-NN: sample columns are all columns after the fixed PG.* columns."))}
+        groups[fam_pid[pat]]["indices"].append(i)
     prop = {
-        "signature": name, "platform": PLATFORM_LABELS[name],
+        "signature": name, "platform": PLATFORM_LABELS[name], "groups": groups,
         "layout": {"value": "long" if name == "spectronaut_results" else "samples_in_columns",
                    "confidence": 0.9, "evidence": ev, "source": "computed"},
         "assays": [{"assay_label": assay, "omics_type": sig["omics_type"], "source_software": SOFTWARE[name],
                     "in_supported_scope": "yes", "scope_reason": "known quantified-omics export",
-                    "confidence": 0.9, "evidence": ev, "source": "computed"}],
-        "groups": {},
+                    "confidence": 0.9, "evidence": ev, "source": "computed", "feature_pids": []}],
     }
-    by_col = {c: g for g in groups for c in g["columns"]}
-    if sig["feature_id_column"] and sig["feature_id_column"] in by_col:
-        prop["feature_identity"] = {"group_ids": [by_col[sig["feature_id_column"]]["group_id"]], "composite": False,
-                                    "confidence": 0.9, "evidence": ev, "source": "computed"}
+    if sig["feature_id_column"] in header:
+        prop["assays"][0]["feature_pids"] = [f"k{header.index(sig['feature_id_column'])}"]
     elif name == "generic_feature_table":
-        prop["feature_identity"] = {"group_ids": [by_col["mz"]["group_id"], by_col["rt"]["group_id"]],
-                                    "composite": True, "confidence": 0.9, "source": "computed",
-                                    "evidence": ev + " Features are identified by m/z + retention time."}
-    for g in groups:
-        col = g["columns"][0]
-        if g["n_columns"] == 1 and col in known:
-            role, label, extra = known[col]
-            item = {"role": role, "label": label, "confidence": 0.9, "source": "computed",
-                    "evidence": f"Known {SOFTWARE[name]} column '{col}'."}
-            item.update(extra)
-            if role == "value":
-                item["assay_label"] = assay
-            prop["groups"][g["group_id"]] = item
-            continue
-        pat = (g.get("pattern") or {}).get("text")
-        if pat in families:
-            label = families[pat]
-            prop["groups"][g["group_id"]] = {
-                "role": "value", "label": label, "assay_label": assay,
-                "confidence": 0.9, "source": "computed",
-                "evidence": f"{SOFTWARE[name]} per-sample column family '{pat.strip()} ...'."}
-    if name == "diann_pg_matrix":
-        pg_pos = max(i for i, h in enumerate(header) if h.startswith("PG."))
-        for g in groups:
-            if g["type"] == "numeric" and min(g["indices"]) > pg_pos and g["group_id"] not in prop["groups"]:
-                prop["groups"][g["group_id"]] = {
-                    "role": "value", "label": "protein group quantity",
-                    "assay_label": assay, "confidence": 0.9, "source": "computed",
-                    "evidence": "DIA-NN: sample columns are all columns after the fixed PG.* columns."}
+        prop["assays"][0]["feature_pids"] = [f"k{header.index('mz')}", f"k{header.index('rt')}"]
+        prop["assays"][0]["evidence"] = ev + " Features are identified by m/z + retention time."
     return prop

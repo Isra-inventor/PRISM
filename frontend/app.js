@@ -41,7 +41,12 @@
   }
   const pct = (x) => (x == null ? "—" : `${Math.round(x * 100)}%`);
   const show = (node, on = true) => node.classList.toggle("hidden", !on);
-  const groupsById = () => Object.fromEntries((S.session?.groups || []).map((g) => [g.group_id, g]));
+  let _gbiSrc = null, _gbi = {};
+  const groupsById = () => {   // cached per groups array (every change replaces the array)
+    const src = S.session?.groups || [];
+    if (src !== _gbiSrc) { _gbiSrc = src; _gbi = Object.fromEntries(src.map((g) => [g.group_id, g])); }
+    return _gbi;
+  };
   const G = (gid) => groupsById()[gid];
   const D = (gid) => S.draft.groups[gid];
   const layout = () => S.draft?.layout?.value;
@@ -180,7 +185,7 @@
       S.session = body;
       prog.stop();
       show($("panel-upload"), false); show($("workspace")); show($("restart"));
-      $("ws-file").replaceChildren(el("b", { text: body.filename }), ` · ${body.n_rows.toLocaleString()} rows × ${body.n_columns.toLocaleString()} columns · ${body.groups.length} column groups`);
+      $("ws-file").replaceChildren(el("b", { text: body.filename }), ` · ${body.n_rows.toLocaleString()} rows × ${body.n_columns.toLocaleString()} columns`);
       renderParseNotes();
       await propose();
     } catch (err) {
@@ -266,6 +271,7 @@
   function renderAll(scroll) {
     renderStepper();
     renderLegend();
+    renderNameParts();
     renderPreview();
     renderGuide();
     renderSaw();
@@ -278,8 +284,12 @@
       class: [stepStatus(id), id === S.step ? "current" : "", needs.has(id) ? "needs" : ""].join(" ") },
       el("button", { type: "button", onclick: () => go(id), title: stepStatus(id).replace("_", " ") },
         el("b", { text: String(k + 1) }), el("span", { text: label })))));
-    const hint = S.draft.signature_hint, aiUsed = S.draft.ai.used;
-    $("ws-sig").textContent = (aiUsed ? "AI-assisted" : "Manual mode") + (hint ? ` · ${hint.charAt(0).toUpperCase() + hint.slice(1)}` : "");
+    const hint = S.draft.signature_hint, aiUsed = S.draft.ai.used, gr = S.draft.grouping || {};
+    const how = { ai: `grouped by the AI${gr.chunks > 1 ? ` in ${gr.chunks} chunks + 1 consolidation call` : ""}`,
+                  signature: "grouped from the known format",
+                  manual: S.session.groups.length < S.session.n_columns ? "grouped by you" : "not grouped yet: use shared name parts" }[gr.source] || "";
+    $("ws-sig").textContent = (aiUsed ? "AI-assisted" : "Manual mode") + ` · ${S.session.groups.length} groups, ${how}`
+      + (hint ? ` · ${hint.charAt(0).toUpperCase() + hint.slice(1)}` : "");
   }
 
   function go(step) {
@@ -572,7 +582,7 @@
       el("div", { class: "item-head" }, el("span", { class: "item-name", text: colsText(g) }), metaRow(it)),
       ctr,
       el("div", { class: "item-sub", text: it.hint || "" }), evidence(it.evidence), warnList(it.validation, it.claimed),
-      el("div", { class: "item-foot" }, reconsiderOne(gid)));
+      el("div", { class: "item-foot" }, reconsiderOne(gid), structureTools(gid)));
   }
   function hoverGroup(gid, on) {
     $("pv").querySelectorAll(`th[data-gid="${gid}"] .chip`).forEach((c) => c.style.outline = on ? "1px solid #fff" : "");
@@ -594,6 +604,119 @@
       if (cur(gid, "marks_rows_as_suspect") && (D(gid).flag_values || D(gid).value_counts) && cur(gid, "flagged_value") == null)
         throw new Error(`Choose which value of ${name} means ‘flagged’.`);
     }
+  }
+
+  // ------------------------------------------------------------ grouping: your decisions
+  // Groups are the AI's proposal (or the known format's, or yours). You can merge
+  // groups ("these are the same thing"), take columns out, or group columns that
+  // share a name part. Code applies only what you confirm here.
+  const CAP = 60;
+  function capped(gids, card) {
+    const key = `cap:${S.step}`;
+    const all = S.local[key] || gids.length <= CAP;
+    const shown = all ? gids : gids.slice(0, CAP);
+    return el("div", {}, el("div", { class: "items" }, shown.map(card)),
+      all ? null : el("button", { class: "linkbtn", type: "button", style: "margin-top:8px", text: `Show all ${gids.length} (${gids.length - CAP} more)`,
+        onclick: () => { S.local[key] = true; renderGuide(); } }));
+  }
+  async function structOp(path, body, label) {
+    let ok = false;
+    await busy(label, async () => {
+      try {
+        const r = await api(path, { session_id: S.session.session_id, ...body });
+        if (r.session) S.session = r.session;
+        if (r.draft) S.draft = r.draft;
+        S.local = { items: S.local.items && Object.fromEntries(Object.entries(S.local.items).filter(([g]) => S.draft.groups[g])) };
+        ok = true;
+      } catch (e) { S.local.error = e.message; }
+    });
+    renderAll();
+    return ok;
+  }
+  function groupName(gid) {
+    const g = G(gid), it = D(gid);
+    return `${it.label || g.columns[0]}${g.n_columns > 1 ? ` (${g.n_columns} columns)` : ""}`;
+  }
+  function structureTools(gid) {
+    const g = G(gid);
+    if (!g) return null;
+    const open = S.local.struct === gid;
+    if (!open) return el("button", { class: "linkbtn", type: "button", style: "margin-left:12px",
+      text: g.n_columns > 1 ? "Same thing as… / take columns out" : "Same thing as another group…",
+      onclick: () => { S.local.struct = gid; S.local.verdict = null; renderGuide(); } });
+    const others = S.session.groups.filter((x) => x.group_id !== gid).map((x) => x.group_id);
+    const near = focusGroups(S.step).filter((x) => x !== gid);
+    const opts = [...near, ...others.filter((x) => !near.includes(x))];
+    const sel = S.local.mergeWith && opts.includes(S.local.mergeWith) ? S.local.mergeWith : null;
+    const pick = select(opts, sel, (v) => { S.local.mergeWith = v; S.local.verdict = null; renderGuide(); },
+      { placeholder: "choose the group it is the same as…", labels: groupName });
+    const v = S.local.verdict;
+    const box = el("div", { class: "struct" },
+      el("div", { class: "disagree-head" }, el("strong", { text: "These are actually the same thing" })),
+      fieldBox("Same as", pick),
+      sel && aiReady() ? el("button", { class: "btn btn-sm", type: "button", text: "Ask the AI to check", onclick: async () => {
+        await busy("Asking the AI whether they are one family", async () => {
+          try { S.local.verdict = await api("/api/merge-check", { session_id: S.session.session_id, group_ids: [gid, sel] }); }
+          catch (e) { S.local.error = e.message; }
+        });
+        renderGuide();
+      } }) : null,
+      v ? el("div", { class: `notice ${v.agrees === false ? "accent" : ""}` },
+        v.agrees === true ? "The AI agrees: " : v.agrees === false ? "The AI does not think so: " : "", v.reason || v.comment || "") : null,
+      sel ? el("button", { class: "btn btn-sm btn-light", type: "button", style: "margin-left:6px", text: "Merge them",
+        onclick: () => structOp("/api/merge", { group_ids: [gid, sel] }, "Merging") }) : null);
+    if (g.n_columns > 1) {
+      S.local.take = S.local.take || {};
+      box.append(el("details", { class: "saw", open: g.n_columns <= 30 },
+        el("summary", { text: `Columns in this group (${g.n_columns}) — tick the ones that don't belong` }),
+        el("div", { class: "colpick" }, g.columns.slice(0, 400).map((c) => {
+          const cb = el("input", { type: "checkbox", checked: !!S.local.take[c] });
+          cb.addEventListener("change", () => { S.local.take[c] = cb.checked; });
+          return el("label", { class: "check" }, cb, c);
+        })),
+        el("button", { class: "btn btn-sm", type: "button", style: "margin:8px 12px", text: "Take ticked columns out",
+          onclick: () => {
+            const cols = Object.keys(S.local.take).filter((c) => S.local.take[c] && g.columns.includes(c));
+            if (!cols.length) { S.local.error = "Tick at least one column."; renderGuide(); return; }
+            structOp("/api/split", { group_id: gid, columns: cols }, "Taking columns out");
+          } })));
+    }
+    box.append(el("button", { class: "linkbtn", type: "button", text: "close", onclick: () => { S.local.struct = null; renderGuide(); } }));
+    return box;
+  }
+  function groupingTrouble() {
+    const d = S.draft, gr = d.grouping || {}, left = d.ai_ungrouped || [];
+    if (!(left.length || gr.consolidation_error) || !aiReady()) return null;
+    return el("div", { class: "notice accent" },
+      left.length ? el("div", {}, `The AI could not answer for ${left.length} column(s) (${(gr.failed_chunks || []).length} of ${gr.chunks} chunk(s)); `
+        + "they are unresolved single columns. ",
+        el("button", { class: "linkbtn", type: "button", text: "Ask the AI again for these columns",
+          onclick: async () => {
+            await busy("Asking the AI to group the remaining columns", async (pid) => {
+              try {
+                const r = await api("/api/reconsider", { session_id: S.session.session_id, group_ids: left, progress_id: pid,
+                  user_hint: "The AI could not answer for these columns earlier: group and label them." });
+                S.draft = r.draft; if (r.session) S.session = r.session; S.local = {};
+              } catch (e) { S.local.error = e.message; }
+            });
+            if (!S.local.error && gr.chunks > 1) await structOp("/api/consolidate", {}, "Joining families across chunks");
+            else renderAll();
+          } })) : null,
+      gr.consolidation_error ? el("div", {}, "Joining families across chunks failed (" + gr.consolidation_error.slice(0, 120) + "). ",
+        el("button", { class: "linkbtn", type: "button", text: "Retry joining chunks",
+          onclick: () => structOp("/api/consolidate", {}, "Asking the AI which groups are one family") })) : null);
+  }
+  function renderNameParts() {
+    const parts = S.draft?.name_parts || [];
+    const box = $("name-parts");
+    if (!box) return;
+    box.classList.toggle("hidden", !parts.length);
+    box.open = S.draft?.grouping?.source === "manual" || box.open;
+    $("name-parts-list").replaceChildren(...parts.map((p) => el("li", {},
+      el("code", { text: p.side === "prefix" ? `${p.text}…` : `…${p.text}` }),
+      el("span", { class: "item-sub", text: ` ${p.n} columns, now in ${p.n_groups} groups ` }),
+      el("button", { class: "linkbtn", type: "button", text: `group these ${p.n}`,
+        onclick: () => structOp("/api/group-columns", { columns: p.columns, reason: `columns sharing '${p.text}'` }, "Grouping columns") }))));
   }
 
   // ------------------------------------------------------------ steps
@@ -715,7 +838,7 @@
     if (!gids.length) body.push(el("p", { class: "q", text: "No annotation columns in this file." }));
     const flagged = gids.filter((g) => D(g).marks_rows_as_suspect);
     if (flagged.length) body.push(el("div", { class: "notice", text: `${flagged.length} column(s) mark rows as suspect. Choose which value means ‘flagged’; nothing is removed now.` }));
-    body.push(el("div", { class: "items" }, gids.map((g) => itemCard(g, { roles: ["feature_annotation", "feature_id", "sample_metadata", "value", "ignore"] }))));
+    body.push(capped(gids, (g) => itemCard(g, { roles: ["feature_annotation", "feature_id", "sample_metadata", "value", "ignore"] })));
     return {
       title: `${gids.length} column(s) describe the features. Are these right?`,
       question: "Each shows the AI's description in plain words. Edit any label, role or flag directly; everything is kept unless you untick it.",
@@ -844,7 +967,7 @@
       el("div", { class: "side-by-side" }, described, computed),
       litBlock(gid),
       evidence(it.evidence), warnList(it.validation, it.claimed),
-      el("div", { class: "item-foot" }, reconsiderOne(gid)));
+      el("div", { class: "item-foot" }, reconsiderOne(gid), structureTools(gid)));
   }
 
   function stepValues() {
@@ -859,7 +982,7 @@
     if (others.length) {
       body.push(el("div", { class: "section-label", text: "Other numeric columns" }));
       body.push(el("p", { class: "q", text: "Covariates and technical values (age, CD4 count, iron, scale factors…) usually describe samples. Change any of them if needed." }));
-      body.push(el("div", { class: "items" }, others.map((g) => itemCard(g, { roles: ["sample_metadata", "value", "feature_annotation", "ignore"] }))));
+      body.push(capped(others, (g) => itemCard(g, { roles: ["sample_metadata", "value", "feature_annotation", "ignore"] })));
     }
     return {
       title: blocks.length > 1 ? `${blocks.length} measurement blocks. What is each one?` : "Is this the measurement block?",
@@ -954,7 +1077,7 @@
     if (lay !== "samples_in_columns") {
       const gids = focusGroups("sample_info");
       if (!gids.length) body.push(el("p", { class: "q", text: "No sample information columns besides the sample ID." }));
-      body.push(el("div", { class: "items" }, gids.map((g) => itemCard(g, { roles: ["sample_metadata", "sample_id", "feature_annotation", "value", "ignore"] }))));
+      body.push(capped(gids, (g) => itemCard(g, { roles: ["sample_metadata", "sample_id", "feature_annotation", "value", "ignore"] })));
       return { title: `${gids.length} column(s) describe the samples. Are these right?`,
         question: "The audit kind says what the later steps use it for (subject, time point, batch…). Group-like variables are candidates only: PRISM never decides which variable is the research outcome.",
         body, disagree: [gids, "sample information columns"],
@@ -1126,6 +1249,7 @@
       el("h3", { text: spec.title }),
       spec.question ? el("p", { class: "q" }, spec.question) : null,
       qs.length && S.step !== "review" ? el("div", { class: "notice" }, el("b", { text: "The AI asks: " }), qs.map((q) => q.question).join(" ")) : null,
+      groupingTrouble(),
       note,
       el("div", { class: "guide-body" }, spec.body),
       spec.disagree ? disagreeBox(...spec.disagree) : null,

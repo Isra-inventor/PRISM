@@ -1,4 +1,4 @@
-"""Parsing, digests, grouping, signatures and validation rules (no AI)."""
+"""Parsing, digests, shared name parts, chunking, signatures and validation rules (no AI)."""
 
 import csv
 import io
@@ -8,23 +8,20 @@ import pytest
 
 from backend.format_detect import match_signatures, signature_hint, signature_prefill
 from backend.parsing import InputError, parse_bytes, parse_number
-from backend.profiling import profile_table
+from backend.profiling import chunk_columns, make_group, profile_table
 from backend.validation import timepoint_detail, validate_group
 from conftest import fixture_bytes
 
 
 def load(name):
     t = parse_bytes(name, fixture_bytes(name))
-    cols, groups, hints = profile_table(t)
-    return t, cols, groups, hints
+    cols, affixes, hints = profile_table(t)
+    return t, cols, affixes, hints
 
 
-def blocks(groups):
-    return {(g["pattern"] or {}).get("text"): g for g in groups if g["kind"] == "numeric_block"}
-
-
-def by_col(groups, name):
-    return next(g for g in groups if name in g["columns"])
+def col(cols, name, gid="g"):
+    """A one-column group record (tests build groups by hand; nothing groups automatically)."""
+    return make_group(cols, gid, [cols.labels.index(name)], "test")
 
 
 def make(header, rows, name="x.csv"):
@@ -71,56 +68,60 @@ def test_text_digest_hides_identifiers():
     assert {v["value"] for v in cols.digests[1]["values"]} == {"a", "b"}
 
 
-# ---------------------------------------------------------------- grouping
+# ---------------------------------------------------------------- facts, not grouping
 
-def test_maxquant_families():
-    _, cols, groups, _ = load("A_maxquant_proteinGroups.txt")
-    b = blocks(groups)
-    assert set(b) == {"Intensity ", "LFQ intensity ", "iBAQ ", "Peptides "}
-    assert all(g["n_columns"] == 6 for g in b.values())
-    assert b["LFQ intensity "]["sample_names"][0] == "S01"
-    assert b["Peptides "]["profile"]["integer_valued"] is True
-    assert by_col(groups, "Intensity")["kind"] == "single_column"   # the total column is not a sample
-
-
-def test_qc_and_blank_stay_in_the_sample_block():
-    _, _, groups, _ = load("C_mzmine_feature_table.csv")
-    g = by_col(groups, "blank_01 Peak area")
-    assert g["n_columns"] == 17 and "QC_01" in g["sample_names"]
-    assert by_col(groups, "row ID")["kind"] == "single_column"     # 'row ' is not a measurement family
+def test_shared_name_parts_are_facts_without_thresholds():
+    _, cols, aff, _ = load("A_maxquant_proteinGroups.txt")
+    a = aff[cols.labels.index("LFQ intensity S01")]
+    assert a["shared_prefix"] == [{"text": "LFQ intensity S0", "n_others": 5}]
+    _, cols, aff, _ = load("C_mzmine_feature_table.csv")
+    a = aff[cols.labels.index("QC_01 Peak area")]
+    assert a["shared_suffix"][0] == {"text": "_01 Peak area", "n_others": 1}      # longest first ...
+    assert {"text": " Peak area", "n_others": 16} in a["shared_suffix"]           # ... and every level
+    # no minimum length or group size: a one-letter overlap is still reported
+    _, cols, aff, _ = make(["Pt003_visit1", "004-w1", "P-7"], [["1", "2", "3"], ["4", "5", "6"]])
+    assert aff[0]["shared_prefix"] == [{"text": "P", "n_others": 1}]
+    assert aff[0]["shared_suffix"] == [{"text": "1", "n_others": 1}]
+    assert aff[2]["shared_suffix"] == []
 
 
-def test_samples_in_rows_blocks_and_covariates():
-    _, _, groups, hints = load("D_samples_in_rows_multiomics.csv")
-    nb = [g for g in groups if g["kind"] == "numeric_block"]
-    assert sorted(g["n_columns"] for g in nb) == [21, 25]           # metabolites(+iron) and proteins
-    for c in ("age", "CD4_count", "batch"):
-        assert by_col(groups, c)["kind"] == "single_column"
-    assert hints["rows_to_block_columns_ratio"] < 1
+def test_no_grouping_happens_in_profiling():
+    import backend.profiling as prof
+    for gone in ("build_groups", "_best_family", "_split_deviants", "_profile_clusters"):
+        assert not hasattr(prof, gone)
 
 
-def test_somascan_technical_columns_not_merged():
-    _, _, groups, _ = load("E_somascan_adat_like.csv")
-    feat = next(g for g in groups if g["n_columns"] == 1500)
-    assert feat["pattern"]["text"] == "seq."
-    for c in ("PlateScale_Scalar", "HybControlNormScale", "NormScale_20", "SlideId"):
-        assert c not in feat["columns"]
+def test_chunks_cover_every_column_and_keep_literal_families_together():
+    r = random.Random(3)
+    fams = ["LFQ intensity ", "iBAQ ", "Peptides ", "seq."]
+    labels = [f"{f}S{k:02d}" for f in fams for k in range(35)] + [f"{r.choice('ABC')}{r.randint(0, 999)}_x{k}" for k in range(40)]
+    r.shuffle(labels)
+    header = labels
+    _, cols, aff, _ = make(header, [["1"] * len(header), ["2"] * len(header)])
+    chunks = chunk_columns(range(len(header)), cols.labels, aff, 50)
+    flat = [i for c in chunks for i in c]
+    assert sorted(flat) == list(range(len(header))) and all(len(c) <= 50 for c in chunks)
+    for f in fams:  # 35 columns of one family fit in a 50-column chunk: they stay together
+        where = {k for k, c in enumerate(chunks) for i in c if cols.labels[i].startswith(f)}
+        assert len(where) == 1, f
+    assert chunk_columns(range(10), cols.labels, aff, 150) == [list(range(10))]   # small files: one call
 
 
-def test_deviant_split_and_fragpipe_families():
-    r = random.Random(0)
-    samples = ["Sample_01", "Sample_02", "Sample_03", "Sample_04"]
-    fams = [" Intensity", " MaxLFQ Intensity", " Spectral Count"]
-    header = ["Protein"] + [s + f for f in fams for s in samples]
-    rows = [[f"P{k}"] + [r.randint(0, 30) if "Count" in c else round(10 ** r.uniform(5, 8), 1) for c in header[1:]]
-            for k in range(30)]
-    _, _, groups, _ = make(header, rows)
-    assert {(g["pattern"] or {}).get("text") for g in groups if g["kind"] == "numeric_block"} == set(fams)
+def test_group_record_only_describes_a_given_grouping():
+    _, cols, _, _ = load("A_maxquant_proteinGroups.txt")
+    idx = [i for i, c in enumerate(cols.labels) if c.startswith("LFQ intensity ")]
+    g = make_group(cols, "g1", idx, "ai_proposed")
+    assert g["kind"] == "numeric_block" and g["pattern"] == {"side": "prefix", "text": "LFQ intensity S0"}
+    assert g["sample_names"][0] == "S01"          # the common text is cut back to a separator
+    mixed = make_group(cols, "g2", [cols.labels.index("Gene names"), cols.labels.index("Score")], "test")
+    assert mixed["kind"] == "column_group" and mixed["type"] == "mixed"
 
-    header = ["id"] + [f"conc_{i}" for i in range(8)]
-    rows = [[k] + [round(r.uniform(1, 9), 2) for _ in range(7)] + [round(r.uniform(1e5, 1e6), 1)] for k in range(30)]
-    _, _, groups, _ = make(header, rows)
-    assert by_col(groups, "conc_7")["origin"] == "split_from_family"
+
+def test_layout_hints_are_facts():
+    _, _, _, hints = load("D_samples_in_rows_multiomics.csv")
+    assert hints["rows_to_numeric_columns_ratio"] < 1
+    _, _, _, hints = load("A_maxquant_proteinGroups.txt")
+    assert hints["rows_to_numeric_columns_ratio"] >= 1
 
 
 # ---------------------------------------------------------------- signatures
@@ -132,15 +133,18 @@ def test_signature_requires_all_columns():
 
 
 def test_maxquant_prefill_is_manual_starting_point():
-    t, cols, groups, _ = load("A_maxquant_proteinGroups.txt")
-    p = signature_prefill(t["header"], groups)
-    g = p["groups"]
-    rev, con = g[by_col(groups, "Reverse")["group_id"]], g[by_col(groups, "Potential contaminant")["group_id"]]
+    t, cols, _, _ = load("A_maxquant_proteinGroups.txt")
+    p = signature_prefill(t["header"], cols)
+    owner = {i: pg for pg in p["groups"].values() for i in pg["indices"]}
+    assert sorted(owner) == list(range(len(t["header"])))                   # every column exactly once
+    item = lambda c: owner[t["header"].index(c)]["item"]
+    rev, con = item("Reverse"), item("Potential contaminant")
     assert rev["role"] == con["role"] == "feature_annotation"
     assert rev["marks_rows_as_suspect"] is True and con["marks_rows_as_suspect"] is True
-    lfq, pep = g[by_col(groups, "LFQ intensity S01")["group_id"]], g[by_col(groups, "Peptides S01")["group_id"]]
-    assert lfq["role"] == pep["role"] == "value" and "block_role" not in lfq   # described, never ranked
-    assert all(it["source"] == "computed" for it in g.values())
+    lfq, pep = owner[t["header"].index("LFQ intensity S01")], owner[t["header"].index("Peptides S01")]
+    assert lfq["item"]["role"] == pep["item"]["role"] == "value" and "block_role" not in lfq["item"]
+    assert len(lfq["indices"]) == 6 and owner[t["header"].index("Intensity")] is not owner[t["header"].index("Intensity S01")]
+    assert all(pg["item"]["source"] in ("computed", "none") for pg in p["groups"].values())
     assert p["layout"]["value"] == "samples_in_columns"
     assert p["assays"][0]["in_supported_scope"] == "yes"
 
@@ -159,18 +163,17 @@ def test_mzmine_headers_do_not_match_v1_signature():
 # ---------------------------------------------------------------- validation rules (structure only)
 
 def test_value_role_on_text_is_contradicted_and_id_checks():
-    t, cols, groups, _ = load("D_samples_in_rows_multiomics.csv")
-    assert validate_group({"role": "value"}, by_col(groups, "visit"), cols)["status"] == "contradicted"
-    proteins = next(g for g in groups if g["n_columns"] == 25)
+    t, cols, _, _ = load("D_samples_in_rows_multiomics.csv")
+    assert validate_group({"role": "value"}, col(cols, "visit"), cols)["status"] == "contradicted"
+    proteins = make_group(cols, "p", [i for i, c in enumerate(cols.labels) if c[:1] in "PQO" and c[1:].isdigit()], "test")
     assert validate_group({"role": "value"}, proteins, cols)["status"] == "ok"
-    subj = by_col(groups, "subject_id")
-    assert validate_group({"role": "sample_id"}, subj, cols)["status"] == "warning"   # repeats: warning only
-    assert validate_group({"role": "sample_id"}, by_col(groups, "sample_id"), cols)["status"] == "ok"
+    assert validate_group({"role": "sample_id"}, col(cols, "subject_id"), cols)["status"] == "warning"   # repeats
+    assert validate_group({"role": "sample_id"}, col(cols, "sample_id"), cols)["status"] == "ok"
 
 
 def test_closed_fields_must_be_in_their_sets():
-    t, cols, groups, _ = load("D_samples_in_rows_multiomics.csv")
-    visit = by_col(groups, "visit")
+    t, cols, _, _ = load("D_samples_in_rows_multiomics.csv")
+    visit = col(cols, "visit")
     assert validate_group({"role": "sample_metadata", "audit_kind": "timepoint"}, visit, cols)["status"] == "ok"
     assert validate_group({"role": "sample_metadata", "audit_kind": "foo"}, visit, cols)["status"] == "contradicted"
     assert validate_group({"role": "descriptor"}, visit, cols)["status"] == "contradicted"
@@ -180,17 +183,6 @@ def test_closed_fields_must_be_in_their_sets():
 
 
 def test_timepoint_detail_is_computed():
-    t, cols, groups, _ = load("D_samples_in_rows_multiomics.csv")
-    assert timepoint_detail(cols.digests[by_col(groups, "visit")["indices"][0]]).startswith("ordinal label")
-    assert timepoint_detail(cols.digests[by_col(groups, "age")["indices"][0]]) == "numeric"
-
-
-def test_out_of_scope_tables_group_into_one_block():
-    """Sample names carrying a design code (Stool.D0.A, Stool.D7.A, ...) are one block,
-    not one family per day; sparse count columns are not split as deviants."""
-    _, _, groups, _ = load("H_16S_otu_table.tsv")
-    nb = [g for g in groups if g["kind"] == "numeric_block"]
-    assert len(nb) == 1 and nb[0]["n_columns"] == 12
-    _, _, groups, _ = load("I_methylation_beta.csv")
-    nb = [g for g in groups if g["kind"] == "numeric_block"]
-    assert len(nb) == 1 and nb[0]["n_columns"] == 12
+    t, cols, _, _ = load("D_samples_in_rows_multiomics.csv")
+    assert timepoint_detail(cols.digests[cols.labels.index("visit")]).startswith("ordinal label")
+    assert timepoint_detail(cols.digests[cols.labels.index("age")]) == "numeric"

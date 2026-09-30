@@ -60,10 +60,12 @@ The server terminal prints every AI step as `[PRISM AI] …` lines, including th
 ## How it works
 
 ```
-upload ─► parse (strings only, report oddities) ─► profile every column ─► group columns
+upload ─► parse (strings only, report oddities) ─► facts per column: statistics + shared name parts
       ─► known-format signature (MaxQuant, DIA-NN, Spectronaut, FragPipe, mz/rt) → a one-line hint
-      ─► AI labels each group from a statistics digest, briefed by backend/briefing.md (optional)
-      ─► structural checks; contradicted claims become "unresolved"
+      ─► the AI GROUPS the columns and labels each group, briefed by backend/briefing.md
+         (wide files: chunks of 150 columns + one consolidation call)
+      ─► code applies the grouping only where columns / ids exist; every column ends up in exactly
+         one group; structural checks; contradicted claims become "unresolved"
       ─► 8-step wizard: every proposal is editable in place; "Disagree?" re-asks the AI with your note
       ─► step 4: Europe PMC literature search; the AI describes each value block from the papers,
          with citations checked word for word
@@ -71,14 +73,15 @@ upload ─► parse (strings only, report oddities) ─► profile every column 
 ```
 
 **Principles, enforced in code:**
-- **Deterministic first.** Parsing, profiling, grouping, signatures and every structural check are plain code.
-  The AI only interprets meaning from names and computed statistics.
+- **Facts are code, judgment is proposed.** Parsing, statistics, the shared-name-part facts, signatures and every
+  structural check are plain code. Which columns belong together and what they are is judgment: the AI proposes
+  it (or you decide it), and code only checks and applies it.
 - **The AI proposes, code checks, you confirm.** Nothing counts until you confirm it. Each item carries provenance:
   `computed`, `ai_proposed_confirmed`, `ai_proposed_corrected` or `user_set`. The wizard shows this as a badge.
   A known-format signature is only a hint: it is written into the AI digest (and recorded as `signature_hint`
   in the schema). When the AI is off or unavailable, it gives the manual-mode starting point instead.
 - **Closed fields vs open labels.** Code branches only on closed fields, served by `/api/vocabulary`: `layout`,
-  `role`, `block_role`, `audit_kind` (for sample information: subject_id, timepoint, batch, run_order,
+  `role`, `audit_kind` (for sample information: subject_id, timepoint, batch, run_order,
   technical_replicate, sample_type, group, covariate, other), yes / no / not sure, and the booleans `keep`,
   `marks_rows_as_suspect`, `is_study_sample`. Everything descriptive is free text in plain words: omics type,
   source software, assay label, and the label of every column, value block and sample. The AI says what it
@@ -90,34 +93,55 @@ upload ─► parse (strings only, report oddities) ─► profile every column 
 - **No value is modified.** The outputs are re-oriented (transposed or pivoted) and split into tables. Values are copied
   exactly; only missing-value tokens become empty cells (the tokens seen are listed in the parse report).
   No sample or feature is ever removed. QC, blank and pool samples, and decoy or contaminant rows, are labelled and kept.
-- **Privacy.** The AI gets a digest: layout hints, and per column group its name pattern, a few column names and aggregated statistics.
+- **Privacy.** The AI gets a digest: layout hints, and per column its name, position, computed statistics and shared name parts.
   It never gets raw rows. Example values are only sent for low-cardinality text columns (≤ 20 distinct values),
   and never for identifier-like ones (≥ 50 % distinct). For text columns the digest also gives `value_shapes`, the format of the
   values with digits masked (`cg########`, `P#####`, `OTU_##`): a shared prefix names the ID system, never an individual entry.
   Setting `AI_SEND_EXAMPLE_VALUES=false` withholds both. "What the AI saw" in the page shows the exact digest.
 
 ### The AI briefing (`backend/briefing.md`)
-Loaded into the system prompt on every call: what PRISM is, the AI's job (label pre-built groups, quote the
+Loaded into the system prompt on every call: what PRISM is, the AI's job (group the columns and label the groups, quote the
 digest's computed facts as evidence, say "unresolved" or ask rather than guess), what the later audit steps
 need (subject IDs, time points, batch / run order / plate, technical replicates, QC / blank / pool samples,
 group-like variables, columns that mark rows as suspect), and situations to watch for (clinical columns next to
 features, several measurement families side by side, technical scale factors, tables outside the current scope).
 Edit it to brief the model differently; `prompt_version` in `backend/schema.py` goes into the cache key and the log.
 
-### Column grouping (`backend/profiling.py`)
-1. Numeric columns sharing a name prefix/suffix (≥ 3 columns, ≥ 3 characters) form a family, e.g. `LFQ intensity S01…`.
-   Two checks stop mixed groups:
-   - Families that swallow a more specific family are rejected: `X Intensity` never absorbs `X MaxLFQ Intensity`.
-   - Per-sample slices are rejected: suffix ` S01` across `Intensity S01`, `iBAQ S01`… is not a family.
-2. Columns whose profile deviates strongly from their family are split out: the typical value is far off,
-   or the whole-number / missing-value pattern differs. This keeps age, CD4 count or a scale factor out of a feature block.
-   Columns named like QC / blank / pool samples stay in their family. A column must be at least one decade away
-   from the family's typical value, so sparse count columns (e.g. OTU counts) are not split by chance.
-   Sample names that carry a design code (`Stool.D0.A`, `Stool.D7.A`, `Stool.D14.A`) stay one block, not one family per day.
-3. Remaining numeric columns are clustered by typical value, keeping clusters of ≥ 5 columns; the rest become singletons.
-   Text columns are singletons.
-4. The AI may suggest splitting a column out of a block (e.g. `iron` among metabolites), in the first proposal or
-   when you disagree. The code checks the columns exist and applies the split. The split then shows in the wizard for you to confirm.
+### Column grouping: an AI proposal (`ai.py`, `grouping.py`)
+Grouping used to be done by engineered rules (name families of at least 3 columns, deviants a decade away, profile
+clusters of at least 5). Those were judgment dressed up as code, and they produced only singletons on messy sample
+names (`Pt003_visit1`, `004-w1`), which is exactly where grouping matters most. Now:
+1. **Facts only, in code** (`profiling.py`). Per column: its statistics, and the name parts it shares with other
+   columns: for every other column, the longest common prefix and suffix, summarised as levels with counts, e.g.
+   `QC_01 Peak area` shares the suffix `_01 Peak area` with 1 other column, `1 Peak area` with 4 and ` Peak area`
+   with 16. No threshold, no minimum group size; this describes the names and groups nothing.
+2. **The AI groups and labels.** It gets the per-column digests and returns `groups[]`, each with its own `columns`
+   list plus role, label and audit kind, and optionally `propose_merge` and `suggest_split`.
+3. **Chunking is infrastructure.** `GROUPING_CHUNK_SIZE` (default 150, `PRISM_GROUPING_CHUNK_SIZE`) is a prompt size
+   limit, not a claim about family size. Wider files are sent in chunks. Columns that share literal name parts are
+   placed in the same chunk where possible: cut points are chosen by a small DP that prefers one more call over
+   cutting through a long shared name part. Then one **consolidation** call gets a compact summary of every
+   proposed group (label, size, first and last columns, shared name part, one line of statistics; no column data)
+   and returns `cross_chunk_merges`. Files at or under the limit make a single call and skip consolidation.
+4. **Code only checks and applies** (`grouping.py`):
+   - a column named in `groups[].columns` that is not in that call's digest is rejected, like an invalid group id;
+   - a column claimed twice stays in its first group, and the second claim is rejected;
+   - **every column the AI did not mention becomes its own `unresolved` group**, so nothing is ever silently dropped;
+   - `propose_merge`, `cross_chunk_merges` and `suggest_split` are applied only when every group id they name
+     exists, and otherwise are rejected and logged.
+5. **You decide in the wizard.** Every group card has **"Same thing as…"**: pick another group, optionally
+   **ask the AI to check**, then **merge them**. Multi-column groups also let you tick columns and **take them out**.
+   "Disagree? Tell the AI what's wrong" can now regroup as well as relabel. **Shared name parts**, under the table,
+   lists the literal parts several columns share, with a "group these N" button: that is how you group by hand when
+   the AI is off. Known formats (MaxQuant, DIA-NN…) give the manual-mode groups from their exact column names.
+6. **If a call fails** (quota, timeouts), that chunk's columns stay as unresolved single columns and the page offers
+   "Ask the AI again for these columns" and "Retry joining chunks".
+
+**Cost and latency.** A file under 150 columns is one call, as before. A wide file costs one call per chunk plus
+one consolidation call: e.g. SomaScan-scale 1,510 columns = 11 + 1 calls (about 2 minutes with Gemini flash-lite
+in a test run); 2,045 columns = 15 + 1. On a free-tier key this can hit the per-minute or daily quota. Every call
+is cached on disk, keyed by file, prompt version, models and the exact chunk contents, so re-uploading the same file
+costs nothing. A request slower than `PRISM_AI_TIMEOUT_S` (default 120 s) moves on to the next model.
 
 ### Wizard steps
 Every proposal is shown as editable fields straight away: closed fields are dropdowns, labels are text inputs. There
@@ -191,11 +215,16 @@ finalization is logged to `backend/logs/<session_id>.jsonl`, with timestamps, th
 |---|---|---|
 | GET | `/api/vocabulary` | All vocabularies, definitions and history questions (the single source of truth) |
 | GET | `/api/health` | AI provider status |
-| POST | `/api/upload` | multipart `file` → session, parse report, preview, groups with profiles and histograms |
+| POST | `/api/upload` | multipart `file` → session, parse report, preview (groups come with the proposal) |
 | POST | `/api/propose` | `{session_id, ai}` → the draft (validated AI proposal, or the manual starting point) and the exact digest(s) sent |
 | POST | `/api/confirm-step` | `{session_id, step_id, decision}` → updated draft; changing the layout triggers a re-proposal |
 | POST | `/api/literature` | `{session_id, queries?}` → searches Europe PMC and adds cited suggestions per value block |
-| POST | `/api/reconsider` | `{session_id, group_ids, user_hint}` → re-asks the AI about these groups with your note (splits it suggests are applied) |
+| POST | `/api/reconsider` | `{session_id, group_ids, user_hint}` → re-asks the AI about these groups' columns with your note (it may relabel, regroup, split or merge) |
+| POST | `/api/merge-check` | `{session_id, group_ids, user_hint}` → the AI's opinion on "these are the same thing"; nothing is applied |
+| POST | `/api/merge` | `{session_id, group_ids}` → your decision: merge these groups |
+| POST | `/api/split` | `{session_id, group_id, columns}` → your decision: take these columns out, one group each |
+| POST | `/api/group-columns` | `{session_id, columns}` → your decision: these columns are one group (e.g. a shared name part) |
+| POST | `/api/consolidate` | `{session_id}` → retry the cross-chunk consolidation call |
 | POST | `/api/metadata-upload` | multipart `session_id`, `file` → matching report |
 | POST | `/api/finalize` | → schema, artifact list, integrity flags |
 | GET | `/api/export/{session_id}/{artifact}` | download an output file |
@@ -210,7 +239,12 @@ python -m pytest -q
 The LLM is always mocked in the tests, including deliberately wrong proposals, and Europe PMC is replaced by a fake
 (`tests/fake_europepmc.py`, same response format, invented test papers). The tests assert structure (role, keep, audit kind, `marks_rows_as_suspect`, `is_study_sample`), never label wording. They cover:
 - parsing and the parse report;
-- digests and grouping (incl. the 16S and methylation tables);
+- facts: shared name parts (checked against brute force), chunking that keeps literal families together;
+- grouping as a proposal (`test_grouping.py`): every column in exactly one group for every fixture, an incomplete
+  AI answer (unmentioned columns become unresolved single columns), double claims and unknown columns rejected,
+  `propose_merge` / `suggest_split` applied only with valid ids, your merge-check / merge / split, a 2,040-column
+  file with messy sample names (15 chunk calls + consolidation, full coverage, second upload fully cached), and
+  recovery after a failed chunk and a failed consolidation;
 - signatures as hint and manual starting point;
 - the structural checks: hallucinated group id, value role on a text column, a closed field outside its set;
 - full API flows for fixtures A–F (MaxQuant, DIA-NN, MZmine, samples-in-rows multi-omics, SomaScan-like, long unique/duplicate);
@@ -237,11 +271,11 @@ To regenerate the fixtures: `python tests/fixtures/make_fixtures.py`.
 
 ```
 backend/   main.py (API) · schema.py (vocabulary) · config.py (scope) · briefing.md (AI briefing)
-           parsing.py · profiling.py · format_detect.py (signatures)
+           parsing.py · profiling.py (facts) · format_detect.py (signatures) · grouping.py (applies proposals)
            validation.py · ai.py · literature.py (Europe PMC RAG) · llm_providers.py · mock_llm.py
            workflow.py (draft, steps) · outputs.py
            session_log.py · envfile.py · check_ai.py
 frontend/  index.html (home + 3D prism) · tool.html + app.js (wizard) · style.css · home.js · fonts/
-tests/     fixtures/ (A–F, H 16S, I methylation, messy file) · fake_europepmc.py · test_deterministic.py
+tests/     fixtures/ (A–F, H 16S, I methylation, messy file) · fake_europepmc.py · test_deterministic.py · test_grouping.py
            test_flow.py · test_literature.py · test_real_api.py
 ```

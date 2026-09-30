@@ -8,8 +8,8 @@ written by the AI (or the user) and are never enumerated here.
 
 from .config import SCOPE_DESCRIPTION
 
-SCHEMA_VERSION = "0.3.0"
-PROMPT_VERSION = "step0-v3"
+SCHEMA_VERSION = "0.3.2"
+PROMPT_VERSION = "step0-v3.2.3"
 UNRESOLVED = "unresolved"
 
 VOCABULARY = {

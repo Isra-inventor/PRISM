@@ -42,6 +42,7 @@ from typing import List, Optional
 from pydantic import BaseModel, ValidationError
 
 from . import llm_providers as llm
+from .profiling import FILE_EXTENSIONS
 from .schema import PROMPT_VERSION, VOCABULARY
 
 EUROPEPMC_URL = os.environ.get("PRISM_EUROPEPMC_URL", "https://www.ebi.ac.uk/europepmc/webservices/rest").rstrip("/")
@@ -240,9 +241,22 @@ def _term(x):
 
 
 def block_name(label, pattern):
-    """Short measurement name of a block: its column-name pattern, else the label's first phrase."""
-    if pattern and len(pattern.strip(" _.-")) >= 3:
-        return _term(pattern.strip(" _.-"))
+    """Short measurement name of a block: the text its column names share, cut back to
+    the measurement part ('LFQ intensity S0' -> 'LFQ intensity'), else the label's
+    first phrase."""
+    if isinstance(pattern, dict) and pattern.get("text"):
+        txt, side = pattern["text"], pattern.get("side", "prefix")
+        if side == "prefix":
+            txt = re.split(r"\d", txt, maxsplit=1)[0]
+            if txt and txt[-1].isalnum() and re.search(r"[\s_.\-]", txt):
+                txt = re.sub(r"[^\s_.\-]*$", "", txt)
+        else:
+            txt = re.split(r"\d", txt)[-1]
+            if txt and txt[0].isalnum() and re.search(r"[\s_.\-]", txt):
+                txt = re.sub(r"^[^\s_.\-]*", "", txt)
+        txt = txt.strip(" _.-")
+        if len(txt) >= 3 and "." + txt.lower() not in FILE_EXTENSIONS:
+            return _term(txt)
     return _term(re.split(r"[,;(]| apparently ", label or "")[0])[:60]
 
 

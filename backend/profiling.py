@@ -1,25 +1,23 @@
-"""Column digests (spec 3.2), column grouping (3.3) and layout hints (3.4).
+"""Facts about the table: column digests, shared name parts, layout hints.
 
-All of this is deterministic. The AI later labels the groups built here; it
-can never create, merge or split them itself.
+Everything here is computed, not judged. Which columns belong together is a
+judgment and is proposed by the AI (ai.py) or by you; grouping.py only applies
+such proposals. The one number that shapes the AI calls, the chunk size, is a
+prompt size limit (config.GROUPING_CHUNK_SIZE), not a claim about families.
 """
 
 from __future__ import annotations
 
+import bisect
 import math
 import re
-from collections import Counter, defaultdict
+from collections import Counter
 
 from .parsing import cell, column_labels, is_missing, parse_number
 
 TEXT_EXAMPLES_MAX_UNIQUE = 20
-MIN_GROUP_SIZE = 3
-MIN_PATTERN_CHARS = 3
-MIN_PROFILE_CLUSTER = 5
 HIST_BINS = 30
 FILE_EXTENSIONS = (".raw", ".mzml", ".mzxml", ".d", ".wiff", ".wiff2", ".dia", ".mgf")
-_TOKEN = re.compile(r"[A-Za-z0-9]+")
-_SUBTOKEN = re.compile(r"[A-Za-z]+|[0-9]+")
 _DATE = re.compile(r"^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}([ T]\d{1,2}:\d{2}(:\d{2})?)?$|^\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}$")
 
 
@@ -179,111 +177,6 @@ def value_shapes(counts, top=3):
     return [{"shape": s[:40], "count": c} for s, c in shapes.most_common(top)]
 
 
-def _split_points(name, regex):
-    return [(m.start(), m.end()) for m in regex.finditer(name)]
-
-
-def _candidates(name):
-    """Prefix / suffix candidates at token boundaries (non-alphanumeric separators
-    and letter/digit transitions). Returns [(side, pattern)]."""
-    out = set()
-    spans = _split_points(name, _SUBTOKEN)
-    for k in range(1, len(spans)):
-        pre = name[:spans[k][0]]
-        if len(pre.strip()) >= MIN_PATTERN_CHARS:
-            out.add(("prefix", pre))
-        suf = name[spans[k - 1][1]:]
-        if len(suf.strip()) >= MIN_PATTERN_CHARS:
-            out.add(("suffix", suf))
-    return out
-
-
-def _residual(name, side, pattern):
-    r = name[len(pattern):] if side == "prefix" else name[:len(name) - len(pattern)]
-    return r.strip(" _.-:|/\\")
-
-
-def _ntok(s):
-    return len(_TOKEN.findall(s))
-
-
-_SAMPLE_WORDS = re.compile(r"(?i)(^|[^a-z])(qc|pool|pooled|blank|buffer|calib\w*|std|standard)([^a-z]|$)")
-
-
-def _best_family(names_by_idx, compatible=None):
-    """Pick the best name family among the given columns, or None.
-
-    Largest family first (ties: longer pattern). A candidate is skipped when it
-    is really a per-sample slice across families (its variable parts are other
-    families' patterns) or when it swallows a more specific family whose sample
-    names re-appear in the rest (e.g. ' Intensity' vs ' MaxLFQ Intensity')."""
-    cands = defaultdict(set)
-    for i, name in names_by_idx.items():
-        for c in _candidates(name):
-            cands[c].add(i)
-    cands = {c: m for c, m in cands.items() if len(m) >= MIN_GROUP_SIZE}
-    pattern_words = {pat.strip(" _.-:|/\\").lower() for (_, pat) in cands}
-    def at_separator(side, pat):
-        edge = pat[-1] if side == "prefix" else pat[0]
-        return not edge.isalnum()
-    ordered = sorted(cands.items(), key=lambda kv: (len(kv[1]), at_separator(*kv[0]), len(kv[0][1].strip())),
-                     reverse=True)
-    for (side, pat), members in ordered:
-        res = [_residual(names_by_idx[i], side, pat) for i in members]
-        if any(not r for r in res):
-            continue
-        if re.search(r"\d", pat) and sum(1 for r in res if r.lower() in pattern_words) >= 0.5 * len(res):
-            continue  # a per-sample slice, e.g. suffix ' S01' over 'Intensity S01', 'iBAQ S01', ...
-        if _mixes_subfamilies(members, names_by_idx, cands, (side, pat)):
-            continue
-        if compatible is not None and not compatible(members):
-            continue
-        return side, pat, members
-    return None
-
-
-_DESIGN_CODE = re.compile(r"(?i)[a-z]{0,5}[\s_.\-]?\d+")
-
-
-def _design_code_only(parent, sub):
-    """True if the sub-family pattern differs from the parent only by a short
-    code with a number (a day, visit, batch or plate such as 'D7', 'T2', 'B03'):
-    those are parts of the sample names, not another measurement family."""
-    (s1, p1), (s2, p2) = parent, sub
-    if s1 != s2:
-        return False
-    if s1 == "prefix" and p2.startswith(p1):
-        diff = p2[len(p1):]
-    elif s1 == "suffix" and p2.endswith(p1):
-        diff = p2[:len(p2) - len(p1)]
-    else:
-        return False
-    return bool(_DESIGN_CODE.fullmatch(diff.strip(" _.-:|/\\")))
-
-
-def _mixes_subfamilies(members, names_by_idx, cands, parent=None):
-    """True if a smaller family inside `members` has (letter-containing) sample
-    names that all re-appear among the other members: the candidate mixes
-    several measurement families of the same samples."""
-    for (s2, p2), m2 in cands.items():
-        if not m2 < members:
-            continue
-        if parent is not None and _design_code_only(parent, (s2, p2)):
-            continue
-        sample_names = {_residual(names_by_idx[i], s2, p2) for i in m2}
-        if not all(re.search(r"[A-Za-z]", n) for n in sample_names):
-            continue
-        others = [" ".join(_TOKEN.findall(names_by_idx[i])) for i in members - m2]
-        hits = 0
-        for sn in sample_names:
-            key = " ".join(_TOKEN.findall(sn))
-            if key and any((" " + key + " ") in (" " + o + " ") for o in others):
-                hits += 1
-        if hits == len(sample_names):
-            return True
-    return False
-
-
 def strip_rule(names, pattern=None):
     """What to strip from column names to get sample names: the family pattern
     itself, plus a shared directory path and a shared file extension (.raw,
@@ -339,68 +232,165 @@ def apply_rule(name, rule):
     return name
 
 
-# ---------------------------------------------------------------- grouping
+# ---------------------------------------------------------------- shared name parts (a fact, not a grouping)
 
-def _col_profile_keys(cols, i):
-    d = cols.digests[i]
-    med = d.get("median")
-    pos = [v for v in cols.nums(i) if v > 0]
-    lmed = math.log10(sorted(pos)[len(pos) // 2]) if pos else None
-    return {"lmed": lmed, "int": bool(d.get("integer_valued")), "na": d.get("frac_na", 0.0), "median": med}
-
-
-def _split_deviants(cols, members, exempt_sample_words=False):
-    """Split out columns whose profile deviates strongly from their name family.
-    In name families, columns named like QC / blank / pool samples are kept:
-    those are samples that are expected to look different."""
-    if len(members) < 5:
-        return members, []
-    prof = {i: _col_profile_keys(cols, i) for i in members}
-    lm = sorted(p["lmed"] for p in prof.values() if p["lmed"] is not None)
-    med = lm[len(lm) // 2] if lm else None
-    mad = sorted(abs(x - med) for x in lm)[len(lm) // 2] if lm else 0
-    scale = max(1.4826 * mad, 0.1)
-    n_int = sum(1 for p in prof.values() if p["int"])
-    majority_int = n_int >= 0.8 * len(members)
-    majority_float = n_int <= 0.2 * len(members)
-    nas = sorted(p["na"] for p in prof.values())
-    med_na = nas[len(nas) // 2]
-    keep, out = [], []
-    for i in members:
-        p = prof[i]
-        reasons = []
-        if exempt_sample_words and _SAMPLE_WORDS.search(cols.header[i]):
-            keep.append(i)
-            continue
-        if med is not None and p["lmed"] is not None and abs(p["lmed"] - med) > max(3 * scale, 1.0):
-            reasons.append("typical value far from the rest of the family")
-        if (majority_int and not p["int"]) or (majority_float and p["int"]):
-            reasons.append("integer / non-integer differs from the rest of the family")
-        if abs(p["na"] - med_na) > 0.5:
-            reasons.append("share of missing values differs strongly")
-        (out if reasons else keep).append((i, reasons) if reasons else i)
-    if len(keep) < MIN_GROUP_SIZE:
-        return members, []
-    return keep, out
+def _lcp(a, b):
+    k, n = 0, min(len(a), len(b))
+    while k < n and a[k] == b[k]:
+        k += 1
+    return k
 
 
-def _profile_clusters(cols, idxs):
-    """Cluster name-less numeric columns by typical value (gap > 1 decade) and
-    integer flag. Only clusters of >= MIN_PROFILE_CLUSTER columns are kept."""
-    clusters = []
-    for is_int in (False, True):
-        sub = [(k["lmed"], i) for i in idxs for k in [_col_profile_keys(cols, i)]
-               if k["int"] == is_int and k["lmed"] is not None]
-        sub.sort()
-        cur = []
-        for lmed, i in sub:
-            if cur and lmed - cur[-1][0] > 1.0:
-                clusters.append([j for _, j in cur])
-                cur = []
-            cur.append((lmed, i))
-        if cur:
-            clusters.append([j for _, j in cur])
-    return [c for c in clusters if len(c) >= MIN_PROFILE_CLUSTER]
+def _count_with_prefix(sorted_names, p):
+    """How many names start with p (binary search on the sorted list)."""
+    return bisect.bisect_left(sorted_names, p + "\U0010ffff") - bisect.bisect_left(sorted_names, p)
+
+
+def _shared_levels(names):
+    """For each name: its longest common prefix with EVERY other name, summarised as
+    levels [(text, n_others)] from longest to shortest: how many other names share at
+    least that much. Sorted names, the LCP of neighbours, and nearest-smaller links,
+    so each name costs O(number of levels). No threshold, no minimum group size."""
+    n = len(names)
+    order = sorted(range(n), key=lambda i: names[i])
+    srt = [names[i] for i in order]
+    adj = [_lcp(srt[k], srt[k + 1]) for k in range(n - 1)]   # adj[k]: between sorted k and k+1
+    m = len(adj)
+    prev_smaller, next_smaller, stack = [-1] * m, [m] * m, []
+    for k in range(m):
+        while stack and adj[stack[-1]] >= adj[k]:
+            stack.pop()
+        prev_smaller[k] = stack[-1] if stack else -1
+        stack.append(k)
+    stack = []
+    for k in range(m - 1, -1, -1):
+        while stack and adj[stack[-1]] >= adj[k]:
+            stack.pop()
+        next_smaller[k] = stack[-1] if stack else m
+        stack.append(k)
+    out = [None] * n
+    for pos, i in enumerate(order):
+        counts = Counter()
+        j = pos - 1                      # names left of pos: LCP = min(adj[q..pos-1])
+        while j >= 0 and adj[j] > 0:
+            counts[adj[j]] += j - prev_smaller[j]
+            j = prev_smaller[j]
+        j = pos                          # names right of pos: LCP = min(adj[pos..q-1])
+        while j < m and adj[j] > 0:
+            counts[adj[j]] += next_smaller[j] - j
+            j = next_smaller[j]
+        levels, total = [], 0
+        for length in sorted(counts, reverse=True):
+            total += counts[length]
+            levels.append({"text": srt[pos][:length], "n_others": total})
+        out[i] = levels
+    return out
+
+
+def shared_affixes(labels):
+    """Per column: the prefixes and suffixes it shares with other column names, each
+    with how many other columns share it (longest first). This describes the names;
+    it does not group anything."""
+    pre = _shared_levels(labels)
+    suf = _shared_levels([s[::-1] for s in labels])
+    return [{"shared_prefix": p, "shared_suffix": [{"text": x["text"][::-1], "n_others": x["n_others"]} for x in s]}
+            for p, s in zip(pre, suf)]
+
+
+def affix_key(a):
+    """Lengths of the longest shared prefix / suffix (for ordering columns into chunks)."""
+    p = len(a["shared_prefix"][0]["text"]) if a.get("shared_prefix") else 0
+    s = len(a["shared_suffix"][0]["text"]) if a.get("shared_suffix") else 0
+    return p, s
+
+
+CALL_COST = 3  # in shared characters: tie-breaker between one more call and a cut through a name part
+
+
+def chunk_columns(indices, labels, affixes, size):
+    """Split columns into chunks of at most `size` for separate AI calls.
+
+    `size` is a prompt size limit, not a claim about family size. Columns that share
+    a literal prefix / suffix are placed next to each other (sorted by name, or by
+    reversed name when the shared suffix is the longer one), and boundaries go
+    where neighbouring names share the least text, so families usually stay in one
+    chunk. When one does not, the consolidation call
+    lets the AI say which groups from different chunks are one family."""
+    indices = list(indices)
+    if len(indices) <= size:
+        return [indices]
+    def key(i):
+        p, s = affix_key(affixes[i])
+        return ("s", labels[i][::-1]) if s > p else ("p", labels[i])
+    order = sorted(indices, key=key)
+    def overlap(x, y):
+        kx, ky = key(x), key(y)
+        return _lcp(kx[1], ky[1]) if kx[0] == ky[0] else 0
+    # exact DP over cut points: each cut costs the number of characters the two
+    # neighbouring names share, each chunk (one more AI call) costs CALL_COST; so an
+    # extra call is preferred over cutting through a long shared name part
+    n = len(order)
+    cut_cost = [0] + [overlap(order[k - 1], order[k]) for k in range(1, n)]
+    big = CALL_COST
+    best, prev = [0] + [None] * n, [0] * (n + 1)
+    for j in range(1, n + 1):
+        for i in range(max(0, j - size), j):
+            if best[i] is None:
+                continue
+            c = best[i] + big + (cut_cost[i] if i else 0)
+            if best[j] is None or c < best[j]:
+                best[j], prev[j] = c, i
+    bounds, j = [], n
+    while j > 0:
+        bounds.append((prev[j], j))
+        j = prev[j]
+    return [sorted(order[i:j]) for i, j in reversed(bounds)]
+
+
+# ---------------------------------------------------------------- groups (structure only)
+
+def common_pattern(names):
+    """The literal text all names share at the start or at the end (whichever is longer):
+    a description of a group, used for display and to derive sample names."""
+    if len(names) < 2:
+        return None
+    pre = _common_prefix(names)
+    rev = [n[::-1] for n in names]
+    suf = _common_prefix(rev)[::-1]
+    if not pre.strip() and not suf.strip():
+        return None
+    return {"side": "prefix", "text": pre} if len(pre) >= len(suf) else {"side": "suffix", "text": suf}
+
+
+def make_group(cols, group_id, indices, origin, **extra):
+    """A group record for the given columns. Grouping decisions are made elsewhere
+    (the AI proposal, a signature, or you); this only describes the result."""
+    members = sorted(indices)
+    types = {cols.digests[i]["type"] for i in members}
+    typ = cols.digests[members[0]]["type"] if len(members) == 1 else ("numeric" if types == {"numeric"} else "mixed")
+    g = {
+        "group_id": group_id,
+        "columns": [cols.labels[i] for i in members],
+        "indices": members,
+        "n_columns": len(members),
+        "kind": "single_column" if len(members) == 1 else ("numeric_block" if typ == "numeric" else "column_group"),
+        "origin": origin,
+        "pattern": common_pattern([cols.header[i] for i in members]),
+        "type": typ,
+    }
+    g.update({k: v for k, v in extra.items() if v is not None})
+    if typ == "numeric":
+        g["profile"], g["histogram"] = block_profile(cols, members)
+    elif len(members) == 1:
+        g["profile"] = cols.digests[members[0]]
+    else:
+        g["profile"] = {"n_columns": len(members), "types": dict(Counter(cols.digests[i]["type"] for i in members))}
+    if len(members) > 1 and typ == "numeric":
+        names = [cols.header[i] for i in members]
+        rule = strip_rule(names, g["pattern"])
+        g["sample_id_rule"] = rule
+        g["sample_names"] = [apply_rule(nm, rule) for nm in names]
+    return g
 
 
 def block_profile(cols, members):
@@ -425,107 +415,26 @@ def block_profile(cols, members):
     return st, histogram(vals)
 
 
-def build_groups(cols):
-    """Return groups[] in file order: numeric name families (with deviants split
-    out), profile clusters of the remaining numeric columns, and singletons."""
-    n = len(cols.header)
-    numeric = [i for i in range(n) if cols.is_numeric(i)]
-    remaining = {i: cols.header[i] for i in numeric}
-    families = []
-    def compatible(members):
-        """Small name families (< 5 columns) must also look alike: same integer
-        flag and typical values within 1.5 decades (so 'row ID', 'row m/z',
-        'row retention time' are not taken for one measurement family)."""
-        if len(members) >= 5:
-            return True
-        prof = [_col_profile_keys(cols, i) for i in members]
-        if len({p["int"] for p in prof}) > 1:
-            return False
-        lm = [p["lmed"] for p in prof if p["lmed"] is not None]
-        return not lm or max(lm) - min(lm) <= 1.5
-
-    while True:
-        best = _best_family(remaining, compatible)
-        if best is None:
-            break
-        side, pat, members = best
-        for i in members:
-            remaining.pop(i)
-        keep, deviants = _split_deviants(cols, sorted(members), exempt_sample_words=True)
-        families.append({"members": keep, "pattern": {"side": side, "text": pat}, "origin": "name_pattern"})
-        for i, reasons in deviants:
-            families.append({"members": [i], "pattern": None, "origin": "split_from_family",
-                             "split_from": pat, "split_reasons": reasons})
-    for cl in _profile_clusters(cols, sorted(remaining)):
-        for i in cl:
-            remaining.pop(i)
-        keep, deviants = _split_deviants(cols, sorted(cl))
-        families.append({"members": keep, "pattern": None, "origin": "profile_cluster"})
-        for i, reasons in deviants:
-            families.append({"members": [i], "pattern": None, "origin": "split_from_family",
-                             "split_from": "similar-profile cluster", "split_reasons": reasons})
-    for i in sorted(remaining):
-        families.append({"members": [i], "pattern": None, "origin": "single_numeric"})
-    in_family = {i for f in families for i in f["members"]}
-    for i in range(n):
-        if i not in in_family:
-            families.append({"members": [i], "pattern": None, "origin": "single_text"})
-
-    families.sort(key=lambda f: min(f["members"]))
-    groups = []
-    for k, f in enumerate(families, 1):
-        members = sorted(f["members"])
-        g = {
-            "group_id": f"g{k}",
-            "columns": [cols.labels[i] for i in members],
-            "indices": members,
-            "n_columns": len(members),
-            "kind": "numeric_block" if len(members) > 1 else "single_column",
-            "origin": f["origin"],
-            "pattern": f["pattern"],
-            "type": cols.digests[members[0]]["type"] if len(members) == 1 else "numeric",
-        }
-        if f.get("split_from"):
-            g["split_from"] = f["split_from"]
-            g["split_reasons"] = f["split_reasons"]
-        if g["type"] == "numeric":
-            prof, hist = block_profile(cols, members)
-            g["profile"], g["histogram"] = prof, hist
-        else:
-            g["profile"] = cols.digests[members[0]]
-        if len(members) > 1 and f["origin"] == "name_pattern":
-            names = [cols.header[i] for i in members]
-            rule = strip_rule(names, f["pattern"])
-            g["sample_id_rule"] = rule
-            g["sample_names"] = [apply_rule(nm, rule) for nm in names]
-        groups.append(g)
-    return groups
-
-
 # ---------------------------------------------------------------- layout hints
 
-def layout_hints(cols, groups):
-    blocks = [g for g in groups if g["kind"] == "numeric_block"]
-    largest = max(blocks, key=lambda g: g["n_columns"], default=None)
+def layout_hints(cols):
+    """Facts about the table's shape; the AI (or you) decides the layout."""
     n_rows, n_cols = cols.n_rows, len(cols.header)
+    numeric = [d for d in cols.digests if d["type"] == "numeric"]
     text_cols = [d for d in cols.digests if d["type"] != "numeric"]
     repeated_text = [d for d in text_cols if (d.get("repeat_rate") or 0) > 0.5 and (d.get("n_unique") or 0) > 1]
-    single_numeric = [d for d in cols.digests if d["type"] == "numeric"]
-    hints = {
+    return {
         "n_rows": n_rows,
         "n_cols": n_cols,
-        "largest_numeric_block_columns": largest["n_columns"] if largest else 0,
-        "largest_numeric_block_share_of_columns": round(largest["n_columns"] / n_cols, 3) if largest else 0,
-        "numeric_block_columns_total": sum(g["n_columns"] for g in blocks),
-        "rows_to_block_columns_ratio": round(n_rows / sum(g["n_columns"] for g in blocks), 3) if blocks else None,
-        "long_format_pattern": bool(len(repeated_text) >= 2 and 1 <= len(single_numeric) <= 3 and not largest),
-        "note": ("Features usually outnumber samples: many rows and a numeric block of few columns "
-                 "suggests samples in columns; few rows and a very wide numeric block suggests samples in rows."),
+        "numeric_columns": len(numeric),
+        "rows_to_numeric_columns_ratio": round(n_rows / len(numeric), 3) if numeric else None,
+        "repeated_text_columns": len(repeated_text),
+        "long_format_pattern": bool(len(repeated_text) >= 2 and 1 <= len(numeric) <= 3),
+        "note": ("Features usually outnumber samples: many rows and few numeric columns suggests samples in "
+                 "columns; few rows and very many numeric columns suggests samples in rows."),
     }
-    return hints
 
 
 def profile_table(table):
     cols = Columns(table)
-    groups = build_groups(cols)
-    return cols, groups, layout_hints(cols, groups)
+    return cols, shared_affixes(cols.labels), layout_hints(cols)

@@ -210,9 +210,9 @@ def _wrong(system, prompt):
             g["role"] = "value"                                   # value role on a text column
         if "formula" in g["label"]:
             g["role"], g["audit_kind"] = "sample_metadata", "foo"  # invalid closed-field value
-    base["groups"].append({"group_id": "g999", "role": "value", "label": "x", "confidence": 0.9,
-                           "evidence": "made up"})                # hallucinated group
-    base["groups"] = [g for g in base["groups"] if g["group_id"] != "g2"]   # a group left out
+    base["groups"].append({"group_id": "g999", "columns": ["no such column"], "role": "value", "label": "x",
+                           "confidence": 0.9, "evidence": "made up"})      # hallucinated column / group
+    base["groups"] = [g for g in base["groups"] if g["columns"] != ["row m/z"]]   # a column left out
     return json.dumps(base)
 
 
@@ -225,8 +225,9 @@ def test_wrong_ai_proposal_is_downgraded(flow, monkeypatch):
     assert adduct["claimed"]["role"] == "value"
     formula = d["groups"][gid_of(f, "formula")]
     assert formula["role"] == "unresolved" and formula["validation"]["status"] == "contradicted"
-    assert any(r["group_id"] == "g999" for r in d["rejected"])
-    assert d["groups"]["g2"]["role"] == "unresolved"
+    assert any(r.get("column") == "no such column" for r in d["rejected"])
+    mz = d["groups"][gid_of(f, "row m/z")]                                 # never silently dropped
+    assert mz["role"] == "unresolved" and "Not placed" in mz["evidence"]
     assert any("unresolved" in u["what"] for u in d["unresolved"])
     # the user cannot confirm the contradicted claim either
     f.step("annotations", {"items": [{"group_id": gid_of(f, "adduct"), "role": "value"}]}, expect=422)
@@ -256,6 +257,15 @@ def test_ai_off_full_manual_flow(flow):
     f.step("layout", {"layout": "samples_in_columns",
                       "assays": [{"assay_label": "LC-MS untargeted", "omics_type": "metabolomics",
                                   "source_software": "MZmine", "in_supported_scope": "yes"}]})
+    # nothing is grouped for you: the shared name parts are offered, you decide
+    assert len(f.upload["groups"]) == f.upload["n_columns"]
+    part = next(p for p in f.draft["name_parts"] if p["text"].strip() == "Peak area")
+    assert part["n"] == 17
+    r = f.c.post("/api/group-columns", json={"session_id": f.sid, "columns": part["columns"], "reason": "one sample each"})
+    assert r.status_code == 200, r.text
+    f.upload, f.draft = r.json()["session"], r.json()["draft"]
+    block = next(g for g in f.upload["groups"] if g["n_columns"] == 17)
+    assert block["sample_names"][:2] == ["QC_01", "QC_02"] and block["origin"] == "grouped_user"
     items = []
     for g in f.upload["groups"]:
         c = g["columns"][0]
@@ -342,15 +352,19 @@ def test_disagree_reconsiders_a_whole_step(flow, monkeypatch):
 
     def answer(system, prompt):
         digest = json.loads(prompt.split("\n", 1)[1])
-        seen["groups"] = sorted(g["group_id"] for g in digest["groups"])
+        seen["columns"] = sorted(c["column"] for c in digest["columns"])
         seen["feedback"] = digest["already_confirmed"].get("user_feedback")
-        return json.dumps({"groups": [{"group_id": gid, "role": "feature_annotation", "label": "ion form",
-                                       "confidence": 0.9, "evidence": "user feedback"} for gid in seen["groups"]]})
+        seen["current"] = sorted(g["columns"] for g in digest["already_confirmed"]["current_grouping_of_these_columns"])
+        return json.dumps({"groups": [{"group_id": f"x{k}", "columns": [c], "role": "feature_annotation",
+                                       "label": "ion form", "confidence": 0.9, "evidence": "user feedback"}
+                                      for k, c in enumerate(seen["columns"])]})
     monkeypatch.setattr(mock_llm.MockLLM, "respond", staticmethod(answer))
     gids = sorted([gid_of(f, "adduct"), gid_of(f, "formula")])
     r = f.c.post("/api/reconsider", json={"session_id": f.sid, "group_ids": gids, "user_hint": "these are ion forms"})
     assert r.status_code == 200, r.text
-    assert seen == {"groups": gids, "feedback": "these are ion forms"}
+    assert seen == {"columns": ["adduct", "formula"], "feedback": "these are ion forms",
+                    "current": [["adduct"], ["formula"]]}
+    # same columns -> same group ids: the wizard keeps its place
     assert all(r.json()["draft"]["groups"][g]["label"] == "ion form" for g in gids)
     # older single-group form still works
     r = f.c.post("/api/reconsider", json={"session_id": f.sid, "group_id": gids[0], "user_hint": "x"})
@@ -433,21 +447,26 @@ def test_assay_rename_keeps_block_provenance(flow):
 
 
 def test_disagree_can_split_a_column_out(flow, monkeypatch):
-    """The user says 'iron is a clinical value': the AI's split suggestion is applied on reconsider."""
-    def no_split(system, prompt):
+    """The AI put iron among the metabolites; the user says 'iron is a clinical value'
+    and the AI's suggest_split is applied by code on reconsider."""
+    def iron_inside(system, prompt):
         base = json.loads(_ORIGINAL_MOCK(system, prompt))
-        for g in base["groups"]:
-            g["suggest_split"] = None
+        if prompt.startswith("Digest"):
+            iron = next(g for g in base["groups"] if g["columns"] == ["iron"])
+            met = next(g for g in base["groups"] if "Glucose" in g["columns"])
+            met["columns"] = ["iron"] + met["columns"]
+            base["groups"].remove(iron)
         return json.dumps(base)
-    monkeypatch.setattr(mock_llm.MockLLM, "respond", staticmethod(no_split))
+    monkeypatch.setattr(mock_llm.MockLLM, "respond", staticmethod(iron_inside))
     f = flow("D_samples_in_rows_multiomics.csv")
     block = gid_of(f, "iron")
-    assert f.draft["groups"][block]["role"] == "value"          # iron still inside the metabolite block
+    assert f.draft["groups"][block]["role"] == "value" and gid_of(f, "Glucose") == block
 
     def with_split(system, prompt):
         digest = json.loads(prompt.split("\n", 1)[1])
         assert digest["already_confirmed"]["user_feedback"] == "iron is a clinical value"
-        return json.dumps({"groups": [{"group_id": block, "role": "value", "assay_label": "metabolomics",
+        names = [c["column"] for c in digest["columns"]]
+        return json.dumps({"groups": [{"group_id": "g1", "columns": names, "role": "value", "assay_label": "metabolomics",
                                        "label": "metabolites", "confidence": 0.9, "evidence": "n",
                                        "suggest_split": ["iron"], "suggest_split_role": "sample_metadata",
                                        "suggest_split_audit_kind": "covariate", "suggest_split_label": "serum iron"}]})
@@ -458,4 +477,5 @@ def test_disagree_can_split_a_column_out(flow, monkeypatch):
     iron = next(g for g in body["session"]["groups"] if g["columns"] == ["iron"])
     it = body["draft"]["groups"][iron["group_id"]]
     assert it["role"] == "sample_metadata" and it["audit_kind"] == "covariate" and it["label"] == "serum iron"
-    assert "iron" not in next(g for g in body["session"]["groups"] if g["group_id"] == block)["columns"]
+    met = next(g for g in body["session"]["groups"] if "Glucose" in g["columns"])
+    assert "iron" not in met["columns"] and met["n_columns"] == 20
