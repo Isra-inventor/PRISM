@@ -149,6 +149,8 @@ class MockLLM:
             return MockLLM.literature(json.loads(prompt.split("\n", 1)[1]))
         if prompt.startswith("Consolidation"):
             return MockLLM.consolidate(json.loads(prompt.split("\n", 1)[1]))
+        if prompt.startswith("Command"):
+            return MockLLM.command(json.loads(prompt.split("\n", 1)[1]))
         digest = json.loads(prompt.split("\n", 1)[1])
         hints = digest["file"]["layout_hints"]
         fixed = digest.get("already_confirmed") or {}
@@ -243,9 +245,30 @@ class MockLLM:
             "groups": groups,
             "samples": samples,
             "clarifying_questions": [],
-            "literature_queries": [],
             "propose_merge": [],
         })
+
+    @staticmethod
+    def command(payload):
+        """Very small instruction reader (the real AI does this properly)."""
+        text = payload["instruction"].lower()
+        stop = {"all", "the", "columns", "column", "from", "output", "outputs", "in", "of", "and", "any", "these", "those"}
+        m = re.search(r"(?:exclude|remove|drop|delete|leave out|don'?t include|do not include)\s+(.*)", text)
+        if m:
+            terms = [w.rstrip("s") for w in re.findall(r"[a-z0-9/]+", m.group(1)) if w not in stop and len(w) > 2]
+            hit = [g["group_id"] for g in payload["groups"]
+                   if any(w in (g.get("label") or "").lower() or any(w in c.lower() for c in g["columns"]) for w in terms)]
+            return json.dumps({"reply": f"I will leave {len(hit)} group(s) out of the outputs.",
+                               "actions": [{"action": "set_keep", "group_ids": hit, "keep": False,
+                                            "reason": f"matches {', '.join(terms)}"}] if hit else []})
+        m = re.search(r"mark\s+(\S+)\s+(?:samples?\s+)?as\s+(non-study|not study|qc|blank)", text)
+        if m:
+            pat = payload["instruction"].split()[1]
+            return json.dumps({"reply": f"I will mark {pat} as non-study samples.",
+                               "actions": [{"action": "set_samples", "samples": [pat], "is_study_sample": False,
+                                            "label": m.group(2), "reason": "instruction"}]})
+        return json.dumps({"reply": "I cannot do that with the available actions.",
+                           "not_possible": "mock: instruction not understood", "actions": []})
 
     @staticmethod
     def consolidate(payload):

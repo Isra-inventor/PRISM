@@ -14,8 +14,9 @@ from collections import Counter, OrderedDict
 
 from .parsing import cell, is_missing
 from .schema import SCHEMA_VERSION
+from .profiling import apply_rule
 from .workflow import (ASSAY_FIELDS, FACT_FIELDS, FI_FIELDS, GROUP_FIELDS, SAMPLE_FIELDS, layout_of,
-                       long_duplicates, provenance, sample_ids, unresolved_items)
+                       long_duplicates, provenance, sample_ids, unresolved_items, value_blocks)
 
 
 class OutputError(Exception):
@@ -77,11 +78,11 @@ def build(s):
     feature_rows_all = []
     fk_idx = feature_key_indices(s, d)
     block_n = 0
-    lit_blocks = (d.get("literature") or {}).get("blocks") or {}
     for a_n, (a_label, (assay, gs)) in enumerate(assays.items(), 1):
         aid = f"A{a_n}"
         blocks = []
-        n_features = n_samples = 0
+        n_features = 0
+        block_ids = {}
         for b_n, g in enumerate(gs, 1):
             it = d["groups"][g["group_id"]]
             bid = f"B{b_n}"
@@ -126,22 +127,21 @@ def build(s):
             # except samples-in-rows, where each block's columns are its own features
             if lay == "samples_in_rows" or b_n == 1:
                 feature_rows_all.append((aid, g, feat_keys))
-            n_features, n_samples = max(n_features, len(feat_keys)), max(n_samples, len(sids))
-            lit = lit_blocks.get(g["group_id"])
+            n_features = max(n_features, len(feat_keys))
+            block_ids[g["group_id"]] = sids
             blocks.append({
                 "block_id": bid, "group_id": g["group_id"], "file": fname, "keep": True,
                 "columns": g["columns"],
-                "sample_id_rule": {"strip_prefix": rule.get("strip_prefix", ""),
-                                   "strip_suffix": rule.get("strip_suffix", "")} if lay == "samples_in_columns" else None,
+                "sample_id_rule": {"strip_prefix": rule.get("strip_prefix", ""), "strip_suffix": rule.get("strip_suffix", ""),
+                                   "add_prefix": rule.get("add_prefix", "")} if lay == "samples_in_columns" else None,
                 "label": it.get("label") or "", "confidence": it.get("confidence"),
                 "provenance": provenance(it, GROUP_FIELDS),
                 "profile": prof,
                 "n_features": len(feat_keys), "n_samples": len(sids),
-                "literature": ({k: lit.get(k) for k in ("description", "typical_use", "suggested_for_analysis",
-                                                          "reason", "citations")} if lit else None),
             })
         if not blocks:
             continue
+        union, structure = _reconcile_samples(a_label, gs, block_ids, d, lay)
         fi = d["feature_identity"]
         schema_assays.append({
             "assay_id": aid,
@@ -158,7 +158,9 @@ def build(s):
                                   "provenance": "computed"}),
             "value_blocks": blocks,
             "n_features": n_features,
-            "n_samples": n_samples,
+            "n_samples": len(union),
+            "n_value_columns": sum(g["n_columns"] for g in gs),
+            "sample_structure": structure,
         })
         if assay.get("in_supported_scope") in ("no", "unsure"):
             flags.append({"flag": "outside_supported_scope", "assay": aid,
@@ -256,9 +258,24 @@ def build(s):
         if rep["only_in_data"]:
             flags.append({"flag": "samples_without_metadata",
                           "detail": f"{len(rep['only_in_data'])} sample(s) have no row in the metadata file."})
-    elif lay == "samples_in_columns":
+    elif lay == "samples_in_columns" and not d.get("derived_sample_metadata"):
         flags.append({"flag": "no_sample_metadata",
                       "detail": "No sample metadata file was provided (step skipped)."})
+    der = d.get("derived_sample_metadata")
+    der_cols = [c for c in (der or {}).get("columns", []) if c.get("keep", True)] if lay == "samples_in_columns" else []
+    if der_cols:   # sample information parsed from column names (v2.3 'one block' confirmation)
+        raw_to_sid = {}
+        for gid in value_blocks(s, d):
+            rule = d["sample_rules"].get(gid) or {}
+            for i in s.groups_by_id[gid]["indices"]:
+                raw_to_sid[header[i]] = apply_rule(header[i], rule)
+        for c in der_cols:
+            smd_cols.append(c["name"])
+        for raw, vals in der["values"].items():
+            sid = raw_to_sid.get(raw)
+            if sid in sids:
+                for c in der_cols:
+                    smd_vals.setdefault(sid, {})[c["name"]] = vals.get(c["name"], "")
     artifacts["sample_metadata.csv"] = _csv(
         ["sample_id", "sample_label", "is_study_sample"] + smd_cols,
         [[sid, st.get(sid, {}).get("label", ""), "true" if st.get(sid, {}).get("is_study_sample", True) else "false"]
@@ -298,7 +315,9 @@ def build(s):
               "provenance": ("computed" if all(c.get("proposed", {}).get(k) == c.get(k) for k in ("audit_kind", "label"))
                              else "user_set")}
              for c in (meta or {}).get("columns", []) if c["role"] != "sample_id"]
-            if meta and not meta.get("skipped") else []),
+            if meta and not meta.get("skipped") else []) + [
+            {"column": c["name"], "audit_kind": c["audit_kind"], "label": c.get("label") or "", "keep": c.get("keep", True),
+             "source": "column_names", "provenance": "user_set"} for c in der_cols],
         "sample_id": ({"column": s.groups_by_id[d["sample_id_group"]["value"]]["columns"][0]}
                       if d["sample_id_group"]["value"] else {"from": "value column headers"}),
         "samples": [{"sample": sid, "label": v.get("label") or "", "is_study_sample": bool(v.get("is_study_sample", True)),
@@ -312,25 +331,49 @@ def build(s):
                "models_used": d["ai"].get("models_used", []), "prompt_version": d["ai"]["prompt_version"],
                "temperature": d["ai"]["temperature"], "enabled": d["ai"]["enabled"]},
         "signature_hint": d.get("signature_hint"),
-        "literature": _literature(d.get("literature")),
         "clarifying_questions": d.get("clarifying_questions", []),
         "log_ref": f"{s.sid}.jsonl",
     }
     return schema, artifacts, flags
 
 
-def _literature(rec):
-    """Everything retrieved is kept, so later steps can reuse it without searching again."""
-    if not rec:
-        return None
-    keep = ("source", "endpoint", "queries", "ran_at", "status", "error", "ai_used", "summary", "blocks",
-            "for_later_steps", "rejected", "full_text_papers")
-    out = {k: rec.get(k) for k in keep}
-    out["papers"] = [{k: p.get(k) for k in ("paper_id", "title", "authors", "journal", "year", "pmid", "pmcid", "doi",
-                                              "url", "open_access", "query")} for p in (rec.get("papers") or {}).values()]
-    out["passages"] = [{k: p.get(k) for k in ("passage_id", "paper_id", "section", "text", "score")}
-                       for p in rec.get("passages") or []]
-    return out
+def _reconcile_samples(a_label, gs, block_ids, d, lay):
+    """Finalization invariant (v2.3 §3): the unique samples of an assay must match the
+    entries in samples[] and be explainable from the raw column counts; otherwise stop."""
+    union = list(dict.fromkeys(x for ids in block_ids.values() for x in ids))
+    if lay != "samples_in_columns":
+        missing = [x for x in union if x not in d["samples"]]
+        if missing:
+            raise OutputError(f"Sample counts do not reconcile for assay '{a_label}': {len(union)} sample IDs, "
+                              f"but {len(missing)} of them have no entry in samples[] (e.g. '{missing[0]}').")
+        return union, "rows"
+    raw = sum(g["n_columns"] for g in gs)
+    dup_within = {gid: len(ids) - len(set(ids)) for gid, ids in block_ids.items() if len(ids) != len(set(ids))}
+    sets = [set(ids) for ids in block_ids.values()]
+    if len(sets) == 1:
+        structure, expected = "single", len(union)
+    elif all(x == sets[0] for x in sets):
+        structure, expected = "parallel", len(union) * len(sets)
+    elif sum(len(x) for x in sets) == len(union):
+        structure, expected = "disjoint", len(union)
+    else:
+        structure, expected = "collision", None
+    in_samples = [x for x in union if x in d["samples"]]
+    problems = []
+    if dup_within:
+        problems.append(f"{sum(dup_within.values())} sample ID(s) repeat inside one block")
+    if expected is None:
+        problems.append("the same sample ID appears in blocks that do not hold the same samples")
+    elif raw != expected:
+        problems.append(f"{raw} raw value columns cannot be explained by {len(union)} samples in {len(sets)} "
+                        f"block(s) ({structure})")
+    if len(in_samples) != len(union):
+        problems.append(f"{len(union) - len(in_samples)} sample ID(s) have no entry in samples[]")
+    if problems:
+        raise OutputError(f"Sample counts do not reconcile for assay '{a_label}': {raw} raw value columns, "
+                          f"{len(union)} unique sample IDs, {len(in_samples)} matching entries in samples[] — "
+                          + "; ".join(problems) + ". Fix the sample IDs in step 5 (Samples) before finishing.")
+    return union, structure
 
 
 def _annotation(s, gid, it, column, i):

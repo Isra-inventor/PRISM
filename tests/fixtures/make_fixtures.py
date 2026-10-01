@@ -172,6 +172,21 @@ def i_methylation(rng):
     w("I_methylation_beta.csv", ["ID_REF"] + samples, rows)
 
 
+def j_subject_code_blocks(rng):
+    """SomaScan-NHP shape (v2.3): ONE measurement whose columns are subject codes with a
+    trailing time point (DEAB_0 ... DEAB_136), near-identical statistics everywhere,
+    plus subjects with a single column. Over-fragmenting it per code is the bug."""
+    design = {"DEAB": [0, 4, 16, 52, 136], "GA43": [4, 16, 136], "H7K2": [0, 4, 136], "R12X": [0, 52, 136],
+              "PB09": [0, 16, 52], "KL3M": [4, 52, 136], "Z81Q": [0, 4, 16], "W5TA": [16, 136],
+              "T623": [0], "M88A": [4]}
+    samples = [f"{code}_{tp}" for code, tps in design.items() for tp in tps]
+    rows = []
+    for k in range(200):
+        base = rng.gauss(2.9, 0.45)
+        rows.append([f"seq.{20000 + k}.{k % 97}", f"Target{k}"] + [f"{10 ** (base + rng.gauss(0, 0.08)):.1f}" for _ in samples])
+    w("J_subject_code_blocks.csv", ["SeqId", "Target"] + samples, rows)
+
+
 if __name__ == "__main__":
     rng = random.Random(42)
     a_maxquant(rng)
@@ -183,4 +198,5 @@ if __name__ == "__main__":
     messy()
     h_16s_otu(random.Random(16))
     i_methylation(random.Random(450))
+    j_subject_code_blocks(random.Random(623))
     print("fixtures written to", HERE)

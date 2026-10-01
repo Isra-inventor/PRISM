@@ -1,5 +1,10 @@
 """Literature retrieval (RAG) from Europe PMC, and AI suggestions grounded in it.
 
+NOT USED IN STEP 0 (v2.3): deferred to a future Tier 2 feature, not abandoned. Step 0
+runs before the research-focus intake, so "should this block be analysed" cannot be
+answered there. Kept for later: Europe PMC client, passage ranking and the
+word-for-word quote verification.
+
 Pipeline:
     queries  (the AI's search queries from the proposal + ones built from the
               confirmed description: software, omics type, block names)
@@ -43,7 +48,9 @@ from pydantic import BaseModel, ValidationError
 
 from . import llm_providers as llm
 from .profiling import FILE_EXTENSIONS
-from .schema import PROMPT_VERSION, VOCABULARY
+from .schema import PROMPT_VERSION
+
+SUGGESTED = ["yes", "no", "unsure"]   # was VOCABULARY['suggested_for_analysis'] in Step 0
 
 EUROPEPMC_URL = os.environ.get("PRISM_EUROPEPMC_URL", "https://www.ebi.ac.uk/europepmc/webservices/rest").rstrip("/")
 CACHE_DIR = Path(os.environ.get("PRISM_LITERATURE_CACHE", Path(__file__).parent / "cache" / "literature"))
@@ -338,7 +345,7 @@ def response_schema():
         "summary_citations": {"type": "ARRAY", "items": cite},
         "blocks": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
             "group_id": s(), "description": s(), "typical_use": s(),
-            "suggested_for_analysis": s(enum=VOCABULARY["suggested_for_analysis"]),
+            "suggested_for_analysis": s(enum=SUGGESTED),
             "reason": s(), "citations": {"type": "ARRAY", "items": cite}},
             "required": ["group_id", "description", "typical_use", "suggested_for_analysis", "reason", "citations"]}},
         "for_later_steps": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
@@ -405,7 +412,7 @@ def synthesize(desc, passages, log=None, mock_fn=None):
             continue
         ok, bad = verify(b.citations, by_id)
         out["rejected"] += [dict(x, where=b.group_id) for x in bad]
-        sug = b.suggested_for_analysis if b.suggested_for_analysis in VOCABULARY["suggested_for_analysis"] else "unsure"
+        sug = b.suggested_for_analysis if b.suggested_for_analysis in SUGGESTED else "unsure"
         reason = b.reason.strip()
         if sug == "yes" and not ok:
             sug = "unsure"

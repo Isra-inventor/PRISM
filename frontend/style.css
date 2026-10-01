@@ -467,6 +467,16 @@ ul.np { list-style: none; margin: 0; padding: 4px 12px 10px; font-size: 12px; }
 ul.np li { padding: 4px 0; border-bottom: 1px solid var(--line); }
 .np-note { padding: 0 12px; }
 
+.command { margin: 10px 0 12px; border: 1px solid var(--line-strong); border-radius: var(--radius); padding: 10px 12px; background: #0b0b0b; }
+.command-row { display: flex; gap: 8px; align-items: flex-start; }
+.command-row textarea { flex: 1; min-height: 34px; }
+.actions-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.check.action { align-items: flex-start; font-size: 12px; color: var(--text); }
+.check.action.unusable { opacity: .6; }
+.warn-text { color: #f0d68a; }
+.notice.flag b { color: var(--text); font-weight: 500; }
+.notice.flag details summary { cursor: pointer; font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+
 /* ------------------------------------------------ responsive */
 @media (max-width: 960px) {
   .principles { grid-template-columns: repeat(2, 1fr); }

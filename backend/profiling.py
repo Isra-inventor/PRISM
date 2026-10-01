@@ -224,12 +224,14 @@ def _cut_to_boundary(p, names, side):
 
 
 def apply_rule(name, rule):
+    """Sample ID from a column name: strip the given prefix / suffix, then add an
+    optional per-block label (used to tell apart blocks whose IDs would collide)."""
     pre, suf = rule.get("strip_prefix", ""), rule.get("strip_suffix", "")
     if pre and name.startswith(pre):
         name = name[len(pre):]
     if suf and name.endswith(suf):
         name = name[:len(name) - len(suf)]
-    return name
+    return (rule.get("add_prefix") or "") + name
 
 
 # ---------------------------------------------------------------- shared name parts (a fact, not a grouping)

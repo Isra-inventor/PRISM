@@ -8,8 +8,8 @@ written by the AI (or the user) and are never enumerated here.
 
 from .config import SCOPE_DESCRIPTION
 
-SCHEMA_VERSION = "0.3.2"
-PROMPT_VERSION = "step0-v3.2.3"
+SCHEMA_VERSION = "0.3.3"
+PROMPT_VERSION = "step0-v3.3"
 UNRESOLVED = "unresolved"
 
 VOCABULARY = {
@@ -23,8 +23,6 @@ VOCABULARY = {
                    "group", "covariate", "other"],
     "yes_no_unsure": ["yes", "no", "not_sure"],
     "in_supported_scope": ["yes", "no", "unsure"],
-    # a literature-backed suggestion only; "yes" needs at least one verified citation
-    "suggested_for_analysis": ["yes", "no", "unsure"],
     "provenance": ["computed", "ai_proposed_confirmed", "ai_proposed_corrected", "user_set"],
     "booleans": ["keep", "marks_rows_as_suspect", "is_study_sample"],
 }
@@ -53,9 +51,7 @@ DEFINITIONS = {
     "marks_rows_as_suspect": "The column flags rows as decoy, contaminant or otherwise suspect.",
     "is_study_sample": "False for QC, blank, pool, calibrator and similar non-study injections.",
     "keep": ("Kept in the outputs. Every kept value block becomes its own matrix; nothing ranks them. "
-             "Which one to analyse is a later decision, informed by the literature."),
-    "suggested_for_analysis": ("What similar studies in the retrieved literature analysed. A suggestion with "
-                               "citations, never a decision."),
+             "Which one to analyse is decided in a later step, after the research-focus intake."),
 }
 
 HISTORY_QUESTIONS = [

@@ -298,6 +298,49 @@ async def consolidate(req: SessionRequest):
     return await run_in_threadpool(_structure_op, req, workflow.retry_consolidation)
 
 
+class ConsistencyRequest(BaseModel):
+    session_id: str
+    action: str                      # one_block | dismiss | full_names | labels
+    key: Optional[str] = None
+    group_ids: List[str] = []
+    labels: dict = {}
+
+
+@app.post("/api/consistency")
+async def consistency_action(req: ConsistencyRequest):
+    """Your answer to a consistency flag (v2.3): nothing is merged or renamed without it."""
+    return await run_in_threadpool(_structure_op, req, workflow.resolve_consistency, req.action, req.key,
+                                   req.group_ids, req.labels)
+
+
+class CommandRequest(BaseModel):
+    session_id: str
+    instruction: str = ""
+    command_id: Optional[str] = None
+    accept: Optional[List[int]] = None
+    progress_id: Optional[str] = None
+
+
+@app.post("/api/ai-command")
+async def ai_command(req: CommandRequest):
+    """'Ask the AI to do it': the AI turns your instruction into a preview of actions. Nothing is applied."""
+    def work():
+        set_progress(req.progress_id, stage="ai", percent=20, message="The AI is planning the changes")
+        return _structure_op(req, workflow.plan_command, req.instruction)
+    return await run(req.progress_id, work)
+
+
+@app.post("/api/apply-command")
+async def apply_command(req: CommandRequest):
+    """Your confirmation: apply the chosen actions of the pending instruction."""
+    return await run_in_threadpool(_structure_op, req, workflow.apply_command, req.command_id, req.accept)
+
+
+@app.post("/api/discard-command")
+async def discard_command(req: CommandRequest):
+    return await run_in_threadpool(_structure_op, req, workflow.discard_command)
+
+
 @app.post("/api/merge-check")
 async def merge_check(req: MergeRequest):
     """'These groups are the same thing': the AI's opinion only; nothing is applied."""
@@ -318,29 +361,6 @@ async def split(req: SplitRequest):
 @app.post("/api/group-columns")
 async def group_columns(req: GroupColumnsRequest):
     return await run_in_threadpool(_structure_op, req, workflow.group_columns, req.columns, req.reason)
-
-
-class LiteratureRequest(BaseModel):
-    session_id: str
-    queries: List[str] = []
-    progress_id: Optional[str] = None
-
-
-def _do_literature(req):
-    s = session_or_404(req.session_id)
-    with s.lock:
-        if s.draft is None:
-            raise HTTPException(409, "Run /api/propose first.")
-        set_progress(req.progress_id, stage="literature", percent=5, message="Searching the literature")
-        try:
-            return workflow.run_literature(s, req.queries, on_progress=ai_progress(req.progress_id, 5, 99, "literature"))
-        except workflow.StepError as e:
-            raise HTTPException(422, str(e))
-
-
-@app.post("/api/literature")
-async def literature_search(req: LiteratureRequest):
-    return await run(req.progress_id, _do_literature, req)
 
 
 @app.post("/api/metadata-upload")

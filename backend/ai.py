@@ -136,9 +136,6 @@ what the statistics suggest, e.g. "LFQ intensity, apparently raw linear scale (m
   composite key such as m/z + retention time); use [] when feature names are column headers.
 - samples: sample names or glob patterns (e.g. "QC_*") with a label and is_study_sample.
 - clarifying_questions for anything you cannot resolve from the digest.
-- literature_queries: 1-3 Europe PMC search queries that would find papers analysing data like
-  this (the platform / software, the measurement types, the organism or sample type if the names
-  show it), e.g. "LFQ intensity" AND iBAQ AND MaxQuant. Names and terms only, never data values.
 - Respect everything under already_confirmed."""
 
 
@@ -179,7 +176,6 @@ def response_schema():
             "confidence": n(), "evidence": s()}, "required": ["pattern_or_sample", "label", "is_study_sample"]}},
         "clarifying_questions": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
             "group_id": s(nullable=True), "question": s()}, "required": ["question"]}},
-        "literature_queries": {"type": "ARRAY", "items": s()},
         "propose_merge": merges_schema(),
     }, "required": ["layout", "assays", "groups"]}
 
@@ -200,6 +196,45 @@ measurement for different samples, proposed separately because the file was sent
 Only merge groups that are the same kind of thing; when unsure, do not merge. Explain each
 merge in reason. If a user_hint is given, the user thinks the listed groups are the same thing:
 check it against the summaries and say in comment why you agree or not."""
+
+
+COMMAND_ACTIONS = ["set_keep", "set_role", "set_label", "set_audit_kind", "set_assay", "set_suspect", "merge", "split",
+                   "set_samples"]
+
+COMMAND_PROMPT = """
+
+## This call: do what the user asks
+The user gives an instruction (e.g. "don't include the score and count columns in the output",
+"the visit columns are time points", "mark QC_* samples as non-study"). Turn it into actions from
+this closed list, using the group_ids and column names of the summary you get:
+- set_keep {group_ids, keep}: keep false = leave these columns out of the outputs. Data is never
+  deleted; excluded columns are listed in the schema. Identifier columns cannot be excluded.
+- set_role {group_ids, role}; set_label {group_ids, label}; set_audit_kind {group_ids, audit_kind}
+  (sample information only); set_assay {group_ids, assay_label} (value blocks);
+  set_suspect {group_ids, marks_rows_as_suspect}.
+- merge {group_ids}: these groups are one group. split {group_ids: [one], columns}: take these
+  columns out of that group.
+- set_samples {samples (names or glob patterns such as "QC_*"), label and/or is_study_sample}.
+Rules: act only on what the instruction asks; be complete (if the user says "all score columns",
+include every matching group). Give each action a short reason. If something cannot be done with
+these actions (e.g. deleting rows, changing values, normalizing), do not invent an action: explain
+it in not_possible. reply: one or two sentences saying what you will do. Nothing is applied until
+the user confirms."""
+
+
+def command_schema():
+    s = lambda **k: dict(type="STRING", **k)
+    b = lambda **k: dict(type="BOOLEAN", **k)
+    arr = {"type": "ARRAY", "items": {"type": "STRING"}}
+    return {"type": "OBJECT", "properties": {
+        "reply": s(), "not_possible": s(nullable=True),
+        "actions": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+            "action": s(enum=COMMAND_ACTIONS), "group_ids": arr, "columns": arr, "samples": arr,
+            "role": s(enum=VOCABULARY["column_role"], nullable=True), "label": s(nullable=True),
+            "audit_kind": s(enum=VOCABULARY["audit_kind"], nullable=True), "assay_label": s(nullable=True),
+            "keep": b(nullable=True), "marks_rows_as_suspect": b(nullable=True), "is_study_sample": b(nullable=True),
+            "reason": s()}, "required": ["action", "reason"]}}},
+        "required": ["reply", "actions"]}
 
 
 def consolidation_schema():
@@ -270,6 +305,27 @@ class ConsolidationResponse(BaseModel):
     comment: Optional[str] = ""
 
 
+class CommandAction(BaseModel):
+    action: str
+    group_ids: List[str] = []
+    columns: List[str] = []
+    samples: List[str] = []
+    role: Optional[str] = None
+    label: Optional[str] = None
+    audit_kind: Optional[str] = None
+    assay_label: Optional[str] = None
+    keep: Optional[bool] = None
+    marks_rows_as_suspect: Optional[bool] = None
+    is_study_sample: Optional[bool] = None
+    reason: str = ""
+
+
+class CommandResponse(BaseModel):
+    reply: str = ""
+    not_possible: Optional[str] = None
+    actions: List[CommandAction] = []
+
+
 class AIResponse(BaseModel):
     propose_merge: List[Merge] = []
     layout: Optional[Fact] = None
@@ -277,7 +333,6 @@ class AIResponse(BaseModel):
     groups: List[GroupLabel] = []
     samples: List[SampleRule] = []
     clarifying_questions: List[Question] = []
-    literature_queries: List[str] = []
 
 
 def _clamp(x):
@@ -305,6 +360,7 @@ def _call(digest, sha, log=None, mock_fn=None, kind="digest"):
         "digest": ("Digest (JSON):", system_prompt(), response_schema(), AIResponse),
         "consolidation": ("Consolidation (JSON):", BRIEFING + CONSOLIDATION_PROMPT, consolidation_schema(),
                           ConsolidationResponse),
+        "command": ("Command (JSON):", BRIEFING + COMMAND_PROMPT, command_schema(), CommandResponse),
     }[kind]
     ok, why = llm.available()
     meta = {"provider": llm.provider_name(), "model": llm.model_list()[0] if ok else None,
@@ -424,8 +480,6 @@ def read_chunk(resp, indices, label_to_idx, ns, out):
                         "confidence": _clamp(x.confidence), "evidence": x.evidence, "source": "ai"} for x in resp.samples]
     out["clarifying_questions"] += [dict(q.model_dump(), group_id=f"{q.group_id}{ns}" if q.group_id else None)
                                     for q in resp.clarifying_questions]
-    out["literature_queries"] += [q.strip()[:200] for q in resp.literature_queries
-                                  if q and q.strip() and q.strip()[:200] not in out["literature_queries"]][:3]
 
 
 def group_summary(cols, pid, g, chunk=None):
@@ -490,7 +544,7 @@ def propose(filename, sha, cols, affixes, hints, indices=None, fixed=None, log=N
     n = len(chunks)
     label_to_idx = {lab: i for i, lab in enumerate(cols.labels)}
     out = {"groups": {}, "rejected": [], "samples": [], "clarifying_questions": [], "assays": [],
-           "literature_queries": [], "splits_applied": [], "merges_applied": [], "alias": {}, "chunks": n,
+           "splits_applied": [], "merges_applied": [], "alias": {}, "chunks": n,
            "failed_chunks": [], "consolidation_error": None}
     metas, digests, chunk_of = [], [], {}
     fixed = dict(fixed or {})
@@ -565,6 +619,12 @@ def consolidate(cols, groups, items, sha, log=None, mock_fn=None):
     if resp is None:
         return [], meta.get("error") or "no answer"
     return [(m.group_ids, m.reason) for m in resp.cross_chunk_merges], None
+
+
+def command(payload, sha, log=None, mock_fn=None):
+    """The user's instruction -> proposed actions (CommandResponse) or (None, error). Nothing is applied here."""
+    resp, meta = _call(payload, sha, log, mock_fn, kind="command")
+    return resp, meta.get("error")
 
 
 def merge_check(cols, groups, items, gids, hint, sha, log=None, mock_fn=None):

@@ -36,7 +36,21 @@ Mark these carefully; they drive the audit:
 - group-like variables (candidates only),
 - columns that mark rows as suspect (decoy hits, contaminants and similar flags).
 
+## Choosing audit_kind (guidance to weigh, not a rule)
+- Column names containing "time", "visit", "week", "day", "month", "timepoint" or similar are
+  likely `timepoint`, unless there is a clear reason otherwise (say so in evidence).
+- Names containing "group", "arm", "cohort", "status", "treatment", "condition" are likely
+  `group` candidates.
+- Use `covariate` for other sample characteristics (age, sex, BMI, clinical values), not for
+  time points or group-like columns. Two columns that mean the same thing (e.g. study_group and
+  SampleGroup) should get the same audit_kind.
+- Still give your own confidence and evidence; these are hints about naming, not overrides.
+
 ## Situations to watch for (illustrations, not an allow-list)
+- Many column families named by short codes plus a number (DEAB_0, DEAB_4, GA43_4, T623_0, ...)
+  with near-identical statistics are usually ONE measurement across subjects and time points:
+  the code is a subject, the number a time point. Put them in one group; do not make one group
+  per code.
 - Numeric clinical columns (age, CD4 count, serum iron, BMI) sitting next to omics features and
   looking like features. They are sample information, not measurements.
 - Several measurement families of the same features side by side, e.g. LFQ intensity vs raw

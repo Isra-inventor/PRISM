@@ -76,7 +76,7 @@
       let p = server ? server.percent : Math.round((upload || 0) * 2);
       let lab = label;
       if (upload != null && upload < 1) lab = `Uploading (${Math.round(upload * 100)}%)`;
-      else if (server) lab = { reading: "Reading the file", detecting: "Grouping columns", ai: "AI is labelling column groups", literature: "Searching the literature",
+      else if (server) lab = { reading: "Reading the file", detecting: "Grouping columns", ai: "AI is labelling column groups",
                                done: "Done", error: "Stopped with an error" }[server.stage] || label;
       q(".p-label").textContent = lab;
       q(".progress-pct").textContent = `${p}%`;
@@ -161,7 +161,7 @@
   $("restart").addEventListener("click", reset);
 
   function reset() {
-    Object.assign(S, { session: null, draft: null, digests: null, step: "layout", local: {}, finalized: null, litTried: false });
+    Object.assign(S, { session: null, draft: null, digests: null, step: "layout", local: {}, finalized: null });
     show($("workspace"), false); show($("panel-upload")); show($("restart"), false); show($("upload-error"), false);
     input.value = "";
     window.scrollTo({ top: 0 });
@@ -201,7 +201,7 @@
       try {
         const r = await api("/api/propose", { session_id: S.session.session_id, ai: S.aiOn, progress_id: pid });
         S.session = r.session; S.draft = r.draft; S.digests = r.digests; S.finalized = null;
-        S.step = "layout"; S.local = {}; S.litTried = false;
+        S.step = "layout"; S.local = {};
       } catch (err) {
         $("guide").replaceChildren(el("div", { class: "alert alert-error", text: err.message }));
         throw err;
@@ -706,6 +706,88 @@
         el("button", { class: "linkbtn", type: "button", text: "Retry joining chunks",
           onclick: () => structOp("/api/consolidate", {}, "Asking the AI which groups are one family") })) : null);
   }
+  function consistencyFlags() {
+    const flags = S.draft.consistency?.block_flags || [];
+    if (!flags.length) return null;
+    return el("div", {}, flags.map((f) => el("div", { class: "notice accent flag" },
+      el("b", { text: f.message }),
+      el("div", { class: "item-sub", text: `Codes: ${f.codes.join(", ")} · ${f.n_columns} columns. Computed by code from the profiles below, not by the AI.` }),
+      el("details", {}, el("summary", { text: "Profiles" }), el("ul", { class: "np" }, f.evidence.map((e) => el("li", { text: e })))),
+      el("div", { class: "disagree-actions" },
+        el("button", { class: "btn btn-sm btn-light", type: "button", text: "Same measurement: treat as one block",
+          title: "Merges the blocks; each column name's code becomes the subject and the rest (e.g. a time point) goes to sample information; sample IDs keep the full column names",
+          onclick: () => structOp("/api/consistency", { action: "one_block", key: f.key }, "Treating them as one block") }),
+        el("button", { class: "btn btn-sm", type: "button", style: "margin-left:6px", text: "They really are different measurements",
+          onclick: () => structOp("/api/consistency", { action: "dismiss", key: f.key }, "Recording your answer") })))));
+  }
+  function collisionBox() {
+    const cols = S.draft.consistency?.sample_collisions || [];
+    if (!cols.length) return null;
+    S.local.blockLabels = S.local.blockLabels || {};
+    return el("div", {}, cols.map((c) => el("div", { class: "notice accent flag" },
+      el("b", { text: c.message }),
+      el("div", { class: "item-sub", text: `Colliding IDs: ${c.ids.slice(0, 8).join(", ")}${c.n_ids > 8 ? " …" : ""} · blocks: ${c.group_ids.map(groupName).join("; ")}` }),
+      el("div", { class: "disagree-actions", style: "justify-content:flex-start" },
+        el("button", { class: "btn btn-sm btn-light", type: "button", text: "Use the full column names as sample IDs",
+          onclick: () => structOp("/api/consistency", { action: "full_names", group_ids: c.group_ids }, "Updating sample IDs") })),
+      el("div", { class: "item-sub", style: "margin-top:8px", text: "Or give each block a short label that is put in front of its IDs:" }),
+      el("div", { class: "item-controls" }, c.group_ids.map((g) => fieldBox(groupName(g),
+        textInput(S.local.blockLabels[g] || "", (x) => { S.local.blockLabels[g] = x; }, { placeholder: "e.g. liver" })))),
+      el("button", { class: "btn btn-sm", type: "button", text: "Use these labels",
+        onclick: () => structOp("/api/consistency", { action: "labels", group_ids: c.group_ids, labels: S.local.blockLabels }, "Updating sample IDs") }))));
+  }
+  function commandBox() {
+    const cmd = S.draft.pending_command;
+    if (!aiReady()) return null;
+    const box = el("div", { class: "command" });
+    if (!cmd) {
+      const ta = el("textarea", { class: "input", rows: 1, placeholder: "Ask the AI to do it, e.g. “don't include the score and count columns in the output”" });
+      ta.value = S.local.instruction || "";
+      ta.addEventListener("input", () => { S.local.instruction = ta.value; });
+      ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); go2(); } });
+      const go2 = async () => {
+        if (!ta.value.trim()) return;
+        await busy("The AI is planning the changes", async (pid) => {
+          try {
+            const r = await api("/api/ai-command", { session_id: S.session.session_id, instruction: ta.value, progress_id: pid });
+            S.draft = r.draft; if (r.session) S.session = r.session; S.local.instruction = "";
+            S.local.accept = Object.fromEntries(r.command.actions.map((a) => [a.index, a.usable]));
+          } catch (e) { S.local.error = e.message; }
+        });
+        renderGuide();
+      };
+      box.append(el("div", { class: "command-row" }, ta, el("button", { class: "btn btn-sm", type: "button", text: "Plan it", onclick: go2 })),
+        el("div", { class: "item-sub", text: "The AI turns your instruction into concrete changes (exclude, role, label, merge, split, samples…). You see them first; nothing changes until you apply." }));
+      return box;
+    }
+    S.local.accept = S.local.accept || Object.fromEntries(cmd.actions.map((a) => [a.index, a.usable]));
+    box.append(...[el("div", { class: "disagree-head" }, el("strong", { text: `“${cmd.instruction}”` })),
+      cmd.reply ? el("p", { class: "item-sub", text: "AI: " + cmd.reply }) : null,
+      cmd.not_possible ? el("div", { class: "notice", text: "Not possible with the available actions: " + cmd.not_possible }) : null,
+      cmd.actions.length ? el("div", { class: "actions-list" }, cmd.actions.map((a) => {
+        const cb = el("input", { type: "checkbox", checked: !!S.local.accept[a.index], disabled: !a.usable });
+        cb.addEventListener("change", () => { S.local.accept[a.index] = cb.checked; });
+        return el("label", { class: `check action ${a.usable ? "" : "unusable"}` }, cb,
+          el("span", {}, a.description, a.reason ? el("span", { class: "item-sub", text: ` — ${a.reason}` }) : null,
+            a.problems?.length ? el("div", { class: "item-sub warn-text", text: "Checked by code: " + a.problems.join("; ") }) : null));
+      })) : el("p", { class: "item-sub", text: "The AI proposed no change." }),
+      el("div", { class: "disagree-actions" },
+        el("button", { class: "btn btn-sm btn-light", type: "button", text: "Apply selected", disabled: !cmd.actions.some((a) => a.usable),
+          onclick: async () => {
+            const accept = cmd.actions.filter((a) => S.local.accept[a.index]).map((a) => a.index);
+            let res = null;
+            await busy("Applying", async () => {
+              try { res = await api("/api/apply-command", { session_id: S.session.session_id, command_id: cmd.id, accept });
+                    S.draft = res.draft; if (res.session) S.session = res.session; }
+              catch (e) { S.local.error = e.message; }
+            });
+            S.local = { note: res ? `Applied ${res.applied.length} change(s)` + (res.skipped.length ? `; skipped: ${res.skipped.map((x) => x.why).join("; ")}` : "") + ". Confirmed steps they touch are reopened for you to check." : null, error: S.local.error };
+            renderAll();
+          } }),
+        el("button", { class: "btn btn-sm", type: "button", style: "margin-left:6px", text: "Discard",
+          onclick: () => structOp("/api/discard-command", {}, "Discarding") }))].filter(Boolean));
+    return box;
+  }
   function renderNameParts() {
     const parts = S.draft?.name_parts || [];
     const box = $("name-parts");
@@ -862,81 +944,6 @@
     if (h.n_zero) { const z = `${h.n_zero} zeros`; ctx.fillText(z, (w - ctx.measureText(z).width) / 2, hh - 2); }
   }
 
-  // ---------------- literature (Europe PMC) — suggestions, always with verified citations
-  const LIT = () => S.draft.literature;
-  function paperNo(pid) {
-    const order = [...new Set((LIT()?.passages || []).map((p) => p.paper_id))];
-    Object.keys(LIT()?.papers || {}).forEach((k) => { if (!order.includes(k)) order.push(k); });
-    return order.indexOf(pid) + 1;
-  }
-  function citeChips(cites) {
-    if (!cites || !cites.length) return null;
-    const papers = LIT().papers || {};
-    return el("span", { class: "cites" }, cites.map((c) => {
-      const p = papers[c.paper_id] || {};
-      return el("a", { class: "cite", href: p.url || "#", target: "_blank", rel: "noopener",
-        title: `“${c.quote}”\n— ${p.title || c.paper_id} (${p.journal || ""} ${p.year || ""})` }, `[${paperNo(c.paper_id)}]`);
-    }));
-  }
-  const SUG = { yes: ["similar studies analysed it", "s-yes"], no: ["usually not analysed", "s-no"], unsure: ["not clear from the papers", "s-unsure"] };
-  function litBlock(gid) {
-    const rec = LIT();
-    if (!rec) return null;
-    const b = rec.blocks?.[gid];
-    if (!b) return rec.status === "done" ? el("div", { class: "lit lit-none", text: "The retrieved papers say nothing about this block." }) : null;
-    const [txt, cls] = SUG[b.suggested_for_analysis] || SUG.unsure;
-    return el("div", { class: "lit" },
-      el("div", { class: "section-label", text: "What the literature says" }),
-      el("div", { class: "lit-head" }, el("span", { class: `badge ${cls}`, text: `suggestion: ${txt}` }),
-        b.supported ? null : el("span", { class: "badge v-warning", text: "no verifiable citation" })),
-      b.description ? el("p", {}, b.description) : null,
-      b.typical_use ? el("p", {}, el("span", { class: "lit-k", text: "Typical use: " }), b.typical_use, " ", citeChips(b.citations)) : null,
-      b.reason ? el("p", { class: "item-sub" }, b.reason) : null);
-  }
-  function literaturePanel() {
-    const d = S.draft, rec = LIT();
-    if (!d.literature_enabled) return el("div", { class: "notice", text: "Literature search is turned off on this server (PRISM_LITERATURE=off)." });
-    const qs = S.local.litQueries ?? (rec?.queries?.length ? rec.queries : d.literature_queries_suggested || []);
-    const ta = el("textarea", { class: "input", rows: Math.max(2, Math.min(5, qs.length)), spellcheck: "false" });
-    ta.value = qs.join("\n");
-    ta.addEventListener("input", () => { S.local.litQueries = ta.value.split("\n"); });
-    const go = el("button", { class: "btn btn-sm", type: "button", text: rec ? "Search again" : "Search Europe PMC", onclick: () => searchLiterature() });
-    const box = el("div", { class: "lit-panel" },
-      el("div", { class: "disagree-head" }, el("strong", { text: "What do papers with similar data say?" })),
-      el("p", { class: "item-sub", text: "PRISM searches Europe PMC (PubMed abstracts + open-access full text) with these queries — names and terms only, never your data — "
-        + "and the AI describes each block from the retrieved passages. Every citation is checked word for word against its passage. These are suggestions: you decide." }));
-    if (rec) {
-      const n = Object.keys(rec.papers || {}).length;
-      box.append(el("div", { class: `notice ${rec.error ? "accent" : ""}` },
-        rec.error ? rec.error + " " : "",
-        `${n} paper(s), ${(rec.passages || []).length} relevant passage(s)${rec.full_text_papers?.length ? `, ${rec.full_text_papers.length} read in full` : ""}`
-        + (rec.status === "retrieved_only" ? " · not summarised (AI off or unavailable): read the passages below." : "") + ` · searched ${rec.ran_at}`));
-      if (rec.summary?.text) box.append(el("p", {}, rec.summary.text, " ", citeChips(rec.summary.citations)));
-      if (rec.rejected?.length) box.append(el("div", { class: "item-sub", text: `${rec.rejected.length} citation(s) from the AI were discarded because the quote was not found in the paper.` }));
-      const papers = Object.values(rec.papers || {}).sort((a, b) => paperNo(a.paper_id) - paperNo(b.paper_id));
-      if (papers.length) box.append(el("details", { class: "saw" }, el("summary", { text: `Papers (${papers.length})` }),
-        el("ol", { class: "papers" }, papers.map((p) => el("li", {},
-          el("a", { href: p.url, target: "_blank", rel: "noopener", text: p.title }),
-          el("div", { class: "item-sub", text: `[${paperNo(p.paper_id)}] ${p.authors} · ${p.journal} ${p.year}${p.open_access ? " · open access" : ""}` }))))));
-      if (rec.passages?.length) box.append(el("details", { class: "saw" }, el("summary", { text: `Passages given to the AI (${rec.passages.length})` }),
-        el("ol", { class: "papers" }, rec.passages.map((p) => el("li", {}, el("div", { class: "item-sub", text: `${p.passage_id} · [${paperNo(p.paper_id)}] ${p.section}` }), p.text)))));
-    }
-    box.append(fieldBox("Search queries (one per line, Europe PMC syntax)", ta), el("div", { class: "disagree-actions" }, go));
-    return box;
-  }
-  async function searchLiterature(auto) {
-    const queries = (S.local.litQueries || []).map((q) => q.trim()).filter(Boolean);
-    const keep = { items: S.local.items };
-    await busy("Searching the literature", async (pid) => {
-      try {
-        const r = await api("/api/literature", { session_id: S.session.session_id, queries, progress_id: pid });
-        S.draft = r.draft;
-        S.local = keep;
-      } catch (e) { S.local.error = (auto ? "Literature search: " : "") + e.message; S.litTried = true; }
-    });
-    renderGuide();
-  }
-
   function valueCard(gid) {
     const it = D(gid), g = G(gid), p = g.profile || {}, lay = layout();
     const role = cur(gid, "role"), keep = cur(gid, "keep") !== false;
@@ -965,7 +972,6 @@
       el("div", { class: "q", style: "margin:6px 0 8px" }, voice),
       el("label", { class: "check" }, keepCb, "keep and export this block (its own matrix file)"),
       el("div", { class: "side-by-side" }, described, computed),
-      litBlock(gid),
       evidence(it.evidence), warnList(it.validation, it.claimed),
       el("div", { class: "item-foot" }, reconsiderOne(gid), structureTools(gid)));
   }
@@ -974,11 +980,7 @@
     const all = focusGroups("values");
     const blocks = all.filter((g) => D(g).role === "value" || (D(g).role === "unresolved" && G(g).kind === "numeric_block"));
     const others = all.filter((g) => !blocks.includes(g));
-    if (!LIT() && !S.litTried && S.draft.literature_enabled && blocks.some((g) => D(g).role === "value")) {
-      S.litTried = true;               // search once automatically when the step first opens
-      setTimeout(() => searchLiterature(true), 0);
-    }
-    const body = [literaturePanel(), el("div", {}, blocks.map(valueCard))];
+    const body = [consistencyFlags(), el("div", {}, blocks.map(valueCard))];
     if (others.length) {
       body.push(el("div", { class: "section-label", text: "Other numeric columns" }));
       body.push(el("p", { class: "q", text: "Covariates and technical values (age, CD4 count, iron, scale factors…) usually describe samples. Change any of them if needed." }));
@@ -986,7 +988,7 @@
     }
     return {
       title: blocks.length > 1 ? `${blocks.length} measurement blocks. What is each one?` : "Is this the measurement block?",
-      question: "Nothing is ranked: every block you keep is exported as its own matrix. Check each description against the computed profile, and see what papers with similar data did with it.",
+      question: "Nothing is ranked: every block you keep is exported as its own matrix. Check each description against the computed profile. Which block to analyse is decided later, after the research-focus step.",
       body,
       disagree: [all, "column groups"],
       decision: () => {
@@ -1046,6 +1048,7 @@
       if (sid === d.sample_id_group.value) body.push(idPreview(d.sample_list.ids));
       else body.push(el("div", { class: "item-sub", text: "The ID list updates after you confirm." }));
     }
+    body.unshift(collisionBox());
     const ids = Object.keys(d.samples);
     const isStudy = (s) => (S.local.samples?.[s] && "is_study_sample" in S.local.samples[s] ? S.local.samples[s].is_study_sample : d.samples[s].is_study_sample);
     const non = ids.filter((s) => !isStudy(s));
@@ -1084,6 +1087,25 @@
         decision: () => { checkItems(gids); return { items: itemDecisions(gids) }; } };
     }
     const meta = d.metadata;
+    const der = d.derived_sample_metadata;
+    S.local.der = S.local.der || {};
+    if (der) {
+      body.push(el("div", { class: "section-label", text: "From the column names (you merged subject blocks)" }),
+        el("div", { class: "item-sub", text: `${Object.keys(der.values).length} column names were split into a subject code and the rest of the name, e.g. ${Object.entries(der.values).slice(0, 2).map(([k, v]) => `${k} → ${v.subject_code} / ${v.name_suffix}`).join(", ")}.` }),
+        el("div", { class: "items" }, der.columns.map((c) => {
+          const l = (S.local.der[c.name] = S.local.der[c.name] || {});
+          const v = (f) => (f in l ? l[f] : c[f]);
+          const cb = el("input", { type: "checkbox", checked: v("keep") !== false });
+          cb.addEventListener("change", () => { l.keep = cb.checked; });
+          return el("div", { class: "item" }, el("div", { class: "item-head" }, el("span", { class: "item-name", text: c.name })),
+            el("div", { class: "item-controls" },
+              fieldBox("Audit kind", select(S.vocab.audit_kind, v("audit_kind"), (x) => { l.audit_kind = x; renderGuide(); })),
+              fieldBox("What it is (your words)", textInput(v("label"), (x) => { l.label = x; })),
+              el("div", { class: "full" }, el("label", { class: "check" }, cb, "keep in the outputs"))));
+        })));
+    }
+    const derDecision = () => der ? der.columns.map((c) => ({ name: c.name, audit_kind: S.local.der[c.name]?.audit_kind ?? c.audit_kind,
+      label: S.local.der[c.name]?.label ?? c.label, keep: S.local.der[c.name]?.keep ?? c.keep })) : undefined;
     const fileIn = el("input", { type: "file", accept: ".csv,.tsv,.txt", class: "input" });
     fileIn.addEventListener("change", async () => {
       if (!fileIn.files[0]) return;
@@ -1128,8 +1150,9 @@
       title: "Do you have a sample metadata file?",
       question: "Your table has samples in columns, so information about samples (subject, time point, batch, group…) usually lives in a separate sheet. You can also skip this; that is recorded.",
       body,
-      extraActions: [el("button", { class: "btn btn-sm", type: "button", text: "Skip (record as missing)", onclick: () => submit({ metadata: { skip: true } }) })],
+      extraActions: [el("button", { class: "btn btn-sm", type: "button", text: der ? "No metadata file" : "Skip (record as missing)", onclick: () => submit({ metadata: { skip: true }, ...(der ? { derived: derDecision() } : {}) }) })],
       decision: () => {
+        if ((!meta || meta.skipped || !meta.report) && der) return { metadata: { skip: true }, derived: derDecision() };
         if (!meta || meta.skipped || !meta.report) throw new Error("Upload a file, or use 'Skip'.");
         const cols = meta.columns.filter((c) => c.role !== "sample_id").map((c) => {
           const l = S.local.metaCols?.[c.column] || {};
@@ -1138,7 +1161,7 @@
           return x;
         });
         const acc = Object.entries(S.local.near || {}).filter(([, v]) => v).map(([k]) => k.split("|"));
-        return { metadata: { columns: cols, accept_near_misses: acc } };
+        return { metadata: { columns: cols, accept_near_misses: acc }, ...(der ? { derived: derDecision() } : {}) };
       },
     };
   }
@@ -1185,9 +1208,7 @@
         ["no", "unsure"].includes(a.in_supported_scope) ? el("span", { class: "badge v-warning", text: "outside current scope" }) : null, " ", provBadge(a.provenance, a.source)])),
       li("Feature ID", layout() === "samples_in_rows" ? "column headers" : d.feature_identity.group_ids.map((g) => G(g).columns[0]).join(" + ") || "—"),
       ...groups.filter(([, x]) => x.role === "value").map(([g, x]) => li(`Values${x.keep === false ? " (excluded)" : ""}`, [`${x.label || G(g).columns[0]} · ${G(g).n_columns} col · ${x.assay_label}`, " ",
-        d.literature?.blocks?.[g] ? el("span", { class: `badge ${(SUG[d.literature.blocks[g].suggested_for_analysis] || SUG.unsure)[1]}`, text: `literature: ${d.literature.blocks[g].suggested_for_analysis}` }) : null, " ",
         provBadge(x.provenance, x.source)])),
-      li("Literature", d.literature ? `${Object.keys(d.literature.papers || {}).length} paper(s), ${(d.literature.passages || []).length} passage(s) saved for later steps` : "not searched"),
       li("Annotations", `${groups.filter(([, x]) => x.role === "feature_annotation").length}${flags.length ? ` (${flags.map(([g, x]) => `${G(g).columns[0]}: ${x.n_flagged ?? "?"} flagged`).join(", ")})` : ""}`),
       li("Sample info", groups.filter(([, x]) => x.role === "sample_metadata").map(([g, x]) => `${G(g).columns[0]} (${pretty(x.audit_kind || "?")})`).join(", ")
         + (d.metadata?.columns ? ` + ${d.metadata.columns.length - 1} from the metadata file` : "") || "—"),
@@ -1250,6 +1271,7 @@
       spec.question ? el("p", { class: "q" }, spec.question) : null,
       qs.length && S.step !== "review" ? el("div", { class: "notice" }, el("b", { text: "The AI asks: " }), qs.map((q) => q.question).join(" ")) : null,
       groupingTrouble(),
+      commandBox(),
       note,
       el("div", { class: "guide-body" }, spec.body),
       spec.disagree ? disagreeBox(...spec.disagree) : null,

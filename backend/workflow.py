@@ -18,7 +18,7 @@ import uuid
 from collections import Counter, OrderedDict
 from pathlib import Path
 
-from . import ai, grouping, literature, llm_providers as llm
+from . import ai, consistency, grouping, llm_providers as llm
 from .format_detect import signature_hint, signature_prefill
 from .mock_llm import expand_sample_rules
 from .parsing import cell, is_missing, parse_bytes, sanitize_filename
@@ -339,8 +339,6 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
             d["sample_rules"][g["group_id"]] = _snap(dict(g["sample_id_rule"], source="computed"),
                                                      ("strip_prefix", "strip_suffix"))
     d["sample_rules_ai"] = prop.get("samples", [])
-    d["literature_queries_ai"] = prop.get("literature_queries", [])
-    d["literature"] = None
     d["clarifying_questions"] = [dict(q, group_id=to_gid(q.get("group_id"))) for q in prop.get("clarifying_questions", [])]
     d["rejected"] = prop.get("rejected", [])
     refresh_samples(s, d)
@@ -581,6 +579,22 @@ def _confirm_step(s, step, decision, on_progress=None):
             if gid in d["sample_rules"]:
                 d["sample_rules"][gid]["strip_prefix"] = rule.get("strip_prefix", "")
                 d["sample_rules"][gid]["strip_suffix"] = rule.get("strip_suffix", "")
+                if "add_prefix" in rule:
+                    d["sample_rules"][gid]["add_prefix"] = _clean(rule.get("add_prefix"), 60)
+
+    if "derived" in decision:   # sample information parsed from column names (v2.3)
+        der = d.get("derived_sample_metadata")
+        if der:
+            by = {c["name"]: c for c in der["columns"]}
+            for ed in decision["derived"]:
+                c = by.get(ed.get("name"))
+                if not c:
+                    continue
+                if ed.get("audit_kind") not in VOCABULARY["audit_kind"]:
+                    raise StepError(f"Choose an audit kind for '{c['name']}'.")
+                c["audit_kind"] = ed["audit_kind"]
+                c["label"] = _clean(ed.get("label", c.get("label")))
+                c["keep"] = bool(ed.get("keep", True))
 
     if "samples" in decision:
         for sid, ed in decision["samples"].items():
@@ -931,50 +945,329 @@ def _name_part_index(s):
     return seen
 
 
-# ---------------------------------------------------------------- literature (RAG)
-
-def literature_description(s, d):
-    """What the literature step works from: the (confirmed) assays and kept value
-    blocks, with labels and computed statistics. No data values."""
-    blocks = []
-    for gid in value_blocks(s, d):
-        it, g = d["groups"][gid], s.groups_by_id[gid]
-        p = g.get("profile") or {}
-        blocks.append({"group_id": gid, "assay_label": it.get("assay_label") or d["assays"][0]["assay_label"],
-                       "label": it.get("label") or "", "n_columns": g["n_columns"],
-                       "name": literature.block_name(it.get("label"), g.get("pattern")),
-                       "stats": {k: p.get(k) for k in ("median", "min", "max", "frac_zero", "frac_na",
-                                                        "integer_valued", "log10_span")}})
-    return {"layout": d["layout"]["value"],
-            "assays": [{k: a.get(k) for k in ("assay_label", "omics_type", "source_software")} for a in d["assays"]],
-            "value_blocks": blocks}
+# Literature retrieval (backend/literature.py) is deferred to a future Tier 2 feature, not
+# abandoned: Step 0 runs before the research-focus intake, so it cannot yet say which block
+# should be analysed. The module (with its quote verification) is kept but not called here.
 
 
-def suggested_queries(s, d):
-    desc = literature_description(s, d)
-    return list(dict.fromkeys((d.get("literature_queries_ai") or []) + literature.default_queries(desc)))[
-        :literature.MAX_QUERIES]
+# ---------------------------------------------------------------- "ask the AI to do it": plan, preview, apply
+
+def _command_payload(s, d, instruction):
+    def cols(g):
+        c = g["columns"]
+        return c if len(c) <= 4 else c[:3] + [f"... ({len(c) - 4} more)", c[-1]]
+    groups = []
+    for g in s.groups:
+        it = d["groups"][g["group_id"]]
+        x = {"group_id": g["group_id"], "n_columns": g["n_columns"], "columns": cols(g), "type": g["type"],
+             "role": it["role"], "label": it.get("label"), "keep": it.get("keep", True)}
+        for k in ("audit_kind", "assay_label"):
+            if it.get(k):
+                x[k] = it[k]
+        if it.get("marks_rows_as_suspect"):
+            x["marks_rows_as_suspect"] = True
+        if g["type"] == "numeric":
+            x["median"] = (g.get("profile") or {}).get("median")
+        groups.append(x)
+    ids = list(d["samples"])
+    return {"instruction": instruction, "layout": d["layout"]["value"],
+            "assays": [a["assay_label"] for a in d["assays"]], "groups": groups,
+            "samples": {"n": len(ids), "first": [{"sample": x, "label": d["samples"][x].get("label"),
+                                                   "is_study_sample": d["samples"][x].get("is_study_sample")}
+                                                  for x in ids[:200]]}}
 
 
-def run_literature(s, queries=None, on_progress=None):
+def _check_action(s, d, a):
+    """-> (normalized action dict with a plain-words description, problems)."""
+    from fnmatch import fnmatchcase
+    x = {k: v for k, v in a.items() if v not in (None, [], "")}
+    probs = []
+    gids = [g for g in dict.fromkeys(a.get("group_ids") or [])]
+    bad = [g for g in gids if g not in d["groups"]]
+    if bad:
+        probs.append(f"unknown group(s) {', '.join(bad[:5])} ignored")
+    gids = [g for g in gids if g in d["groups"]]
+    act = a["action"]
+    names = lambda gs: ", ".join(s.groups_by_id[g]["columns"][0] for g in gs[:4]) + (f" … (+{len(gs) - 4})" if len(gs) > 4 else "")
+    ncols = sum(s.groups_by_id[g]["n_columns"] for g in gids)
+    if act == "set_samples":
+        pats = a.get("samples") or []
+        hit = [sid for sid in d["samples"] if any(sid == p or fnmatchcase(sid, p) for p in pats)]
+        if not hit:
+            probs.append("no sample matches")
+        if a.get("label") is None and a.get("is_study_sample") is None:
+            probs.append("nothing to change")
+        what = ", ".join(filter(None, [f"label '{a['label']}'" if a.get("label") else None,
+                                       None if a.get("is_study_sample") is None else
+                                       ("study sample" if a["is_study_sample"] else "not a study sample")]))
+        x.update(sample_ids=hit, description=f"{len(hit)} sample(s) ({', '.join(hit[:4])}{' …' if len(hit) > 4 else ''}): {what}")
+        return x, probs
+    if not gids:
+        probs.append("no group to act on")
+        return dict(x, group_ids=[], description=act), probs
+    x["group_ids"] = gids
+    if act == "set_keep":
+        if a.get("keep") is None:
+            probs.append("keep is missing")
+        ids_ = [g for g in gids if d["groups"][g]["role"] in ("feature_id", "sample_id")]
+        if ids_ and a.get("keep") is False:
+            probs.append(f"identifier columns cannot be excluded: {names(ids_)}")
+            x["group_ids"] = gids = [g for g in gids if g not in ids_]
+            ncols = sum(s.groups_by_id[g]["n_columns"] for g in gids)
+        verb = "leave out of the outputs" if a.get("keep") is False else "keep in the outputs"
+        x["description"] = f"{verb}: {len(gids)} group(s), {ncols} column(s) — {names(gids)}"
+    elif act == "set_role":
+        if a.get("role") not in VOCABULARY["column_role"] or a.get("role") == UNRESOLVED:
+            probs.append(f"'{a.get('role')}' is not an allowed role")
+        else:
+            ok = []
+            for g in gids:
+                v = validate_group(dict(d["groups"][g], role=a["role"]), s.groups_by_id[g], s.cols, layout_of(d))
+                if v["status"] == "contradicted":
+                    probs.append(f"{names([g])}: " + " ".join(v["messages"]))
+                else:
+                    ok.append(g)
+            x["group_ids"] = gids = ok
+        x["description"] = f"role '{pretty(a.get('role'))}' for {len(gids)} group(s): {names(gids)}"
+    elif act == "set_label":
+        if not (a.get("label") or "").strip():
+            probs.append("label is empty")
+        x["description"] = f"label '{a.get('label')}' for {len(gids)} group(s): {names(gids)}"
+    elif act == "set_audit_kind":
+        if a.get("audit_kind") not in VOCABULARY["audit_kind"]:
+            probs.append(f"'{a.get('audit_kind')}' is not an allowed audit kind")
+        not_meta = [g for g in gids if d["groups"][g]["role"] != "sample_metadata"]
+        if not_meta:
+            probs.append(f"not sample information (role unchanged): {names(not_meta)}")
+            x["group_ids"] = gids = [g for g in gids if g not in not_meta]
+        x["description"] = f"audit kind '{pretty(a.get('audit_kind'))}' for {len(gids)} group(s): {names(gids)}"
+    elif act == "set_assay":
+        if not (a.get("assay_label") or "").strip():
+            probs.append("assay label is empty")
+        x["description"] = f"assay '{a.get('assay_label')}' for {len(gids)} group(s): {names(gids)}"
+    elif act == "set_suspect":
+        x["description"] = (f"{'mark' if a.get('marks_rows_as_suspect') else 'unmark'} as marking rows suspect: "
+                            f"{names(gids)}")
+    elif act == "merge":
+        if len(gids) < 2:
+            probs.append("a merge needs at least two existing groups")
+        x["description"] = f"merge {len(gids)} groups ({ncols} columns) into one: {names(gids)}"
+    elif act == "split":
+        g = gids[0]
+        cols = [c for c in a.get("columns") or [] if c in s.groups_by_id[g]["columns"]]
+        if not cols:
+            probs.append("no column of that group named")
+        elif len(cols) == s.groups_by_id[g]["n_columns"]:
+            probs.append("that is every column of the group")
+        x.update(group_ids=[g], columns=cols, description=f"take {len(cols)} column(s) out of {names([g])}: {', '.join(cols[:4])}")
+    else:
+        probs.append(f"unknown action '{act}'")
+        x["description"] = act
+    return x, probs
+
+
+def pretty(x):
+    return str(x or "").replace("_", " ")
+
+
+def plan_command(s, instruction):
+    """Ask the AI to turn an instruction into actions. Nothing is applied: you get a preview."""
     d = s.draft
-    if not literature.enabled():
-        raise StepError("Literature search is turned off (PRISM_LITERATURE=off).")
-    desc = literature_description(s, d)
-    if not desc["value_blocks"]:
-        raise StepError("Keep at least one value block first: the search is about the measurements.")
-    queries = [literature._term(q) if q.count('"') % 2 else q.strip() for q in (queries or []) if q and q.strip()] \
-        or suggested_queries(s, d)
-    ok, _ = llm.available()
-    try:
-        rec = literature.run(desc, queries, ai_on=d["ai"]["enabled"] and ok, log=s.log, on_progress=on_progress)
-    except literature.LiteratureError as e:
-        raise StepError(str(e) + " Check your internet connection; you can continue without it.")
-    d["literature"] = rec
-    s.log("literature", {k: rec.get(k) for k in ("status", "queries", "summary", "blocks", "for_later_steps",
-                                                   "rejected", "error")})
+    instruction = _clean(instruction, 1000)
+    if not instruction:
+        raise StepError("Write what you want the AI to do.")
+    ok, why = llm.available()
+    if not (ok and d["ai"]["enabled"]):
+        raise StepError("The AI is off or unavailable: " + (why or "turn it on to give it instructions."))
+    resp, err = ai.command(_command_payload(s, d, instruction), s.sha, log=s.log)
+    if resp is None:
+        raise StepError("The AI could not answer: " + (err or "no answer"))
+    actions = []
+    for k, a in enumerate(resp.actions):
+        x, probs = _check_action(s, d, a.model_dump())
+        usable = not [p for p in probs if p.startswith(("unknown action", "no group", "no sample", "nothing to",
+                                                         "keep is", "label is", "assay label is", "a merge needs",
+                                                         "no column", "that is every", "'"))] and \
+            (x.get("group_ids") or x.get("sample_ids"))
+        actions.append(dict(x, index=k, problems=probs, usable=bool(usable)))
+    cmd = {"id": uuid.uuid4().hex[:8], "instruction": instruction, "reply": resp.reply,
+           "not_possible": resp.not_possible, "actions": actions}
+    d["pending_command"] = cmd
+    s.log("ai_command_plan", cmd)
+    s.save()
+    return {"draft": public_draft(s), "command": cmd}
+
+
+def apply_command(s, cmd_id, accept=None):
+    """Apply the accepted actions of the pending instruction (your confirmation)."""
+    d = s.draft
+    cmd = d.get("pending_command")
+    if not cmd or cmd["id"] != cmd_id:
+        raise StepError("That instruction is no longer pending; ask again.")
+    chosen = [a for a in cmd["actions"] if a["usable"] and (accept is None or a["index"] in accept)]
+    done, skipped = [], []
+    for a in chosen:
+        x, probs = _check_action(s, d, a)          # ids may have changed by an earlier merge / split
+        gids = x.get("group_ids") or []
+        if not (gids or x.get("sample_ids")):
+            skipped.append({"action": a["description"], "why": "; ".join(probs) or "nothing left to change"})
+            continue
+        steps = {step_for_group(s, d, g) for g in gids}
+        act = a["action"]
+        if act == "merge":
+            merge_groups(s, gids, f"Instruction: {cmd['instruction']}")
+        elif act == "split":
+            split_columns(s, gids[0], x["columns"])
+        elif act == "set_samples":
+            for sid in x["sample_ids"]:
+                it = d["samples"][sid]
+                if a.get("label"):
+                    it["label"] = _clean(a["label"], 120)
+                if a.get("is_study_sample") is not None:
+                    it["is_study_sample"] = bool(a["is_study_sample"])
+                it["user_edited"] = True
+            steps = {"samples"}
+        else:
+            for g in gids:
+                it = d["groups"][g]
+                before = copy.deepcopy(it)
+                if act == "set_keep":
+                    it["keep"] = bool(a["keep"])
+                    if not a["keep"] and it["role"] == UNRESOLVED:
+                        it["role"] = "ignore"
+                elif act == "set_role":
+                    it["role"] = a["role"]
+                elif act == "set_label":
+                    it["label"] = _clean(a["label"])
+                elif act == "set_audit_kind":
+                    it["audit_kind"] = a["audit_kind"]
+                elif act == "set_assay":
+                    it["assay_label"] = _clean(a["assay_label"], 120)
+                elif act == "set_suspect":
+                    it["marks_rows_as_suspect"] = bool(a.get("marks_rows_as_suspect"))
+                ai.normalize_item(it)
+                if it["role"] == "value" and not it.get("assay_label"):
+                    it["assay_label"] = d["assays"][0]["assay_label"]
+                if it["role"] == "value" and it["assay_label"] not in [z["assay_label"] for z in d["assays"]]:
+                    d["assays"].append(_snap({"assay_label": it["assay_label"], "omics_type": "unknown",
+                                              "source_software": "unknown", "in_supported_scope": "unsure",
+                                              "scope_reason": "", "source": "user", "confidence": 1.0,
+                                              "evidence": "Added by an instruction."}, ASSAY_FIELDS))
+                _attach_flags(s, g, it)
+                it["validation"] = validate_group(it, s.groups_by_id[g], s.cols, layout_of(d))
+                if it["validation"]["status"] == "contradicted":
+                    d["groups"][g] = before
+                    skipped.append({"action": a["description"], "why": f"{g}: " + " ".join(it["validation"]["messages"])})
+                    continue
+                steps.add(step_for_group(s, d, g))
+        for st in steps:
+            if d["steps"].get(st) == "confirmed":
+                d["steps"][st] = "pending"
+        done.append(a["description"])
+    d["pending_command"] = None
+    refresh_samples(s, d)
+    s.log("ai_command_applied", {"instruction": cmd["instruction"], "applied": done, "skipped": skipped})
+    s.save()
+    return {"draft": public_draft(s), "applied": done, "skipped": skipped}
+
+
+def discard_command(s):
+    s.draft["pending_command"] = None
     s.save()
     return {"draft": public_draft(s)}
+
+
+# ---------------------------------------------------------------- consistency (v2.3): flags you confirm
+
+def consistency_report(s, d):
+    """Deterministic checks: near-identical identifier-named blocks, and sample-ID
+    collisions between blocks of one assay (samples in columns)."""
+    dismissed = set(d.get("consistency_dismissed", []))
+    flags = consistency.block_flags(s.groups_by_id, d["groups"], dismissed)
+    collisions, structure = [], {}
+    if layout_of(d) == "samples_in_columns":
+        by_assay = {}
+        for gid in value_blocks(s, d):
+            by_assay.setdefault(d["groups"][gid].get("assay_label"), []).append(gid)
+        for assay, gids in by_assay.items():
+            ids = {g: sample_ids(s, d, g) for g in gids}
+            codes = {g: consistency.name_code(s.groups_by_id[g]) for g in gids}
+            found, structure[assay] = consistency.sample_collisions(ids, codes)
+            for c in found:
+                first = c["ids"][0]
+                collisions.append(dict(c, kind="sample_id_collision", assay=assay,
+                                       message=(f"Sample ID '{first}' appears in more than one block"
+                                                + (f" ({c['n_ids']} IDs in total)" if c["n_ids"] > 1 else "")
+                                                + " — these need to be distinguished.")))
+    return {"block_flags": flags, "sample_collisions": collisions, "sample_structure": structure}
+
+
+def resolve_consistency(s, action, key=None, group_ids=None, labels=None):
+    d = s.draft
+    if action == "dismiss":
+        if not any(f["key"] == key for f in consistency_report(s, d)["block_flags"]):
+            raise StepError("This flag no longer applies.")
+        d.setdefault("consistency_dismissed", []).append(key)
+        s.log("consistency", {"action": "dismiss", "key": key})
+    elif action == "one_block":
+        flag = next((f for f in consistency_report(s, d)["block_flags"] if f["key"] == key), None)
+        if flag is None:
+            raise StepError("This flag no longer applies.")
+        _treat_as_one_block(s, d, flag)
+    elif action in ("full_names", "labels"):
+        gids = [g for g in (group_ids or []) if g in d["sample_rules"]]
+        if not gids:
+            raise StepError("Choose the blocks whose sample IDs collide.")
+        for g in gids:
+            rule = d["sample_rules"][g]
+            if action == "full_names":
+                rule.update(strip_prefix="", strip_suffix="", add_prefix="")
+            else:
+                lab = _clean((labels or {}).get(g), 60)
+                if not lab:
+                    raise StepError("Give every block a short label.")
+                rule["add_prefix"] = lab if lab.endswith(("_", "-", ".", " ")) else lab + "_"
+        s.log("consistency", {"action": action, "group_ids": gids, "labels": labels})
+    else:
+        raise StepError(f"Unknown action '{action}'.")
+    if d["steps"].get("samples") == "confirmed":
+        d["steps"]["samples"] = "pending"
+    refresh_samples(s, d)
+    s.save()
+    return {"draft": public_draft(s)}
+
+
+DERIVED_COLUMNS = [
+    {"name": "subject_code", "audit_kind": "subject_id", "label": "code at the start of the column name", "keep": True},
+    {"name": "name_suffix", "audit_kind": "timepoint", "label": "rest of the column name (e.g. a time point)", "keep": True},
+]
+
+
+def _treat_as_one_block(s, d, flag):
+    """Your confirmation: one block; the former block boundaries (subject codes) and the
+    rest of each column name become sample information; sample IDs are the full names."""
+    gids = flag["group_ids"]
+    codes = {g: consistency.name_code(s.groups_by_id[g]) for g in gids}
+    der = d.get("derived_sample_metadata") or {"source": "column names of merged blocks",
+                                              "columns": [dict(c) for c in DERIVED_COLUMNS], "values": {}}
+    for g in gids:
+        code = codes[g]
+        for i in s.groups_by_id[g]["indices"]:
+            name = s.table["header"][i]
+            rest = name[len(code):].strip(consistency._SEP) if code and name.startswith(code) else ""
+            der["values"][name] = {"subject_code": code or "", "name_suffix": rest}
+    d["derived_sample_metadata"] = der
+    keep = max(gids, key=lambda g: s.groups_by_id[g]["n_columns"])
+    item = copy.deepcopy(d["groups"][keep])
+    item.update(source="user", evidence=f"You confirmed these {len(gids)} blocks are one measurement "
+                                        f"({', '.join(c or '?' for c in codes.values())} are subjects / samples).")
+    pg = {"m": {"indices": [i for g in gids for i in s.groups_by_id[g]["indices"]], "item": item,
+                "origin": "merged_consistency", "merged_from": gids, "keep_id": keep}}
+    new = _replace_groups(s, d, gids, pg, {"consistency_one_block": gids})
+    for g in new:
+        d["sample_rules"][g] = _snap({"strip_prefix": "", "strip_suffix": "", "source": "user"},
+                                     ("strip_prefix", "strip_suffix"))
+    s.log("consistency", {"action": "one_block", "group_ids": gids, "codes": codes, "into": new})
 
 
 # ---------------------------------------------------------------- sample metadata file (samples in columns)
@@ -1088,10 +1381,9 @@ def public_draft(s):
         "sample_label": sorted({x["label"] for x in d["samples"].values() if x.get("label")}),
     }
     out["unresolved"] = unresolved_items(s, d)
-    out["literature_queries_suggested"] = suggested_queries(s, d) if value_blocks(s, d) else []
-    out["literature_enabled"] = literature.enabled()
     out["name_parts"] = name_parts(s)
     out["ai_ungrouped"] = [g["group_id"] for g in s.groups if g.get("origin") == "ai_unavailable"]
+    out["consistency"] = consistency_report(s, d)
     return out
 
 
@@ -1117,6 +1409,13 @@ def unresolved_items(s, d):
         out.append({"step": "feature_id", "what": d["long_duplicates"]["message"]})
     if not value_blocks(s, d):
         out.append({"step": "values", "what": "No value block is kept."})
+    rep = consistency_report(s, d)
+    for f in rep["block_flags"]:
+        out.append({"step": "values", "flag": f["key"],
+                    "what": f"{len(f['group_ids'])} blocks look statistically identical ({', '.join(c or '?' for c in f['codes'])}): "
+                            "one measurement across subjects, or really different measurements?"})
+    for c in rep["sample_collisions"]:
+        out.append({"step": "samples", "what": c["message"]})
     if any(not d["processing_history"][q]["answer"] for q, _ in HISTORY_QUESTIONS):
         out.append({"step": "history", "what": "Processing-history questions are not all answered."})
     for st in STEPS[:-1]:
