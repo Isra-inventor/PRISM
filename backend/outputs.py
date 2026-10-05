@@ -12,6 +12,7 @@ import csv
 import io
 from collections import Counter, OrderedDict
 
+from . import accounting
 from .parsing import cell, is_missing
 from .schema import SCHEMA_VERSION
 from .profiling import apply_rule
@@ -60,7 +61,7 @@ def feature_key_indices(s, d):
 
 def build(s):
     d = s.draft
-    unresolved = [u for u in unresolved_items(s, d) if u["step"] != "review"]
+    unresolved = [u for u in unresolved_items(s, d) if u["step"] != "review" or u["what"].startswith("Column accounting")]
     if unresolved:
         raise OutputError("Resolve these first: " + "; ".join(u["what"] for u in unresolved[:6]))
     lay = layout_of(d)
@@ -322,7 +323,11 @@ def build(s):
                       if d["sample_id_group"]["value"] else {"from": "value column headers"}),
         "samples": [{"sample": sid, "label": v.get("label") or "", "is_study_sample": bool(v.get("is_study_sample", True)),
                      "provenance": provenance(v, SAMPLE_FIELDS)} for sid, v in st.items()],
-        "excluded_columns": _excluded(s, d),
+        "excluded_columns": [{k: x[k] for k in ("column", "file", "reason", "by", "at")}
+                             for x in accounting.excluded_columns(s, d)],
+        "files": accounting.files_entries(s, d),
+        "column_ledger": {f: {k: v for k, v in x.items() if k != "problems"}
+                          for f, x in accounting.column_ledger(s, d).items()},
         "processing_history": dict(d["processing_history"], software_and_version=d.get("software_and_version", ""),
                                    notes=d.get("history_notes", "")),
         "parse_report": pr,
@@ -387,20 +392,4 @@ def _annotation(s, gid, it, column, i):
         if it.get("flagged_value") is not None:
             out["n_flagged"] = sum(1 for r in s.table["rows"]
                                    if ("" if is_missing(cell(r, i)) else cell(r, i).strip()) == it["flagged_value"])
-    return out
-
-
-def _excluded(s, d):
-    out = []
-    for gid, it in d["groups"].items():
-        g = s.groups_by_id[gid]
-        reason = None
-        if it["role"] == "ignore":
-            reason = "user_excluded" if provenance(it, GROUP_FIELDS) == "user_set" else "ignored"
-        elif it["role"] == "value" and not it.get("keep", True):
-            reason = "value_block_excluded"
-        elif it["role"] in ("feature_annotation", "sample_metadata") and not it.get("keep", True):
-            reason = "user_dropped"
-        if reason:
-            out.extend({"column": c, "reason": reason} for c in g["columns"])
     return out

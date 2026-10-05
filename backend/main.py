@@ -196,7 +196,10 @@ def _do_propose(req):
     with s.lock:
         set_progress(req.progress_id, stage="ai", percent=10,
                      message="Asking the AI to label the column groups" if req.ai else "Preparing manual mode")
-        workflow.build_draft(s, ai_on=req.ai, on_progress=ai_progress(req.progress_id))
+        try:
+            workflow.propose(s, ai_on=req.ai, on_progress=ai_progress(req.progress_id))
+        except workflow.StepError as e:
+            raise HTTPException(422, str(e))
         return {"session": session_payload(s), "draft": workflow.public_draft(s), "digests": s.digests}
 
 
@@ -363,6 +366,19 @@ async def group_columns(req: GroupColumnsRequest):
     return await run_in_threadpool(_structure_op, req, workflow.group_columns, req.columns, req.reason)
 
 
+class UndoRequest(BaseModel):
+    session_id: str
+    edit_id: Optional[str] = None
+
+
+@app.post("/api/undo")
+async def undo(req: UndoRequest):
+    """Undo the latest change, or every change back to and including edit_id."""
+    def fn(s):
+        return {"undone": workflow.edits.undo(s, req.edit_id), "draft": workflow.public_draft(s)}
+    return await run_in_threadpool(_structure_op, req, fn)
+
+
 @app.post("/api/metadata-upload")
 async def metadata_upload(session_id: str = Form(...), file: UploadFile = File(...)):
     s = session_or_404(session_id)
@@ -376,6 +392,8 @@ async def metadata_upload(session_id: str = Form(...), file: UploadFile = File(.
                 d = workflow.upload_metadata(s, file.filename or "metadata.csv", raw)
             except InputError as e:
                 raise HTTPException(415, str(e))
+            except workflow.StepError as e:
+                raise HTTPException(422, str(e))
             (s.dir / "metadata_source.csv").write_bytes(raw)
             return {"draft": d}
     return await run_in_threadpool(work)

@@ -788,6 +788,35 @@
           onclick: () => structOp("/api/discard-command", {}, "Discarding") }))].filter(Boolean));
     return box;
   }
+  // ------------------------------------------------------------ changes + undo (one edit layer, v2.4)
+  async function undoTo(editId) {
+    await structOp("/api/undo", editId ? { edit_id: editId } : {}, "Undoing");
+  }
+  function changesBox() {
+    const ch = S.draft.changes || [];
+    if (!ch.length || S.finalized) return null;
+    const who = { user: "you", ai_patch: "AI patch", question_option: "answer" };
+    const open = !!S.local.changesOpen;
+    return el("div", { class: "changes" },
+      el("div", { class: "changes-head" },
+        el("button", { class: "linkbtn", type: "button", text: `Undo: ${ch[0].summary}`, title: "Undo the latest change", onclick: () => undoTo(null) }),
+        el("button", { class: "linkbtn", type: "button", style: "margin-left:12px", text: open ? "hide changes" : `Changes (${ch.length})`,
+          onclick: () => { S.local.changesOpen = !open; renderGuide(); } })),
+      open ? el("ol", { class: "changes-list" }, ch.map((c, k) => el("li", {},
+        el("span", { class: "item-sub", text: `${c.at.slice(11, 19)} · ${who[c.actor] || c.actor}` }), " ", c.summary,
+        c.n_columns ? el("span", { class: "item-sub", text: ` (${c.n_columns} column${c.n_columns > 1 ? "s" : ""})` }) : null, " ",
+        el("button", { class: "linkbtn", type: "button", text: k ? `undo this and ${k} later` : "undo",
+          onclick: () => undoTo(c.edit_id) })))) : null);
+  }
+  function ledgerTable() {
+    const led = S.draft.column_ledger || {};
+    const cats = ["value", "feature_id", "annotation", "sample_id", "sample_metadata", "excluded", "unresolved", "unaccounted"];
+    return el("table", { class: "ledger" },
+      el("thead", {}, el("tr", {}, el("th", { text: "file" }), el("th", { text: "total" }), cats.map((c) => el("th", { text: pretty(c) })))),
+      el("tbody", {}, Object.entries(led).map(([f, x]) => el("tr", { class: x.unaccounted || x.unresolved ? "bad" : "" },
+        el("td", { text: f }), el("td", { text: x.total }), cats.map((c) => el("td", { text: x[c] || 0 }))))));
+  }
+
   function renderNameParts() {
     const parts = S.draft?.name_parts || [];
     const box = $("name-parts");
@@ -1213,6 +1242,10 @@
       li("Sample info", groups.filter(([, x]) => x.role === "sample_metadata").map(([g, x]) => `${G(g).columns[0]} (${pretty(x.audit_kind || "?")})`).join(", ")
         + (d.metadata?.columns ? ` + ${d.metadata.columns.length - 1} from the metadata file` : "") || "—"),
       li("Samples", `${d.sample_list.n}${nonStudy ? ` (${nonStudy} non-study)` : ""}${d.sample_list.duplicates.length ? ` (${d.sample_list.duplicates.length} duplicated)` : ""}`)));
+    body.push(el("div", { class: "section-label", text: "Every column of every file, accounted for" }), ledgerTable());
+    const excl = d.excluded_columns || [];
+    if (excl.length) body.push(el("details", { class: "saw" }, el("summary", { text: `${excl.length} column(s) left out of the outputs (nothing is deleted)` }),
+      el("ul", { class: "np" }, excl.slice(0, 300).map((x) => el("li", {}, code(x.column), el("span", { class: "item-sub", text: ` ${x.file} · ${x.reason} · by ${pretty(x.by)}` }))))));
     const unres = (d.unresolved || []);
     if (unres.length) {
       body.push(el("div", { class: "section-label", text: "Still open — finishing is blocked" }),
@@ -1271,6 +1304,7 @@
       spec.question ? el("p", { class: "q" }, spec.question) : null,
       qs.length && S.step !== "review" ? el("div", { class: "notice" }, el("b", { text: "The AI asks: " }), qs.map((q) => q.question).join(" ")) : null,
       groupingTrouble(),
+      changesBox(),
       commandBox(),
       note,
       el("div", { class: "guide-body" }, spec.body),

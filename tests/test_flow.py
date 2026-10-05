@@ -233,7 +233,7 @@ def test_wrong_ai_proposal_is_downgraded(flow, monkeypatch):
     f.step("annotations", {"items": [{"group_id": gid_of(f, "adduct"), "role": "value"}]}, expect=422)
     f.step("annotations", {"items": [{"group_id": gid_of(f, "adduct"), "role": "feature_annotation",
                                       "label": "adduct type"}]})
-    assert f.draft["groups"][gid_of(f, "adduct")]["provenance"] == "ai_proposed_corrected"
+    assert f.draft["groups"][gid_of(f, "adduct")]["provenance"] == "user_set"
 
 
 def test_invalid_json_retries_then_manual(flow, monkeypatch):
@@ -299,7 +299,7 @@ def test_provenance_confirmed_vs_corrected(flow):
             f.step(st, {} if st != "sample_info" else {"metadata": {"skip": True}})
     schema = f.finalize()["schema"]
     prov = {a["column"]: a["provenance"] for a in schema["feature_annotations"]}
-    assert prov["adduct"] == "ai_proposed_corrected" and prov["formula"] == "ai_proposed_confirmed"
+    assert prov["adduct"] == "user_set" and prov["formula"] == "ai_proposed_confirmed"
 
 
 def test_out_of_scope_is_a_notice_not_a_block(flow, monkeypatch):
@@ -334,7 +334,7 @@ def test_values_step_keep_and_exclude(flow):
             f.step(st, {} if st == "samples" else {"metadata": {"skip": True}})
     out = f.finalize()
     assert [a for a in out["artifacts"] if a.startswith("value_matrix")] == ["value_matrix_A1_B1.csv"]
-    excl = {x["column"] for x in out["schema"]["excluded_columns"] if x["reason"] == "value_block_excluded"}
+    excl = {x["column"] for x in out["schema"]["excluded_columns"] if x["file"] == "main" and x["by"] == "user" and x["at"]}
     assert "iBAQ S01" in excl and "LFQ intensity S01" not in excl
 
 
@@ -443,7 +443,7 @@ def test_assay_rename_keeps_block_provenance(flow):
     f.step("layout", {"layout": "samples_in_columns", "assays": [dict(a, assay_label="LFQ proteomics")]})
     lfq = f.draft["groups"][gid_of(f, "LFQ intensity S01")]
     assert lfq["assay_label"] == "LFQ proteomics" and lfq["provenance"] == "ai_proposed_confirmed"
-    assert f.draft["assays"][0]["provenance"] == "ai_proposed_corrected"
+    assert f.draft["assays"][0]["provenance"] == "user_set"
 
 
 def test_disagree_can_split_a_column_out(flow, monkeypatch):

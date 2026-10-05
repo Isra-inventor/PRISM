@@ -34,7 +34,7 @@ def test_exclude_many_columns_with_one_instruction(flow):
     assert res["applied"] and not f.draft.get("pending_command")
     dropped = {c for g in f.upload["groups"] if not f.draft["groups"][g["group_id"]]["keep"] for c in g["columns"]}
     assert {"Score", "Sequence coverage [%]", "Peptides"} <= dropped and "Protein IDs" not in dropped
-    assert all(f.draft["groups"][g]["provenance"] in ("ai_proposed_corrected", "user_set")
+    assert all(f.draft["groups"][g]["provenance"] == "ai_proposed_confirmed"
                for g in f.draft["groups"] if not f.draft["groups"][g]["keep"])
     f.confirm_all_as_proposed()
     out = f.finalize()
