@@ -134,7 +134,7 @@ def trial(s, fn, observe):
         s._tx = None
 
 
-UNTRACKED = ("patches", "chat")   # conversation records: undo never rewinds them (undone patches go back to pending)
+UNTRACKED = ("patches", "chat", "questions")   # records; their state lives in tracked keys (answers)   # conversation records: undo never rewinds them (undone patches go back to pending)
 
 
 def _restore(s, snap):
@@ -240,6 +240,7 @@ def undo(s, edit_id=None):
     for p in d.get("patches", []):
         if p.get("status") == "applied" and p.get("edit_id") in gone:
             p.update(status="pending", edit_id=None, undone=True)
+    wf.after_edit(s)
     s.undo_dirty = True
     s.save()
     return [{"edit_id": e["edit_id"], "summary": e["summary"]} for e in undone]
@@ -254,14 +255,14 @@ def changes(s, limit=100):
 # ---------------------------------------------------------------- entry point
 
 def apply_edit(s, op_name, args=None, actor="user", reason=None, corrected=False, step=None, extra=None,
-               summary=None):
+               summary=None, internal=False):
     """Validate and apply one op. Returns {before, after, affected_columns, warnings, summary, result}."""
     if actor not in ACTORS:
         raise EditError(f"Unknown actor '{actor}'.")
     spec = OPS.get(op_name)
     if spec is None:
         raise EditError(f"Unknown operation '{op_name}'.")
-    if actor != "user" and not spec["ai"]:
+    if actor != "user" and not spec["ai"] and not internal:
         raise EditError(f"'{op_name}' can only be done by you in the wizard, not by an AI patch.")
     args = dict(args or {})
     with recording(s, op_name, actor, summary or "", _loggable(args)) as tx:

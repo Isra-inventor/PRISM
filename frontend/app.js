@@ -709,35 +709,70 @@
         el("button", { class: "linkbtn", type: "button", text: "Retry joining chunks",
           onclick: () => structOp("/api/consolidate", {}, "Asking the AI which groups are one family") })) : null);
   }
-  function consistencyFlags() {
-    const flags = S.draft.consistency?.block_flags || [];
-    if (!flags.length) return null;
-    return el("div", {}, flags.map((f) => el("div", { class: "notice accent flag" },
-      el("b", { text: f.message }),
-      el("div", { class: "item-sub", text: `Codes: ${f.codes.join(", ")} · ${f.n_columns} columns. Computed by code from the profiles below, not by the AI.` }),
-      el("details", {}, el("summary", { text: "Profiles" }), el("ul", { class: "np" }, f.evidence.map((e) => el("li", { text: e })))),
-      el("div", { class: "disagree-actions" },
-        el("button", { class: "btn btn-sm btn-light", type: "button", text: "Same measurement: treat as one block",
-          title: "Merges the blocks; each column name's code becomes the subject and the rest (e.g. a time point) goes to sample information; sample IDs keep the full column names",
-          onclick: () => structOp("/api/consistency", { action: "one_block", key: f.key }, "Treating them as one block") }),
-        el("button", { class: "btn btn-sm", type: "button", style: "margin-left:6px", text: "They really are different measurements",
-          onclick: () => structOp("/api/consistency", { action: "dismiss", key: f.key }, "Recording your answer") })))));
+  // ------------------------------------------------------------ question queue (v2.4 §5)
+  async function answerQuestion(q, optionIds) {
+    await structOp("/api/question/answer", { question_id: q.question_id, option_ids: optionIds }, "Applying your answer");
   }
-  function collisionBox() {
-    const cols = S.draft.consistency?.sample_collisions || [];
-    if (!cols.length) return null;
-    S.local.blockLabels = S.local.blockLabels || {};
-    return el("div", {}, cols.map((c) => el("div", { class: "notice accent flag" },
-      el("b", { text: c.message }),
-      el("div", { class: "item-sub", text: `Colliding IDs: ${c.ids.slice(0, 8).join(", ")}${c.n_ids > 8 ? " …" : ""} · blocks: ${c.group_ids.map(groupName).join("; ")}` }),
-      el("div", { class: "disagree-actions", style: "justify-content:flex-start" },
-        el("button", { class: "btn btn-sm btn-light", type: "button", text: "Use the full column names as sample IDs",
-          onclick: () => structOp("/api/consistency", { action: "full_names", group_ids: c.group_ids }, "Updating sample IDs") })),
-      el("div", { class: "item-sub", style: "margin-top:8px", text: "Or give each block a short label that is put in front of its IDs:" }),
-      el("div", { class: "item-controls" }, c.group_ids.map((g) => fieldBox(groupName(g),
-        textInput(S.local.blockLabels[g] || "", (x) => { S.local.blockLabels[g] = x; }, { placeholder: "e.g. liver" })))),
-      el("button", { class: "btn btn-sm", type: "button", text: "Use these labels",
-        onclick: () => structOp("/api/consistency", { action: "labels", group_ids: c.group_ids, labels: S.local.blockLabels }, "Updating sample IDs") }))));
+  async function askChat(text) {
+    await busy("The AI is reading your message", async (pid) => {
+      try {
+        const r = await api("/api/chat", { session_id: S.session.session_id, message: text, step: S.step, progress_id: pid });
+        S.draft = r.draft; if (r.session) S.session = r.session;
+      } catch (e) { S.local.error = e.message; }
+    });
+    renderAll();
+  }
+  function questionCard(q) {
+    if (q.status !== "open") {
+      const a = q.answer || {};
+      return el("div", { class: "question done" }, q.status === "answered" ? "✓ " : "— ", el("span", { text: q.text }), " ",
+        el("b", { text: q.status === "answered" ? (a.labels || []).join("; ") : "dismissed" }), " ",
+        a.edit_id ? el("button", { class: "linkbtn", type: "button", text: "Undo", onclick: () => undoTo(a.edit_id) }) : null);
+    }
+    S.local.qpick = S.local.qpick || {};
+    const pick = (S.local.qpick[q.question_id] = S.local.qpick[q.question_id] || {});
+    const optBtn = (o) => {
+      const n = o.n_columns ? ` (${o.n_columns} column${o.n_columns > 1 ? "s" : ""})` : "";
+      if (o.chat) return el("button", { class: "btn btn-sm", type: "button", text: o.label, disabled: !aiReady(), onclick: () => askChat(o.chat) });
+      if (q.type === "multi") {
+        const cb = el("input", { type: "checkbox", checked: !!pick[o.option_id], disabled: !!(o.problems || []).length });
+        cb.addEventListener("change", () => { pick[o.option_id] = cb.checked; });
+        return el("label", { class: "check" }, cb, o.label + n, (o.problems || []).length ? el("span", { class: "item-sub warn-text", text: ` — not possible: ${o.problems.join(" ")}` }) : null);
+      }
+      return el("button", { class: "btn btn-sm btn-light", type: "button", text: o.label + n, disabled: !!(o.problems || []).length,
+        title: (o.problems || []).join(" "), onclick: () => answerQuestion(q, [o.option_id]) });
+    };
+    const other = q.allow_free_text && aiReady() ? (() => {
+      const inp = textInput("", (v) => { pick._text = v; }, { placeholder: "Other… (sent to the AI chat)", cls: "grow" });
+      return el("div", { class: "reconsider" }, inp, el("button", { class: "btn btn-sm", type: "button", text: "Send",
+        onclick: () => pick._text && askChat(`About the question “${q.text}”: ${pick._text}`) }));
+    })() : null;
+    return el("div", { class: "question" },
+      el("div", { class: "question-head" }, el("span", { class: `badge ${q.source === "ai" ? "p-ai" : "p-computed"}`, text: q.source === "ai" ? "AI asks" : "Computed check" }),
+        el("b", { text: " " + q.text })),
+      (q.evidence || []).length ? el("details", {}, el("summary", { text: "Evidence (computed)" }), el("ul", { class: "np" }, q.evidence.map((e) => el("li", { text: e })))) : null,
+      el("div", { class: `question-opts ${q.type === "multi" ? "multi" : ""}` }, q.options.map(optBtn)),
+      q.type === "multi" ? el("button", { class: "btn btn-sm btn-light", type: "button", text: "Answer",
+        onclick: () => { const ids = q.options.filter((o) => pick[o.option_id]).map((o) => o.option_id); if (ids.length) answerQuestion(q, ids); else { S.local.error = "Tick at least one option."; renderGuide(); } } }) : null,
+      other,
+      el("button", { class: "linkbtn", type: "button", text: "Dismiss this question", onclick: () => structOp("/api/question/dismiss", { question_id: q.question_id }, "Recording") }));
+  }
+  function stepQuestions(step) {
+    const all = (S.draft.questions || []).filter((q) => (q.step || "review") === step);
+    const open = all.filter((q) => q.status === "open"), done = all.filter((q) => q.status !== "open");
+    if (!all.length) return null;
+    return el("div", { class: "questions" }, open.map(questionCard), done.length ? el("details", {}, el("summary", { text: `${done.length} answered here` }), done.map(questionCard)) : null);
+  }
+  function questionTray() {
+    const open = (S.draft.questions || []).filter((q) => q.status === "open");
+    if (!open.length) return null;
+    const on = !!S.local.trayOpen;
+    const label = (st) => (STEPS.find(([id]) => id === st) || [st, st])[1];
+    return el("div", { class: "qtray" },
+      el("button", { class: "linkbtn", type: "button", onclick: () => { S.local.trayOpen = !on; renderGuide(); } },
+        el("span", { class: "qbadge", text: String(open.length) }), ` open question${open.length > 1 ? "s" : ""} — finishing waits for them`),
+      on ? el("ul", { class: "np" }, open.map((q) => el("li", {}, el("span", { class: "item-sub", text: `${label(q.step || "review")}: ` }), q.text, " ",
+        q.step !== S.step ? el("button", { class: "linkbtn", type: "button", text: "go there", onclick: () => go(q.step || "review") }) : null))) : null);
   }
   // ------------------------------------------------------------ AI patches: diff cards (v2.4 §4.8)
   const fmtVal = (v) => v == null ? "—" : Array.isArray(v) ? (v.map((x) => x === "" ? "(empty)" : x).join(", ") || "none") : typeof v === "boolean" ? (v ? "yes" : "no") : String(v) || "—";
@@ -1061,7 +1096,7 @@
     const all = focusGroups("values");
     const blocks = all.filter((g) => D(g).role === "value" || (D(g).role === "unresolved" && G(g).kind === "numeric_block"));
     const others = all.filter((g) => !blocks.includes(g));
-    const body = [consistencyFlags(), el("div", {}, blocks.map(valueCard))];
+    const body = [el("div", {}, blocks.map(valueCard))];
     if (others.length) {
       body.push(el("div", { class: "section-label", text: "Other numeric columns" }));
       body.push(el("p", { class: "q", text: "Covariates and technical values (age, CD4 count, iron, scale factors…) usually describe samples. Change any of them if needed." }));
@@ -1129,7 +1164,6 @@
       if (sid === d.sample_id_group.value) body.push(idPreview(d.sample_list.ids));
       else body.push(el("div", { class: "item-sub", text: "The ID list updates after you confirm." }));
     }
-    body.unshift(collisionBox());
     const ids = Object.keys(d.samples);
     const isStudy = (s) => (S.local.samples?.[s] && "is_study_sample" in S.local.samples[s] ? S.local.samples[s].is_study_sample : d.samples[s].is_study_sample);
     const non = ids.filter((s) => !isStudy(s));
@@ -1347,14 +1381,14 @@
     const err = S.local.error ? el("div", { class: "alert alert-error guide-err", text: S.local.error }) : null;
     const note = S.local.note ? el("div", { class: "notice", text: S.local.note }) : null;
     const status = st === "confirmed" ? " · confirmed" : st === "not_applicable" ? " · not needed for this layout" : "";
-    const qs = (S.draft.clarifying_questions || []).filter((q) => !q.group_id || focusGroups(S.step).includes(q.group_id));
     $("guide").replaceChildren(...[
       datalists(),
       el("div", { class: "guide-step" }, el("span", { text: `Step ${idx + 1} of 8 · ${STEPS[idx][1]}${status}` }),
         S.draft.ai.error && S.draft.ai.enabled ? el("span", { class: "badge v-warning", title: S.draft.ai.error, text: "AI unavailable" }) : null),
       el("h3", { text: spec.title }),
       spec.question ? el("p", { class: "q" }, spec.question) : null,
-      qs.length && S.step !== "review" ? el("div", { class: "notice" }, el("b", { text: "The AI asks: " }), qs.map((q) => q.question).join(" ")) : null,
+      questionTray(),
+      stepQuestions(S.step),
       groupingTrouble(),
       changesBox(),
       chatBox(),

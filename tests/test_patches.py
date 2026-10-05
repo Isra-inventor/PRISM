@@ -194,6 +194,12 @@ def test_merge_assays_and_derive_feature_annotation(flow, monkeypatch):
     apply(f, [m["patch_id"], d["patch_id"]])
     assert [a["assay_label"] for a in f.draft["assays"]] == ["metabolon"]
     assert {it["assay_label"] for it in f.draft["groups"].values() if it["role"] == "value"} == {"metabolon"}
+    q = next(q for q in f.draft["questions"] if q["kind"] == "unclassified_part")
+    assert q["status"] == "open" and q["text"].startswith("3 feature name(s) have an empty feature class")
+    r = f.c.post("/api/question/answer", json={"session_id": f.sid, "question_id": q["question_id"], "option_ids": ["o1"]})
+    assert r.status_code == 200, r.text
+    f.draft = r.json()["draft"]
+    assert f.draft["derived_feature_annotations"][0]["display_labels"] == {"": "unclassified"}
     f.confirm_all_as_proposed()
     out = f.finalize()
     fm = list(csv.reader(io.StringIO(f.export("feature_metadata.csv"))))
@@ -201,6 +207,7 @@ def test_merge_assays_and_derive_feature_annotation(flow, monkeypatch):
     assert fm[1][0] == "Amino Acid_10" and fm[1][-2:] == ["Amino Acid", "10"] and fm[-1][-2:] == ["", "30"]
     ann = {x["column"]: x for x in out["schema"]["feature_annotations"]}
     assert ann["feature_class"]["derived_from"] == "feature_names" and ann["feature_class"]["rule"]["delimiter"] == "_"
+    assert ann["feature_class"]["display_labels"] == {"": "unclassified"}
     assert "_10" in fm[-3][0]                                         # original names unchanged
 
 

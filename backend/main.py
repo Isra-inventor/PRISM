@@ -301,21 +301,6 @@ async def consolidate(req: SessionRequest):
     return await run_in_threadpool(_structure_op, req, workflow.retry_consolidation)
 
 
-class ConsistencyRequest(BaseModel):
-    session_id: str
-    action: str                      # one_block | dismiss | full_names | labels
-    key: Optional[str] = None
-    group_ids: List[str] = []
-    labels: dict = {}
-
-
-@app.post("/api/consistency")
-async def consistency_action(req: ConsistencyRequest):
-    """Your answer to a consistency flag (v2.3): nothing is merged or renamed without it."""
-    return await run_in_threadpool(_structure_op, req, workflow.resolve_consistency, req.action, req.key,
-                                   req.group_ids, req.labels)
-
-
 class ChatRequest(BaseModel):
     session_id: str
     message: str = ""
@@ -350,6 +335,24 @@ async def patch_apply(req: PatchRequest):
 @app.post("/api/patch/dismiss")
 async def patch_dismiss(req: PatchRequest):
     return await run_in_threadpool(_structure_op, req, workflow.dismiss_patches, req.patch_ids)
+
+
+class QuestionRequest(BaseModel):
+    session_id: str
+    question_id: str
+    option_ids: List[str] = []
+    text: Optional[str] = None
+
+
+@app.post("/api/question/answer")
+async def question_answer(req: QuestionRequest):
+    """Your answer to a queued question: its options' patches go through the edit layer."""
+    return await run_in_threadpool(_structure_op, req, workflow.answer_question, req.question_id, req.option_ids, req.text)
+
+
+@app.post("/api/question/dismiss")
+async def question_dismiss(req: QuestionRequest):
+    return await run_in_threadpool(_structure_op, req, workflow.dismiss_question, req.question_id, req.text)
 
 
 @app.post("/api/merge-check")

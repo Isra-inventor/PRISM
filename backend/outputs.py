@@ -12,7 +12,7 @@ import csv
 import io
 from collections import Counter, OrderedDict
 
-from . import accounting, derive
+from . import accounting, derive, questions
 from .parsing import cell, is_missing
 from .schema import SCHEMA_VERSION
 from .profiling import apply_rule
@@ -311,8 +311,6 @@ def build(s):
     if pr["decimal_comma_columns"]:
         flags.append({"flag": "decimal_comma_values",
                       "detail": "Values with a decimal comma were copied as-is: " + ", ".join(pr["decimal_comma_columns"][:5])})
-    if d.get("clarifying_questions"):
-        flags.append({"flag": "open_ai_questions", "detail": "; ".join(q["question"] for q in d["clarifying_questions"][:3])})
 
     schema = {
         "schema_version": SCHEMA_VERSION,
@@ -361,7 +359,10 @@ def build(s):
                "models_used": d["ai"].get("models_used", []), "prompt_version": d["ai"]["prompt_version"],
                "temperature": d["ai"]["temperature"], "enabled": d["ai"]["enabled"]},
         "signature_hint": d.get("signature_hint"),
-        "clarifying_questions": d.get("clarifying_questions", []),
+        "questions": [{"question_id": q["question_id"], "source": q["source"], "type": q["type"], "text": q["text"],
+                       "applies_to": q["applies_to"], "status": q["status"],
+                       "answer": {k: (q["answer"] or {}).get(k) for k in ("labels", "text", "by", "at")}
+                       if q["answer"] else None} for q in questions.public(d)],
         "log_ref": f"{s.sid}.jsonl",
     }
     return schema, artifacts, flags

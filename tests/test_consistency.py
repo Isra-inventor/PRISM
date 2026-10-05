@@ -50,10 +50,14 @@ def confirm_rest(f):
     f.step("history", HISTORY)
 
 
-def act(f, **body):
-    r = f.c.post("/api/consistency", json={"session_id": f.sid, **body})
+def answer(f, kind, label_start):
+    q = next(q for q in f.draft["questions"] if q["kind"] == kind and q["status"] == "open")
+    opt = next(o for o in q["options"] if o["label"].startswith(label_start))
+    r = f.c.post("/api/question/answer", json={"session_id": f.sid, "question_id": q["question_id"],
+                                                "option_ids": [opt["option_id"]]})
     assert r.status_code == 200, r.text
     f.upload, f.draft = r.json()["session"], r.json()["draft"]
+    return q
 
 
 def test_near_identical_subject_blocks_are_flagged_not_merged(flow, monkeypatch):
@@ -73,8 +77,8 @@ def test_near_identical_subject_blocks_are_flagged_not_merged(flow, monkeypatch)
 def test_one_block_parses_subject_and_suffix_into_sample_information(flow, monkeypatch):
     monkeypatch.setattr(mock_llm.MockLLM, "respond", staticmethod(per_code))
     f = flow(J)
-    key = f.draft["consistency"]["block_flags"][0]["key"]
-    act(f, action="one_block", key=key)
+    q = answer(f, "near_identical_blocks", "One measurement")
+    assert next(x for x in f.draft["questions"] if x["question_id"] == q["question_id"])["status"] == "answered"
     values = [g for g in f.upload["groups"] if f.draft["groups"][g["group_id"]]["role"] == "value"]
     assert len(values) == 1 and values[0]["n_columns"] == 27 and values[0]["origin"] == "merged_consistency"
     assert not f.draft["consistency"]["block_flags"] and not f.draft["consistency"]["sample_collisions"]
@@ -95,14 +99,14 @@ def test_global_sample_id_collision_is_caught(flow, monkeypatch):
     across blocks and must be told apart before finishing (never merged silently)."""
     monkeypatch.setattr(mock_llm.MockLLM, "respond", staticmethod(per_code))
     f = flow(J)
-    act(f, action="dismiss", key=f.draft["consistency"]["block_flags"][0]["key"])
+    answer(f, "near_identical_blocks", "Separate measurements")
     assert not f.draft["consistency"]["block_flags"]
     col = f.draft["consistency"]["sample_collisions"]
     assert len(col) == 1 and "'0' appears in more than one block" in col[0]["message"]
     assert "0" in col[0]["ids"] and len(col[0]["group_ids"]) >= 2
     confirm_rest(f)
     assert "appears in more than one block" in f.finalize(expect=422)["detail"]
-    act(f, action="full_names", group_ids=col[0]["group_ids"])
+    answer(f, "sample_id_collision", "Use the full column names")
     assert not f.draft["consistency"]["sample_collisions"]
     f.step("samples", {})
     out = f.finalize()
@@ -132,7 +136,7 @@ def test_collision_with_descriptive_names_and_block_labels(flow, monkeypatch):
     col = f.draft["consistency"]["sample_collisions"]
     assert len(col) == 1 and col[0]["ids"] == ["S1"]
     gids = col[0]["group_ids"]
-    act(f, action="labels", group_ids=gids, labels={gids[0]: "liver", gids[1]: "kidney"})
+    answer(f, "sample_id_collision", "Put each block's label")
     assert sorted(f.draft["sample_list"]["ids"]) == ["kidney_S1", "kidney_S3", "liver_S1", "liver_S2"]
 
 

@@ -135,7 +135,9 @@ what the statistics suggest, e.g. "LFQ intensity, apparently raw linear scale (m
   side). feature_identity lists YOUR group_ids whose values identify each feature (several =
   composite key such as m/z + retention time); use [] when feature names are column headers.
 - samples: sample names or glob patterns (e.g. "QC_*") with a label and is_study_sample.
-- clarifying_questions for anything you cannot resolve from the digest.
+- clarifying_questions for anything you cannot resolve from the digest: a question with type
+  (single / multi / confirm), text, applies_to {{columns}}, and clickable options; each option may
+  carry the patches it would apply (same format and ops as in the chat). Ask instead of guessing.
 - Respect everything under already_confirmed."""
 
 
@@ -174,8 +176,7 @@ def response_schema():
         "samples": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
             "pattern_or_sample": s(), "label": s(), "is_study_sample": b(),
             "confidence": n(), "evidence": s()}, "required": ["pattern_or_sample", "label", "is_study_sample"]}},
-        "clarifying_questions": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
-            "group_id": s(nullable=True), "question": s()}, "required": ["question"]}},
+        "clarifying_questions": questions_schema(),
         "propose_merge": merges_schema(),
     }, "required": ["layout", "assays", "groups"]}
 
@@ -341,11 +342,6 @@ class SampleRule(BaseModel):
     evidence: str = ""
 
 
-class Question(BaseModel):
-    group_id: Optional[str] = None
-    question: str
-
-
 class Merge(BaseModel):
     group_ids: List[str] = []
     reason: str = ""
@@ -372,7 +368,9 @@ class QOption(BaseModel):
 
 class AIQuestion(BaseModel):
     type: str = "single"
-    text: str
+    text: str = ""
+    question: Optional[str] = None      # older shape: {group_id, question}
+    group_id: Optional[str] = None
     applies_to: dict = {}
     step: Optional[str] = None
     options: List[QOption] = []
@@ -391,7 +389,7 @@ class AIResponse(BaseModel):
     assays: List[Assay] = []
     groups: List[GroupLabel] = []
     samples: List[SampleRule] = []
-    clarifying_questions: List[Question] = []
+    clarifying_questions: List[AIQuestion] = []
 
 
 def _clamp(x):

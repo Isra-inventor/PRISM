@@ -18,7 +18,7 @@ import uuid
 from collections import Counter, OrderedDict
 from pathlib import Path
 
-from . import accounting, ai, consistency, derive, grouping, llm_providers as llm
+from . import accounting, ai, consistency, derive, grouping, llm_providers as llm, questions
 from .errors import StepError
 from .format_detect import signature_hint, signature_prefill
 from .mock_llm import expand_sample_rules
@@ -357,10 +357,16 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
             d["sample_rules"][g["group_id"]] = _snap(dict(g["sample_id_rule"], source="computed"),
                                                      ("strip_prefix", "strip_suffix"))
     d["sample_rules_ai"] = prop.get("samples", [])
-    d["clarifying_questions"] = [dict(q, group_id=to_gid(q.get("group_id"))) for q in prop.get("clarifying_questions", [])]
+    old = s.draft or {}
+    d["answers"] = dict(old.get("answers") or {})          # answered / dismissed questions are never asked again
+    d["questions"] = [q for q in old.get("questions", []) if questions.status(old, q) != "open"]
+    d["chat"], d["patches"] = old.get("chat", []), [p for p in old.get("patches", []) if p["status"] == "applied"]
     d["rejected"] = prop.get("rejected", [])
     refresh_samples(s, d)
     s.draft = d
+    for q in prop.get("clarifying_questions", []):
+        questions.from_ai(s, d, dict(q, group_id=to_gid(q.get("group_id"))), "proposal")
+    after_edit(s)
     s.log("proposal", {"ai": d["ai"], "signature_hint": hint, "layout": d["layout"], "assays": d["assays"],
                        "groups": {gid: {k: it.get(k) for k in GROUP_FIELDS + ("confidence", "source", "validation")}
                                   for gid, it in d["groups"].items()},
@@ -543,6 +549,71 @@ def after_edit(s):
             d["steps"][st] = "not_applicable"
         elif d["steps"][st] == "not_applicable" and step_applicable(s, d, st):
             d["steps"][st] = "pending"
+    questions.refresh_code(s, d)
+
+
+def code_question_candidates(s, d):
+    """The situations code turns into questions (v2.4 §5). Each has a stable key, so an
+    answered or dismissed one is never asked again."""
+    out = []
+    rep = consistency_report(s, d)
+    for f in rep["block_flags"]:
+        applies = {"group_ids": sorted(f["group_ids"])}
+        out.append({"kind": "near_identical_blocks", "type": "single", "key": questions.key_of("near_identical_blocks", applies),
+                    "applies_to": applies, "step": "values", "text": f["message"], "evidence": f["evidence"],
+                    "allow_free_text": True, "options": [
+                        {"label": f"One measurement: treat the {len(f['group_ids'])} blocks as one ({f['n_columns']} columns)",
+                         "edits": [{"op": "resolve_consistency", "args": {"action": "one_block", "key": f["key"]}}]},
+                        {"label": "Separate measurements: keep them as they are",
+                         "edits": [{"op": "resolve_consistency", "args": {"action": "dismiss", "key": f["key"]}}]},
+                        {"label": "Ask the AI", "chat": "Are these blocks one measurement or several? " + "; ".join(f["evidence"][:4])}]})
+    for c in rep["sample_collisions"]:
+        applies = {"group_ids": sorted(c["group_ids"])}
+        labels = {g: re.sub(r"[^A-Za-z0-9]+", "_", (d["groups"][g].get("label") or g)).strip("_")[:20] or g
+                  for g in c["group_ids"]}
+        out.append({"kind": "sample_id_collision", "type": "single", "key": questions.key_of("sample_id_collision", applies),
+                    "applies_to": applies, "step": "samples", "text": c["message"],
+                    "evidence": [f"Colliding IDs: {', '.join(c['ids'][:8])}"], "allow_free_text": True, "options": [
+                        {"label": "Use the full column names as sample IDs",
+                         "edits": [{"op": "resolve_consistency", "args": {"action": "full_names", "group_ids": c["group_ids"]}}]},
+                        {"label": "Put each block's label in front of its IDs (" + ", ".join(labels.values()) + ")",
+                         "edits": [{"op": "resolve_consistency", "args": {"action": "labels", "group_ids": c["group_ids"],
+                                                                          "labels": labels}}]}]})
+    for x in d.get("derived_feature_annotations", []):
+        if not x.get("keep", True):
+            continue
+        if x.get("n_empty") and "" not in x.get("display_labels", {}):
+            applies = {"derived": x["name"], "value": ""}
+            out.append({"kind": "unclassified_part", "type": "single", "key": questions.key_of("unclassified_part", applies),
+                        "applies_to": applies, "step": "annotations",
+                        "text": f"{x['n_empty']} feature name(s) have an empty {x['name'].replace('_', ' ')}. "
+                                "Show these as 'unclassified'? (Only a display label; the stored value stays empty.)",
+                        "allow_free_text": False, "options": [
+                            {"label": "Yes, show them as 'unclassified'",
+                             "edits": [{"op": "set_derived_annotation", "args": {"name": x["name"],
+                                                                                 "display_labels": {"": "unclassified"}}}]},
+                            {"label": "No, leave them as (empty)", "edits": []}]})
+        if (x.get("coverage") or 0) < 1:
+            applies = {"derived": x["name"], "coverage": x["coverage"]}
+            out.append({"kind": "derivation_coverage", "type": "single", "key": questions.key_of("derivation_coverage", applies),
+                        "applies_to": applies, "step": "annotations",
+                        "text": f"The rule for '{x['name']}' did not apply to {x['n_failures']} feature name(s) "
+                                f"(coverage {round(100 * x['coverage'])}%). Keep it (those features get an empty value)?",
+                        "allow_free_text": True, "options": [
+                            {"label": "Keep it", "edits": []},
+                            {"label": "Remove the derived column",
+                             "edits": [{"op": "set_derived_annotation", "args": {"name": x["name"], "keep": False}}]}]})
+    return out
+
+
+def answer_question(s, qid, option_ids, text=None):
+    questions.answer(s, qid, option_ids, text)
+    return {"draft": public_draft(s)}
+
+
+def dismiss_question(s, qid, note=None):
+    questions.dismiss(s, qid, note)
+    return {"draft": public_draft(s)}
 
 
 def _invariants(s, d):
@@ -1051,7 +1122,8 @@ def reconsider(s, gids, hint, on_progress=None):
                          "splits": prop.get("splits_applied")})
     s.save()
     return {"draft": public_draft(s), "digest": digests[0] if digests else None, "split_groups": split_ids,
-            "new_groups": new_ids, "questions": prop.get("clarifying_questions", [])}
+            "new_groups": new_ids, "questions": [q["question_id"] for q in (
+                questions.from_ai(s, d, x, "reconsider") for x in prop.get("clarifying_questions", [])) if q]}
 
 
 def retry_consolidation(s):
@@ -1324,9 +1396,10 @@ def chat(s, message, step=None, selection=None):
         raise StepError("The AI could not answer: " + (err or "no answer"))
     mid = uuid.uuid4().hex[:8]
     made = [P.prepare(s, p.model_dump(), "chat", mid) for p in resp.patches]
+    qs = [q for q in (questions.from_ai(s, d, q.model_dump(), "chat") for q in resp.questions) if q]
     msg = {"message_id": mid, "at": edits.now_iso(), "text": message, "step": step, "selection": selection or [],
            "reply": resp.reply, "patch_ids": [p["patch_id"] for p in made],
-           "raw_questions": [q.model_dump() for q in resp.questions], "context": payload}
+           "question_ids": [q["question_id"] for q in qs], "context": payload}
     d.setdefault("chat", []).append(msg)
     del d["chat"][:-50]
     s.log("chat_message", {"message_id": mid, "text": message, "step": step, "selection": selection or [],
@@ -1582,6 +1655,7 @@ def public_draft(s):
     out["ai_ungrouped"] = [g["group_id"] for g in s.groups if g.get("origin") == "ai_unavailable"]
     out["consistency"] = consistency_report(s, d)
     out["changes"] = edits.changes(s)
+    out["questions"] = questions.public(d)
     led = accounting.column_ledger(s, d)
     out["column_ledger"] = {f: dict(x, text=accounting.ledger_text(x)) for f, x in led.items()}
     out["excluded_columns"] = accounting.excluded_columns(s, d)
@@ -1610,13 +1684,9 @@ def unresolved_items(s, d):
         out.append({"step": "feature_id", "what": d["long_duplicates"]["message"]})
     if not value_blocks(s, d):
         out.append({"step": "values", "what": "No value block is kept."})
-    rep = consistency_report(s, d)
-    for f in rep["block_flags"]:
-        out.append({"step": "values", "flag": f["key"],
-                    "what": f"{len(f['group_ids'])} blocks look statistically identical ({', '.join(c or '?' for c in f['codes'])}): "
-                            "one measurement across subjects, or really different measurements?"})
-    for c in rep["sample_collisions"]:
-        out.append({"step": "samples", "what": c["message"]})
+    for q in questions.open_questions(d):
+        out.append({"step": q.get("step") or "review", "question_id": q["question_id"],
+                    "what": f"Open question: {q['text']}"})
     for p in accounting.ledger_problems(accounting.column_ledger(s, d)):
         out.append({"step": "review", "what": f"Column accounting: {p}."})
     if any(not d["processing_history"][q]["answer"] for q, _ in HISTORY_QUESTIONS):
