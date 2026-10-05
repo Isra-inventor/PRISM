@@ -149,8 +149,8 @@ class MockLLM:
             return MockLLM.literature(json.loads(prompt.split("\n", 1)[1]))
         if prompt.startswith("Consolidation"):
             return MockLLM.consolidate(json.loads(prompt.split("\n", 1)[1]))
-        if prompt.startswith("Command"):
-            return MockLLM.command(json.loads(prompt.split("\n", 1)[1]))
+        if prompt.startswith("Chat"):
+            return MockLLM.chat(json.loads(prompt.split("\n", 1)[1]))
         digest = json.loads(prompt.split("\n", 1)[1])
         hints = digest["file"]["layout_hints"]
         fixed = digest.get("already_confirmed") or {}
@@ -249,26 +249,46 @@ class MockLLM:
         })
 
     @staticmethod
-    def command(payload):
-        """Very small instruction reader (the real AI does this properly)."""
-        text = payload["instruction"].lower()
-        stop = {"all", "the", "columns", "column", "from", "output", "outputs", "in", "of", "and", "any", "these", "those"}
+    def chat(payload):
+        """Very small message reader (the real AI does this properly). Reads only the payload."""
+        text = payload["message"].lower()
+        cols = [c["column"] for c in payload.get("columns", [])] + \
+            [c for g in payload["groups"] for c in g["columns"] if not c.startswith("...")]
+        stop = {"all", "the", "columns", "column", "from", "output", "outputs", "in", "of", "and", "any", "these",
+                "those", "except", "but", "keep"}
         m = re.search(r"(?:exclude|remove|drop|delete|leave out|don'?t include|do not include)\s+(.*)", text)
         if m:
-            terms = [w.rstrip("s") for w in re.findall(r"[a-z0-9/]+", m.group(1)) if w not in stop and len(w) > 2]
-            hit = [g["group_id"] for g in payload["groups"]
-                   if any(w in (g.get("label") or "").lower() or any(w in c.lower() for c in g["columns"]) for w in terms)]
-            return json.dumps({"reply": f"I will leave {len(hit)} group(s) out of the outputs.",
-                               "actions": [{"action": "set_keep", "group_ids": hit, "keep": False,
-                                            "reason": f"matches {', '.join(terms)}"}] if hit else []})
+            rest = m.group(1)
+            keep_m = re.search(r"(?:except|but|apart from)\s+(?:the\s+)?(.*)", rest)
+            head = rest[:keep_m.start()] if keep_m else rest
+            except_cols = []
+            if keep_m:
+                words = keep_m.group(1)
+                except_cols = [c for c in dict.fromkeys(cols) if c.lower() in words or (
+                    "id" in words.split() and any(g["role"] == "feature_id" and c in g["columns"] for g in payload["groups"]))]
+            if "annotation" in head:
+                target = {"selector": {"role": "feature_annotation"}, "except_columns": except_cols}
+            else:
+                terms = [w.rstrip("s") for w in re.findall(r"[a-z0-9/]+", head) if w not in stop and len(w) > 2]
+                hit = [c for c in dict.fromkeys(cols) if any(w in c.lower() for w in terms)]
+                hit += [c for g in payload["groups"] if any(w in (g.get("label") or "").lower() for w in terms)
+                        for c in g["columns"] if not c.startswith("...") and c not in hit]
+                if not hit:
+                    return json.dumps({"reply": "I found no column matching that.", "patches": [], "questions": []})
+                target = {"selector": {"columns": hit}, "except_columns": except_cols}
+            return json.dumps({"reply": "I've prepared a change: leave these columns out of the outputs.",
+                               "patches": [{"patch_id": "p1", "op": "set_keep", "target": target, "args": {"keep": False},
+                                            "reason": "You asked to leave them out.",
+                                            "consequences": ["A later QC audit could use some of these columns."]}],
+                               "questions": []})
         m = re.search(r"mark\s+(\S+)\s+(?:samples?\s+)?as\s+(non-study|not study|qc|blank)", text)
         if m:
-            pat = payload["instruction"].split()[1]
-            return json.dumps({"reply": f"I will mark {pat} as non-study samples.",
-                               "actions": [{"action": "set_samples", "samples": [pat], "is_study_sample": False,
-                                            "label": m.group(2), "reason": "instruction"}]})
-        return json.dumps({"reply": "I cannot do that with the available actions.",
-                           "not_possible": "mock: instruction not understood", "actions": []})
+            pat = payload["message"].split()[1]
+            return json.dumps({"reply": f"I've prepared a change for {pat}.", "questions": [],
+                               "patches": [{"patch_id": "p1", "op": "set_sample_label",
+                                            "target": {"selector": {"samples": [pat]}},
+                                            "args": {"is_study_sample": False, "label": m.group(2)}, "reason": "You asked."}]})
+        return json.dumps({"reply": "mock: I did not understand that.", "patches": [], "questions": []})
 
     @staticmethod
     def consolidate(payload):

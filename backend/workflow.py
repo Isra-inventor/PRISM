@@ -18,7 +18,7 @@ import uuid
 from collections import Counter, OrderedDict
 from pathlib import Path
 
-from . import accounting, ai, consistency, grouping, llm_providers as llm
+from . import accounting, ai, consistency, derive, grouping, llm_providers as llm
 from .errors import StepError
 from .format_detect import signature_hint, signature_prefill
 from .mock_llm import expand_sample_rules
@@ -32,7 +32,7 @@ from . import edits  # noqa: E402  (the edit layer registers ops defined below)
 SESSIONS_DIR = Path(os.environ.get("PRISM_SESSIONS_DIR", Path(__file__).parent / "sessions"))
 STEPS = ["layout", "feature_id", "annotations", "values", "samples", "sample_info", "history", "review"]
 GROUP_FIELDS = ("role", "assay_label", "label", "audit_kind", "marks_rows_as_suspect",
-                "flagged_value", "detail", "keep")
+                "flagged_values", "detail", "keep", "family")
 ASSAY_FIELDS = ("assay_label", "omics_type", "source_software", "in_supported_scope", "scope_reason")
 FACT_FIELDS = ("value",)
 FI_FIELDS = ("group_ids", "composite")
@@ -240,7 +240,7 @@ def _proposed_flag_value(values):
 
 def _blank(item):
     base = {"role": UNRESOLVED, "assay_label": None, "label": "", "audit_kind": None,
-            "marks_rows_as_suspect": False, "flagged_value": None, "detail": None, "keep": True,
+            "marks_rows_as_suspect": False, "flagged_values": [], "detail": None, "keep": True, "family": None,
             "confidence": 0.0, "evidence": "", "source": "none", "validation": {"status": "ok", "messages": []}}
     base.update({k: v for k, v in item.items() if v is not None or k not in base})
     return base
@@ -371,8 +371,9 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
 
 def _attach_flags(s, gid, item):
     item["flag_values"] = flag_values(s, gid) if item.get("marks_rows_as_suspect") else None
-    if item.get("marks_rows_as_suspect") and item.get("flagged_value") is None:
-        item["flagged_value"] = _proposed_flag_value(item["flag_values"])
+    if item.get("marks_rows_as_suspect") and not item.get("flagged_values"):
+        v = _proposed_flag_value(item["flag_values"])
+        item["flagged_values"] = [v] if v is not None else []
 
 
 # ---------------------------------------------------------------- samples
@@ -542,6 +543,36 @@ def after_edit(s):
             d["steps"][st] = "not_applicable"
         elif d["steps"][st] == "not_applicable" and step_applicable(s, d, st):
             d["steps"][st] = "pending"
+
+
+def _invariants(s, d):
+    """Problems that no edit may introduce (v2.4 §4.4), keyed so only new ones count."""
+    out = {}
+    name = lambda g: (s.groups_by_id.get(g) or {"columns": [g]})["columns"][0]
+    for g in d["feature_identity"]["group_ids"]:
+        it = d["groups"].get(g)
+        if it and (it["role"] == "ignore" or not it.get("keep", True)):
+            out[("feature_id", g)] = f"The feature ID column '{name(g)}' cannot be excluded."
+    sg = (d.get("sample_id_group") or {}).get("value")
+    it = d["groups"].get(sg) if sg else None
+    if it and (it["role"] == "ignore" or not it.get("keep", True)):
+        out[("sample_id", sg)] = f"The sample ID column '{name(sg)}' cannot be excluded."
+    if not any(it["role"] == "value" and it.get("keep", True) for it in d["groups"].values()):
+        out[("value",)] = "At least one value block must stay kept."
+    return out
+
+
+def check_invariants(s, before, tx):
+    """Called by the edit layer before an edit is committed: a violation rejects the edit."""
+    if before is None or s.draft is None:
+        return
+    new = _invariants(s, s.draft)
+    old = _invariants(s, before)
+    probs = [m for k, m in new.items() if k not in old and not (k == ("value",) and tx["actor"] == "user")]
+    if tx["actor"] != "user" and before.get("processing_history") != s.draft.get("processing_history"):
+        probs.append("Processing history is answered by you only; an AI patch cannot change it.")
+    if probs:
+        raise StepError(" ".join(probs))
 
 
 # ---------------------------------------------------------------- ops (wizard controls; see edits.py)
@@ -726,6 +757,138 @@ def _op_set_processing_history(ctx, ph):
     d["software_and_version"] = _clean(ph.get("software_and_version"))
     d["history_notes"] = _clean(ph.get("notes"), 2000)
     ctx.summary = "Processing history answered"
+
+
+@edits.op("merge_assays", ai=True)
+def _op_merge_assays(ctx, a):
+    """Blocks of the merged assays become blocks of one assay (v2.4 §16)."""
+    d = ctx.d
+    labels = list(dict.fromkeys(a.get("assay_labels") or []))
+    known = [x["assay_label"] for x in d["assays"]]
+    bad = [x for x in labels if x not in known]
+    if bad:
+        raise StepError(f"Unknown assay(s): {', '.join(bad)}.")
+    if len(labels) < 2:
+        raise StepError("merge_assays needs at least two assays.")
+    keep = next(x for x in d["assays"] if x["assay_label"] in labels)
+    target = _clean(a.get("label"), 120) or keep["assay_label"]
+    if target in known and target not in labels:
+        raise StepError(f"'{target}' is already another assay.")
+    old_label = keep["assay_label"]
+    keep["assay_label"], keep["set_by"] = target, ctx.actor
+    d["assays"] = [x for x in d["assays"] if x is keep or x["assay_label"] not in labels]
+    for gid, it in list(d["groups"].items()):
+        if it.get("assay_label") in labels or it.get("assay_label") == old_label:
+            if it["role"] == "value":
+                edits.set_group_fields(ctx, gid, {"assay_label": target})
+            else:
+                it["assay_label"] = target
+    ctx.summary = f"Merged assays {', '.join(labels)} into '{target}'"
+
+
+@edits.op("set_join_key", ai=True)
+def _op_set_join_key(ctx, a):
+    s, d = ctx.s, ctx.d
+    meta = d.get("metadata")
+    if not meta or meta.get("skipped") or not s.metadata_table:
+        raise StepError("Upload a metadata file first.")
+    col = a.get("metadata_column")
+    by = {c["column"]: c for c in meta["columns"]}
+    if col not in by:
+        raise StepError(f"Metadata column '{col}' does not exist.")
+    new = by[col]
+    if new["role"] == "sample_id":
+        return
+    for c in meta["columns"]:
+        if c["role"] == "sample_id":
+            c.update(role="sample_metadata", audit_kind=c.get("audit_kind") or "other", label=c.get("label") or c["column"])
+            c["set_by"] = ctx.actor
+    new.update(role="sample_id", keep=True, set_by=ctx.actor)
+    new.pop("excluded", None)
+    meta["id_column"] = col
+    t = s.metadata_table["table"]
+    meta["report"] = match_report(sample_ids(s, d), [cell(r, new["index"]).strip() for r in t["rows"]])
+    meta["accepted_near_misses"] = []
+    ctx.columns.append(("metadata", col))
+    ctx.summary = f"Metadata joined on '{col}' ({meta['report']['n_matched']} samples matched)"
+
+
+def feature_names(s, d, source, column=None):
+    """The names a feature-name rule applies to: value-column headers (samples in rows)
+    or the values of an identifier column (samples in columns / long)."""
+    lay = layout_of(d)
+    if source == "column_headers":
+        if lay != "samples_in_rows":
+            raise StepError("Feature names are column headers only when samples are in rows.")
+        return [c for gid in value_blocks(s, d) for c in s.groups_by_id[gid]["columns"]]
+    if source == "feature_id_column":
+        gid = None
+        if column:
+            gid = next((g["group_id"] for g in s.groups if column in g["columns"]), None)
+            if gid is None:
+                raise StepError(f"Column '{column}' does not exist.")
+        elif d["feature_identity"]["group_ids"]:
+            gid = d["feature_identity"]["group_ids"][0]
+        if gid is None or d["groups"][gid]["role"] not in ("feature_id", "feature_annotation"):
+            raise StepError("Choose the feature ID (or annotation) column whose values are split.")
+        i = s.groups_by_id[gid]["indices"][0]
+        return [cell(r, i).strip() for r in s.table["rows"]]
+    raise StepError("source must be 'column_headers' or 'feature_id_column'.")
+
+
+def derivation_preview(s, d, a):
+    rule = a.get("rule") or {}
+    taken = set(s.cols.labels) | {x["name"] for x in d.get("derived_feature_annotations", [])}
+    try:
+        names = derive.check_parts(rule, taken)
+        out = derive.preview(feature_names(s, d, a.get("source"), a.get("column")), rule, names)
+    except derive.RuleError as e:
+        raise StepError(str(e))
+    return names, out
+
+
+@edits.op("derive_feature_annotation", ai=True)
+def _op_derive_feature_annotation(ctx, a):
+    """Adds derived annotation columns from feature names; never renames or changes anything."""
+    s, d = ctx.s, ctx.d
+    names, prev = derivation_preview(s, d, a)
+    if prev["n_parsed"] == 0:
+        raise StepError("The delimiter occurs in none of the feature names.")
+    rule = {k: a["rule"][k] for k in ("delimiter", "occurrence")}
+    parts = a["rule"]["parts"]
+    for k, n in enumerate(names):
+        if not n:
+            continue
+        d.setdefault("derived_feature_annotations", []).append({
+            "name": n, "label": _clean(parts[k].get("label")) or n.replace("_", " "), "part": ("left", "right")[k],
+            "derived_from": "feature_names", "source": a.get("source"), "column": a.get("column"), "rule": rule,
+            "coverage": prev["coverage"], "n_failures": prev["n_failures"], "display_labels": {},
+            "n_distinct": prev["parts"][n]["n_distinct"], "n_empty": prev["parts"][n]["n_empty"],
+            "keep": True, "set_by": ctx.actor, "set_corrected": bool(ctx.corrected)})
+    ctx.summary = (f"Derived {', '.join(n for n in names if n)} from feature names "
+                   f"('{rule['delimiter']}', {rule['occurrence']}; {prev['n_parsed']}/{prev['n_total']} parsed)")
+    return prev
+
+
+@edits.op("set_derived_annotation")
+def _op_set_derived_annotation(ctx, a):
+    """Your edits of a derived annotation: label, keep, or a display label for a value
+    (e.g. show the empty class as 'unclassified'; the stored value stays empty)."""
+    der = {x["name"]: x for x in ctx.d.get("derived_feature_annotations", [])}
+    x = der.get(a.get("name"))
+    if x is None:
+        raise StepError(f"No derived annotation '{a.get('name')}'.")
+    if "label" in a:
+        x["label"] = _clean(a["label"]) or x["label"]
+    if "keep" in a:
+        x["keep"] = bool(a["keep"])
+    for v, lab in (a.get("display_labels") or {}).items():
+        if lab:
+            x["display_labels"][v] = _clean(lab, 60)
+        else:
+            x["display_labels"].pop(v, None)
+    x["set_by"] = ctx.actor
+    ctx.summary = f"Derived annotation '{x['name']}' updated"
 
 
 @edits.op("set_metadata")
@@ -1084,215 +1247,104 @@ def _name_part_index(s):
 # should be analysed. The module (with its quote verification) is kept but not called here.
 
 
-# ---------------------------------------------------------------- "ask the AI to do it": plan, preview, apply
+# ---------------------------------------------------------------- talking to the AI: chat with patches (v2.4 §4)
 
-def _command_payload(s, d, instruction):
-    def cols(g):
-        c = g["columns"]
-        return c if len(c) <= 4 else c[:3] + [f"... ({len(c) - 4} more)", c[-1]]
+def _cols_brief(g):
+    c = g["columns"]
+    return c if len(c) <= 100 else c[:3] + [f"... ({len(c) - 6} more)"] + c[-3:]
+
+
+def chat_context(s, d, message, step=None, selection=None):
+    """What the AI receives each turn (v2.4 §4.6): a compact draft summary, the digest facts
+    of the columns referred to, the last 10 chat turns, the step and selection. Never raw rows."""
     groups = []
     for g in s.groups:
         it = d["groups"][g["group_id"]]
-        x = {"group_id": g["group_id"], "n_columns": g["n_columns"], "columns": cols(g), "type": g["type"],
-             "role": it["role"], "label": it.get("label"), "keep": it.get("keep", True)}
-        for k in ("audit_kind", "assay_label"):
+        x = {"group_id": g["group_id"], "role": it["role"], "label": it.get("label") or "", "n_columns": g["n_columns"],
+             "columns": _cols_brief(g), "keep": it.get("keep", True)}
+        for k in ("audit_kind", "assay_label", "family"):
             if it.get(k):
                 x[k] = it[k]
         if it.get("marks_rows_as_suspect"):
-            x["marks_rows_as_suspect"] = True
-        if g["type"] == "numeric":
-            x["median"] = (g.get("profile") or {}).get("median")
+            x["flagged_values"] = it.get("flagged_values")
         groups.append(x)
+    columns = [{"column": c, "file": "main", "group_id": g["group_id"], "role": d["groups"][g["group_id"]]["role"],
+                "label": d["groups"][g["group_id"]].get("label") or "",
+                "audit_kind": d["groups"][g["group_id"]].get("audit_kind"),
+                "keep": d["groups"][g["group_id"]].get("keep", True)}
+               for g in s.groups if d["groups"][g["group_id"]]["role"] not in ("value",) and g["kind"] != "numeric_block"
+               for c in g["columns"]]
+    meta = d.get("metadata") or {}
+    if not meta.get("skipped"):
+        columns += [{"column": c["column"], "file": "metadata", "role": c["role"], "label": c.get("label") or "",
+                     "audit_kind": c.get("audit_kind"), "keep": c.get("keep", True)} for c in meta.get("columns", [])]
+    low = (message or "").lower()
+    refer = [c for c in (selection or []) if c in s.cols.labels]
+    refer += [c for c in s.cols.labels if len(c) > 2 and c.lower() in low and c not in refer]
+    idx = {c: i for i, c in enumerate(s.cols.labels)}
+    facts = [ai.column_digest(s.cols, idx[c], s.affixes[idx[c]], ai.send_examples()) for c in refer[:40]]
     ids = list(d["samples"])
-    return {"instruction": instruction, "layout": d["layout"]["value"],
-            "assays": [a["assay_label"] for a in d["assays"]], "groups": groups,
-            "samples": {"n": len(ids), "first": [{"sample": x, "label": d["samples"][x].get("label"),
-                                                   "is_study_sample": d["samples"][x].get("is_study_sample")}
-                                                  for x in ids[:200]]}}
+    labels = Counter(v.get("label") for v in d["samples"].values())
+    return {"message": message, "step": step, "selection": selection or [],
+            "layout": d["layout"]["value"],
+            "assays": [{"assay_label": a["assay_label"], "omics_type": a.get("omics_type"),
+                        "n_value_blocks": sum(1 for it in d["groups"].values()
+                                              if it["role"] == "value" and it.get("assay_label") == a["assay_label"])}
+                       for a in d["assays"]],
+            "groups": groups, "columns": columns,
+            "feature_id": [s.groups_by_id[g]["columns"][0] for g in d["feature_identity"]["group_ids"]],
+            "sample_id_column": (s.groups_by_id[d["sample_id_group"]["value"]]["columns"][0]
+                                 if d["sample_id_group"]["value"] else None),
+            "samples": {"n": len(ids), "first": ids[:50], "labels": dict(labels.most_common(10))},
+            "design": d.get("design"),
+            "open_questions": [{"question_id": q["question_id"], "text": q["text"]}
+                               for q in d.get("questions", []) if q.get("status") == "open"],
+            "excluded_columns": [x["column"] for x in accounting.excluded_columns(s, d)][:300],
+            "derived_feature_annotations": [x["name"] for x in d.get("derived_feature_annotations", [])],
+            "digest_of_referred_columns": facts,
+            "history": [{"user": m["text"], "assistant": m.get("reply", "")} for m in d.get("chat", [])[-10:]],
+            "settings": {"raw_rows_sent": False}}
 
 
-def _check_action(s, d, a):
-    """-> (normalized action dict with a plain-words description, problems)."""
-    from fnmatch import fnmatchcase
-    x = {k: v for k, v in a.items() if v not in (None, [], "")}
-    probs = []
-    gids = [g for g in dict.fromkeys(a.get("group_ids") or [])]
-    bad = [g for g in gids if g not in d["groups"]]
-    if bad:
-        probs.append(f"unknown group(s) {', '.join(bad[:5])} ignored")
-    gids = [g for g in gids if g in d["groups"]]
-    act = a["action"]
-    names = lambda gs: ", ".join(s.groups_by_id[g]["columns"][0] for g in gs[:4]) + (f" … (+{len(gs) - 4})" if len(gs) > 4 else "")
-    ncols = sum(s.groups_by_id[g]["n_columns"] for g in gids)
-    if act == "set_samples":
-        pats = a.get("samples") or []
-        hit = [sid for sid in d["samples"] if any(sid == p or fnmatchcase(sid, p) for p in pats)]
-        if not hit:
-            probs.append("no sample matches")
-        if a.get("label") is None and a.get("is_study_sample") is None:
-            probs.append("nothing to change")
-        what = ", ".join(filter(None, [f"label '{a['label']}'" if a.get("label") else None,
-                                       None if a.get("is_study_sample") is None else
-                                       ("study sample" if a["is_study_sample"] else "not a study sample")]))
-        x.update(sample_ids=hit, description=f"{len(hit)} sample(s) ({', '.join(hit[:4])}{' …' if len(hit) > 4 else ''}): {what}")
-        return x, probs
-    if not gids:
-        probs.append("no group to act on")
-        return dict(x, group_ids=[], description=act), probs
-    x["group_ids"] = gids
-    if act == "set_keep":
-        if a.get("keep") is None:
-            probs.append("keep is missing")
-        ids_ = [g for g in gids if d["groups"][g]["role"] in ("feature_id", "sample_id")]
-        if ids_ and a.get("keep") is False:
-            probs.append(f"identifier columns cannot be excluded: {names(ids_)}")
-            x["group_ids"] = gids = [g for g in gids if g not in ids_]
-            ncols = sum(s.groups_by_id[g]["n_columns"] for g in gids)
-        verb = "leave out of the outputs" if a.get("keep") is False else "keep in the outputs"
-        x["description"] = f"{verb}: {len(gids)} group(s), {ncols} column(s) — {names(gids)}"
-    elif act == "set_role":
-        if a.get("role") not in VOCABULARY["column_role"] or a.get("role") == UNRESOLVED:
-            probs.append(f"'{a.get('role')}' is not an allowed role")
-        else:
-            ok = []
-            for g in gids:
-                v = validate_group(dict(d["groups"][g], role=a["role"]), s.groups_by_id[g], s.cols, layout_of(d))
-                if v["status"] == "contradicted":
-                    probs.append(f"{names([g])}: " + " ".join(v["messages"]))
-                else:
-                    ok.append(g)
-            x["group_ids"] = gids = ok
-        x["description"] = f"role '{pretty(a.get('role'))}' for {len(gids)} group(s): {names(gids)}"
-    elif act == "set_label":
-        if not (a.get("label") or "").strip():
-            probs.append("label is empty")
-        x["description"] = f"label '{a.get('label')}' for {len(gids)} group(s): {names(gids)}"
-    elif act == "set_audit_kind":
-        if a.get("audit_kind") not in VOCABULARY["audit_kind"]:
-            probs.append(f"'{a.get('audit_kind')}' is not an allowed audit kind")
-        not_meta = [g for g in gids if d["groups"][g]["role"] != "sample_metadata"]
-        if not_meta:
-            probs.append(f"not sample information (role unchanged): {names(not_meta)}")
-            x["group_ids"] = gids = [g for g in gids if g not in not_meta]
-        x["description"] = f"audit kind '{pretty(a.get('audit_kind'))}' for {len(gids)} group(s): {names(gids)}"
-    elif act == "set_assay":
-        if not (a.get("assay_label") or "").strip():
-            probs.append("assay label is empty")
-        x["description"] = f"assay '{a.get('assay_label')}' for {len(gids)} group(s): {names(gids)}"
-    elif act == "set_suspect":
-        x["description"] = (f"{'mark' if a.get('marks_rows_as_suspect') else 'unmark'} as marking rows suspect: "
-                            f"{names(gids)}")
-    elif act == "merge":
-        if len(gids) < 2:
-            probs.append("a merge needs at least two existing groups")
-        x["description"] = f"merge {len(gids)} groups ({ncols} columns) into one: {names(gids)}"
-    elif act == "split":
-        g = gids[0]
-        cols = [c for c in a.get("columns") or [] if c in s.groups_by_id[g]["columns"]]
-        if not cols:
-            probs.append("no column of that group named")
-        elif len(cols) == s.groups_by_id[g]["n_columns"]:
-            probs.append("that is every column of the group")
-        x.update(group_ids=[g], columns=cols, description=f"take {len(cols)} column(s) out of {names([g])}: {', '.join(cols[:4])}")
-    else:
-        probs.append(f"unknown action '{act}'")
-        x["description"] = act
-    return x, probs
-
-
-def pretty(x):
-    return str(x or "").replace("_", " ")
-
-
-def plan_command(s, instruction):
-    """Ask the AI to turn an instruction into actions. Nothing is applied: you get a preview."""
+def chat(s, message, step=None, selection=None):
+    """Send your message to the AI. Its reply is stored with the patches it proposes
+    (checked and previewed by code, applied only when you click)."""
+    from . import patches as P
     d = s.draft
-    instruction = _clean(instruction, 1000)
-    if not instruction:
-        raise StepError("Write what you want the AI to do.")
+    message = _clean(message, 2000)
+    if not message:
+        raise StepError("Write a message first.")
     ok, why = llm.available()
     if not (ok and d["ai"]["enabled"]):
-        raise StepError("The AI is off or unavailable: " + (why or "turn it on to give it instructions."))
-    resp, err = ai.command(_command_payload(s, d, instruction), s.sha, log=s.log)
+        raise StepError("The AI is off or unavailable: " + (why or "turn it on to talk to it.") +
+                        " Manual editing and the questions still work.")
+    payload = chat_context(s, d, message, step, selection)
+    resp, err = ai.chat(payload, s.sha, log=s.log)
     if resp is None:
         raise StepError("The AI could not answer: " + (err or "no answer"))
-    actions = []
-    for k, a in enumerate(resp.actions):
-        x, probs = _check_action(s, d, a.model_dump())
-        usable = not [p for p in probs if p.startswith(("unknown action", "no group", "no sample", "nothing to",
-                                                         "keep is", "label is", "assay label is", "a merge needs",
-                                                         "no column", "that is every", "'"))] and \
-            (x.get("group_ids") or x.get("sample_ids"))
-        actions.append(dict(x, index=k, problems=probs, usable=bool(usable)))
-    cmd = {"id": uuid.uuid4().hex[:8], "instruction": instruction, "reply": resp.reply,
-           "not_possible": resp.not_possible, "actions": actions}
-    d["pending_command"] = cmd
-    s.log("ai_command_plan", cmd)
+    mid = uuid.uuid4().hex[:8]
+    made = [P.prepare(s, p.model_dump(), "chat", mid) for p in resp.patches]
+    msg = {"message_id": mid, "at": edits.now_iso(), "text": message, "step": step, "selection": selection or [],
+           "reply": resp.reply, "patch_ids": [p["patch_id"] for p in made],
+           "raw_questions": [q.model_dump() for q in resp.questions], "context": payload}
+    d.setdefault("chat", []).append(msg)
+    del d["chat"][:-50]
+    s.log("chat_message", {"message_id": mid, "text": message, "step": step, "selection": selection or [],
+                           "reply": resp.reply, "patches": msg["patch_ids"],
+                           "rejected": [p["patch_id"] for p in made if p["status"] == "rejected"]})
     s.save()
-    return {"draft": public_draft(s), "command": cmd}
+    return {"draft": public_draft(s), "message": {k: v for k, v in msg.items() if k != "context"}}
 
 
-def apply_command(s, cmd_id, accept=None):
-    """Apply the accepted actions of the pending instruction (your confirmation), as one
-    undoable edit; each action goes through the edit layer as an AI patch."""
-    d = s.draft
-    cmd = d.get("pending_command")
-    if not cmd or cmd["id"] != cmd_id:
-        raise StepError("That instruction is no longer pending; ask again.")
-    chosen = [a for a in cmd["actions"] if a["usable"] and (accept is None or a["index"] in accept)]
-    done, skipped = [], []
-    with edits.recording(s, "ai_command", "ai_patch", f"AI instruction: {cmd['instruction'][:80]}",
-                         {"instruction": cmd["instruction"], "accept": accept}):
-        for a in chosen:
-            d = s.draft
-            x, probs = _check_action(s, d, a)          # ids may have changed by an earlier merge / split
-            gids = x.get("group_ids") or []
-            if not (gids or x.get("sample_ids")):
-                skipped.append({"action": a["description"], "why": "; ".join(probs) or "nothing left to change"})
-                continue
-            act = a["action"]
-            try:
-                if act == "merge":
-                    edits.apply_edit(s, "merge_groups", {"group_ids": gids, "reason": f"Instruction: {cmd['instruction']}"},
-                                     "ai_patch", reason=a.get("reason"))
-                elif act == "split":
-                    edits.apply_edit(s, "split_group", {"group_id": gids[0], "columns": x["columns"]}, "ai_patch")
-                elif act == "set_samples":
-                    edits.apply_edit(s, "set_sample_label", {"sample_ids": x["sample_ids"], "label": a.get("label"),
-                                                             "is_study_sample": a.get("is_study_sample")}, "ai_patch")
-                else:
-                    field = {"set_keep": ("keep", a.get("keep")), "set_role": ("role", a.get("role")),
-                             "set_label": ("label", a.get("label")), "set_audit_kind": ("audit_kind", a.get("audit_kind")),
-                             "set_assay": ("assay_label", a.get("assay_label")),
-                             "set_suspect": ("marks_rows_as_suspect", a.get("marks_rows_as_suspect"))}[act]
-                    for g in gids:
-                        fields = {field[0]: field[1]}
-                        if act == "set_keep" and a.get("keep") is False and d["groups"][g]["role"] == UNRESOLVED:
-                            fields["role"] = "ignore"
-                        try:
-                            edits.apply_edit(s, "legacy_command_fields", {"group_id": g, "fields": fields}, "ai_patch",
-                                             reason=a.get("reason"))
-                        except StepError as e:
-                            skipped.append({"action": a["description"], "why": f"{g}: {e}"})
-            except StepError as e:
-                skipped.append({"action": a["description"], "why": str(e)})
-                continue
-            done.append(a["description"])
-        s.draft["pending_command"] = None
-    s.log("ai_command_applied", {"instruction": cmd["instruction"], "applied": done, "skipped": skipped})
-    s.save()
-    return {"draft": public_draft(s), "applied": done, "skipped": skipped}
+def apply_patches(s, patch_ids, confirm_large=(), overrides=None):
+    from . import patches as P
+    res = P.apply(s, patch_ids, confirm_large, overrides)
+    return {"draft": public_draft(s), "results": res}
 
 
-@edits.op("legacy_command_fields", ai=True)
-def _op_legacy_command_fields(ctx, a):
-    """v2.3 instruction box (replaced by the chat in v2.4 stage 4)."""
-    edits.set_group_fields(ctx, a["group_id"], a["fields"])
-
-
-def discard_command(s):
-    s.draft["pending_command"] = None
-    s.save()
+def dismiss_patches(s, patch_ids):
+    from . import patches as P
+    P.dismiss(s, patch_ids)
     return {"draft": public_draft(s)}
 
 
@@ -1505,8 +1557,9 @@ def public_draft(s):
         if it.get("flag_values") is None and g["n_columns"] == 1 and it["role"] in ("feature_annotation", UNRESOLVED) \
                 and ((g.get("profile") or {}).get("n_unique") or 99) <= FLAG_MAX_VALUES:
             it["value_counts"] = flag_values(s, gid)  # lets the UI offer 'marks rows as suspect' at once
-        if it.get("marks_rows_as_suspect") and it.get("flag_values") and it.get("flagged_value") is not None:
-            it["n_flagged"] = it["flag_values"].get(it["flagged_value"], 0)
+        if it.get("marks_rows_as_suspect") and it.get("flag_values") and it.get("flagged_values"):
+            it["flag_counts"] = {v: it["flag_values"].get(v, 0) for v in it["flagged_values"]}
+            it["n_flagged"] = sum(it["flag_counts"].values())
     out["layout"]["provenance"] = provenance(out["layout"], FACT_FIELDS)
     for a in out["assays"]:
         a["provenance"] = provenance(a, ASSAY_FIELDS)
@@ -1545,7 +1598,7 @@ def unresolved_items(s, d):
             out.append({"step": step_for_group(s, d, gid), "group_id": gid, "what": f"Role of {name} is unresolved."})
         elif it["role"] == "sample_metadata" and it.get("audit_kind") not in VOCABULARY["audit_kind"]:
             out.append({"step": "sample_info", "group_id": gid, "what": f"Audit kind of '{name}' is not chosen."})
-        elif it.get("marks_rows_as_suspect") and it.get("flag_values") and it.get("flagged_value") is None:
+        elif it.get("marks_rows_as_suspect") and it.get("flag_values") and not it.get("flagged_values"):
             out.append({"step": "annotations", "group_id": gid,
                         "what": f"Choose which value of '{name}' means 'flagged'."})
     lay = layout_of(d)

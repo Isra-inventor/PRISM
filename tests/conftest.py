@@ -84,10 +84,10 @@ class Flow:
             if self.draft["steps"][st] != "not_applicable":
                 dec = {}
                 if st == "annotations":  # pick a flagged value where none was proposed
-                    items = [{"group_id": gid, "flagged_value": next(v for v in it["flag_values"] if v)}
+                    items = [{"group_id": gid, "flagged_values": [next(v for v in it["flag_values"] if v)]}
                              for gid, it in self.draft["groups"].items()
                              if it.get("marks_rows_as_suspect") and it.get("flag_values")
-                             and it.get("flagged_value") is None and any(it["flag_values"])]
+                             and not it.get("flagged_values") and any(it["flag_values"])]
                     if items:
                         dec["items"] = items
                 self.step(st, dec)

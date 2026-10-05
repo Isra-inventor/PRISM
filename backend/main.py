@@ -316,32 +316,40 @@ async def consistency_action(req: ConsistencyRequest):
                                    req.group_ids, req.labels)
 
 
-class CommandRequest(BaseModel):
+class ChatRequest(BaseModel):
     session_id: str
-    instruction: str = ""
-    command_id: Optional[str] = None
-    accept: Optional[List[int]] = None
+    message: str = ""
+    step: Optional[str] = None
+    selection: List[str] = []
     progress_id: Optional[str] = None
 
 
-@app.post("/api/ai-command")
-async def ai_command(req: CommandRequest):
-    """'Ask the AI to do it': the AI turns your instruction into a preview of actions. Nothing is applied."""
+@app.post("/api/chat")
+async def chat(req: ChatRequest):
+    """Talk to the AI. It replies and may propose patches; nothing is applied."""
     def work():
-        set_progress(req.progress_id, stage="ai", percent=20, message="The AI is planning the changes")
-        return _structure_op(req, workflow.plan_command, req.instruction)
+        set_progress(req.progress_id, stage="ai", percent=20, message="The AI is reading your message")
+        return _structure_op(req, workflow.chat, req.message, req.step, req.selection)
     return await run(req.progress_id, work)
 
 
-@app.post("/api/apply-command")
-async def apply_command(req: CommandRequest):
-    """Your confirmation: apply the chosen actions of the pending instruction."""
-    return await run_in_threadpool(_structure_op, req, workflow.apply_command, req.command_id, req.accept)
+class PatchRequest(BaseModel):
+    session_id: str
+    patch_ids: List[str]
+    confirm_large: List[str] = []
+    overrides: dict = {}
 
 
-@app.post("/api/discard-command")
-async def discard_command(req: CommandRequest):
-    return await run_in_threadpool(_structure_op, req, workflow.discard_command)
+@app.post("/api/patch/apply")
+async def patch_apply(req: PatchRequest):
+    """Your click: apply these patches through the edit layer (per-patch applied / held / rejected)."""
+    return await run_in_threadpool(_structure_op, req, workflow.apply_patches, req.patch_ids, req.confirm_large,
+                                   req.overrides)
+
+
+@app.post("/api/patch/dismiss")
+async def patch_dismiss(req: PatchRequest):
+    return await run_in_threadpool(_structure_op, req, workflow.dismiss_patches, req.patch_ids)
 
 
 @app.post("/api/merge-check")

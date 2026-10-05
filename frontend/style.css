@@ -521,3 +521,18 @@ table.ledger { border-collapse: collapse; font-size: 12px; margin: 4px 0 14px; w
 table.ledger th, table.ledger td { border: 1px solid var(--line); padding: 4px 6px; text-align: right; }
 table.ledger th:first-child, table.ledger td:first-child { text-align: left; }
 table.ledger tr.bad td { color: var(--c-unres); }
+.flagpick { display: flex; flex-direction: column; gap: 4px; } .flagpick.bad .field-k { color: var(--c-unres); }
+
+/* v2.4: diff cards */
+.patch { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 8px 0; background: #0b0b0b; }
+.patch.held { border-color: #b58a2a; }
+.patch.done { padding: 6px 12px; color: var(--text-dim); }
+.patch.rejected { border-style: dashed; color: var(--text-dim); }
+.patch-head { display: flex; gap: 8px; align-items: center; }
+.patch .chg { margin-right: 10px; }
+.patch s { color: var(--text-faint); }
+.chat-turn { margin: 8px 0 4px; }
+.chat-turn .reply { margin-top: 2px; }
+.chip.hop { animation: hop .9s ease-out 1; }
+@keyframes hop { 0% { transform: translateY(0); } 30% { transform: translateY(-6px); box-shadow: 0 0 0 2px #fff; } 100% { transform: translateY(0); } }
+.chat-turn .reply { font-size: 13px; }

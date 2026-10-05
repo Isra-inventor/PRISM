@@ -364,7 +364,7 @@
       const gid = entries[k].gid, it = D(gid);
       const cls = chipClass(gid);
       chips.append(el("th", { colspan: j - k + 1, class: focus.has(gid) ? "focus" : "", "data-gid": gid },
-        el("span", { class: `chip ${cls}`, title: `${roleLabel(it)} — ${G(gid).n_columns} column(s)` },
+        el("span", { class: `chip ${cls} ${S.hop?.has(gid) ? "hop" : ""}`, title: `${roleLabel(it)} — ${G(gid).n_columns} column(s)` },
           cls === "k-pending" ? `? ${roleLabel(it)}` : roleLabel(it))));
       k = j + 1;
     }
@@ -387,6 +387,7 @@
     const sc = $("pv-scroll");
     if (first) sc.scrollTo({ left: Math.max(0, first.offsetLeft - 60), behavior: "smooth" });
     setTimeout(drawCallout, 380);
+    if (S.hop) setTimeout(() => { S.hop = null; }, 1200);
   }
 
   function drawCallout() {
@@ -488,7 +489,7 @@
     return el("label", { class: "check" }, cb, "keep in the outputs");
   }
   // suspect flag: which value means "flagged"?
-  const encV = (v) => JSON.stringify(v), decV = (s) => JSON.parse(s);
+  
   function suspectControls(gid) {
     const it = D(gid), on = !!cur(gid, "marks_rows_as_suspect");
     const cb = el("input", { type: "checkbox", checked: on });
@@ -501,14 +502,16 @@
         : "This column has more than 5 distinct values, so no single ‘flagged’ value can be chosen. It is recorded as a flag column; nothing is removed." }));
       return out;
     }
-    const fv = cur(gid, "flagged_value");
+    const fv = cur(gid, "flagged_values") || [];
     const opts = Object.keys(counts);
-    const s = el("select", { class: `select ${fv == null ? "bad" : ""}` },
-      fv == null ? el("option", { value: "", text: "which value means ‘flagged’?", selected: true, disabled: true }) : null,
-      opts.map((v) => el("option", { value: encV(v), selected: v === fv, text: `${v === "" ? "(empty)" : v} — ${counts[v]} row(s)` })));
-    s.addEventListener("change", () => { local(gid).flagged_value = decV(s.value); renderGuide(); });
-    out.push(fieldBox("Flagged value", s, "full"));
-    if (fv != null) out.push(el("div", { class: "notice", text: `${counts[fv] ?? 0} row(s) flagged — nothing is removed now; recorded for the audit step.` }));
+    out.push(el("div", { class: `full flagpick ${fv.length ? "" : "bad"}` }, el("span", { class: "field-k", text: "Which values mark a row as flagged? (one or more)" }),
+      opts.map((v) => {
+        const cb = el("input", { type: "checkbox", checked: fv.includes(v) });
+        cb.addEventListener("change", () => { const now = new Set(cur(gid, "flagged_values") || []); cb.checked ? now.add(v) : now.delete(v); local(gid).flagged_values = opts.filter((o) => now.has(o)); renderGuide(); });
+        return el("label", { class: "check" }, cb, `${v === "" ? "(empty)" : v} — ${counts[v]} row(s)`);
+      })));
+    const n = fv.reduce((a, v) => a + (counts[v] || 0), 0);
+    if (fv.length) out.push(el("div", { class: "notice", text: `${n} row(s) flagged — nothing is removed now; recorded for the audit step.` }));
     return out;
   }
 
@@ -565,7 +568,7 @@
   function itemCard(gid, { roles } = {}) {
     const it = D(gid), g = G(gid), role = cur(gid, "role");
     const unres = role === "unresolved" || (role === "sample_metadata" && !S.vocab.audit_kind.includes(cur(gid, "audit_kind")))
-      || (cur(gid, "marks_rows_as_suspect") && (it.flag_values || it.value_counts) && cur(gid, "flagged_value") == null);
+      || (cur(gid, "marks_rows_as_suspect") && (it.flag_values || it.value_counts) && !(cur(gid, "flagged_values") || []).length);
     const ctr = el("div", { class: "item-controls" },
       fieldBox("Role", roleSelect(gid, roles)),
       fieldBox("What it is (your words)", textInput(cur(gid, "label"), (v) => { local(gid).label = v; }, { placeholder: "e.g. gene symbol", list: "dl-label" })));
@@ -587,7 +590,7 @@
   function hoverGroup(gid, on) {
     $("pv").querySelectorAll(`th[data-gid="${gid}"] .chip`).forEach((c) => c.style.outline = on ? "1px solid #fff" : "");
   }
-  const ITEM_FIELDS = ["role", "label", "assay_label", "audit_kind", "marks_rows_as_suspect", "flagged_value", "detail", "keep"];
+  const ITEM_FIELDS = ["role", "label", "assay_label", "audit_kind", "marks_rows_as_suspect", "flagged_values", "detail", "keep", "family"];
   function itemDecisions(gids) {
     return gids.map((gid) => {
       const l = S.local.items?.[gid] || {};
@@ -601,8 +604,8 @@
       const role = cur(gid, "role"), name = G(gid).columns[0];
       if (role === "unresolved") throw new Error(`Choose a role for ${name}.`);
       if (role === "sample_metadata" && !S.vocab.audit_kind.includes(cur(gid, "audit_kind"))) throw new Error(`Choose an audit kind for ${name}.`);
-      if (cur(gid, "marks_rows_as_suspect") && (D(gid).flag_values || D(gid).value_counts) && cur(gid, "flagged_value") == null)
-        throw new Error(`Choose which value of ${name} means ‘flagged’.`);
+      if (cur(gid, "marks_rows_as_suspect") && (D(gid).flag_values || D(gid).value_counts) && !(cur(gid, "flagged_values") || []).length)
+        throw new Error(`Choose which value(s) of ${name} mean ‘flagged’.`);
     }
   }
 
@@ -736,58 +739,107 @@
       el("button", { class: "btn btn-sm", type: "button", text: "Use these labels",
         onclick: () => structOp("/api/consistency", { action: "labels", group_ids: c.group_ids, labels: S.local.blockLabels }, "Updating sample IDs") }))));
   }
-  function commandBox() {
-    const cmd = S.draft.pending_command;
-    if (!aiReady()) return null;
-    const box = el("div", { class: "command" });
-    if (!cmd) {
-      const ta = el("textarea", { class: "input", rows: 1, placeholder: "Ask the AI to do it, e.g. “don't include the score and count columns in the output”" });
-      ta.value = S.local.instruction || "";
-      ta.addEventListener("input", () => { S.local.instruction = ta.value; });
-      ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); go2(); } });
-      const go2 = async () => {
-        if (!ta.value.trim()) return;
-        await busy("The AI is planning the changes", async (pid) => {
-          try {
-            const r = await api("/api/ai-command", { session_id: S.session.session_id, instruction: ta.value, progress_id: pid });
-            S.draft = r.draft; if (r.session) S.session = r.session; S.local.instruction = "";
-            S.local.accept = Object.fromEntries(r.command.actions.map((a) => [a.index, a.usable]));
-          } catch (e) { S.local.error = e.message; }
-        });
-        renderGuide();
-      };
-      box.append(el("div", { class: "command-row" }, ta, el("button", { class: "btn btn-sm", type: "button", text: "Plan it", onclick: go2 })),
-        el("div", { class: "item-sub", text: "The AI turns your instruction into concrete changes (exclude, role, label, merge, split, samples…). You see them first; nothing changes until you apply." }));
-      return box;
+  // ------------------------------------------------------------ AI patches: diff cards (v2.4 §4.8)
+  const fmtVal = (v) => v == null ? "—" : Array.isArray(v) ? (v.map((x) => x === "" ? "(empty)" : x).join(", ") || "none") : typeof v === "boolean" ? (v ? "yes" : "no") : String(v) || "—";
+  async function applyPatches(ids, confirmLarge = [], overrides = {}) {
+    let res = null;
+    const before = new Set(Object.keys(S.draft.groups));
+    await busy("Applying", async () => {
+      try {
+        res = await api("/api/patch/apply", { session_id: S.session.session_id, patch_ids: ids, confirm_large: confirmLarge, overrides });
+        S.draft = res.draft; if (res.session) S.session = res.session;
+      } catch (e) { S.local.error = e.message; }
+    });
+    if (res) {
+      const bad = res.results.filter((r) => r.status !== "applied");
+      S.local.note = `Applied ${res.results.length - bad.length} change(s)` + (bad.length ? `; ${bad.map((r) => `${r.status}: ${r.reason}`).join("; ")}` : "") + ".";
+      S.hop = new Set(res.results.filter((r) => r.status === "applied").flatMap((r) => {
+        const p = (S.draft.patches || []).find((x) => x.patch_id === r.patch_id);
+        const cols = new Set(p?.resolved?.columns || []);
+        return S.session.groups.filter((g) => g.columns.some((c) => cols.has(c)) || !before.has(g.group_id)).map((g) => g.group_id);
+      }));
     }
-    S.local.accept = S.local.accept || Object.fromEntries(cmd.actions.map((a) => [a.index, a.usable]));
-    box.append(...[el("div", { class: "disagree-head" }, el("strong", { text: `“${cmd.instruction}”` })),
-      cmd.reply ? el("p", { class: "item-sub", text: "AI: " + cmd.reply }) : null,
-      cmd.not_possible ? el("div", { class: "notice", text: "Not possible with the available actions: " + cmd.not_possible }) : null,
-      cmd.actions.length ? el("div", { class: "actions-list" }, cmd.actions.map((a) => {
-        const cb = el("input", { type: "checkbox", checked: !!S.local.accept[a.index], disabled: !a.usable });
-        cb.addEventListener("change", () => { S.local.accept[a.index] = cb.checked; });
-        return el("label", { class: `check action ${a.usable ? "" : "unusable"}` }, cb,
-          el("span", {}, a.description, a.reason ? el("span", { class: "item-sub", text: ` — ${a.reason}` }) : null,
-            a.problems?.length ? el("div", { class: "item-sub warn-text", text: "Checked by code: " + a.problems.join("; ") }) : null));
-      })) : el("p", { class: "item-sub", text: "The AI proposed no change." }),
-      el("div", { class: "disagree-actions" },
-        el("button", { class: "btn btn-sm btn-light", type: "button", text: "Apply selected", disabled: !cmd.actions.some((a) => a.usable),
-          onclick: async () => {
-            const accept = cmd.actions.filter((a) => S.local.accept[a.index]).map((a) => a.index);
-            let res = null;
-            await busy("Applying", async () => {
-              try { res = await api("/api/apply-command", { session_id: S.session.session_id, command_id: cmd.id, accept });
-                    S.draft = res.draft; if (res.session) S.session = res.session; }
-              catch (e) { S.local.error = e.message; }
-            });
-            S.local = { note: res ? `Applied ${res.applied.length} change(s)` + (res.skipped.length ? `; skipped: ${res.skipped.map((x) => x.why).join("; ")}` : "") + ". Confirmed steps they touch are reopened for you to check." : null, error: S.local.error };
-            renderAll();
-          } }),
-        el("button", { class: "btn btn-sm", type: "button", style: "margin-left:6px", text: "Discard",
-          onclick: () => structOp("/api/discard-command", {}, "Discarding") }))].filter(Boolean));
+    S.local.patchEdits = {};
+    renderAll();
+  }
+  async function dismissPatches(ids) { await structOp("/api/patch/dismiss", { patch_ids: ids }, "Dismissing"); }
+  function patchCard(p, multi) {
+    const n = p.n_columns || p.resolved?.n_columns || 0, ns = p.resolved?.n_samples || 0;
+    const count = n ? `${n} column${n > 1 ? "s" : ""}` : ns ? `${ns} sample${ns > 1 ? "s" : ""}` : "";
+    if (p.status === "applied") return el("div", { class: "patch done" }, "✓ ", el("b", { text: p.op_text }), count ? ` · ${count}` : "", " ",
+      el("button", { class: "linkbtn", type: "button", text: "Undo", onclick: () => undoTo(p.edit_id) }));
+    if (p.status === "dismissed") return null;
+    if (p.status === "rejected") return el("div", { class: "patch rejected" }, el("b", { text: `${p.op_text}: not possible` }), " — ", (p.problems || []).join(" "),
+      p.reason ? el("div", { class: "item-sub", text: `The AI wanted: ${p.reason}` }) : null);
+    S.local.patchEdits = S.local.patchEdits || {};
+    S.local.pick = S.local.pick || {};
+    if (!(p.patch_id in S.local.pick)) S.local.pick[p.patch_id] = true;
+    const pv = p.preview || {};
+    const cols = p.resolved?.columns || [];
+    const args = p.args || {};
+    const edit = S.local.patchEdits[p.patch_id];
+    const editable = "label" in args && args.label != null
+      ? fieldBox("Label (you can edit it before applying)", textInput(edit?.label ?? args.label, (v) => { S.local.patchEdits[p.patch_id] = { ...args, label: v }; })) : null;
+    const rows = (pv.groups || []).map((g) => el("li", {}, code(g.columns[0] + (g.n_columns > 1 ? ` … (${g.n_columns})` : "")), " ",
+      Object.entries(g.changes).map(([k, [b, a]]) => el("span", { class: "chg" }, `${pretty(k)}: `, el("s", { text: fmtVal(b) }), " → ", el("b", { text: fmtVal(a) }))))).concat(
+      (pv.metadata || []).map((m) => el("li", {}, code(m.column), " (metadata) ", Object.entries(m.changes).map(([k, [b, a]]) => el("span", { class: "chg" }, `${pretty(k)}: `, el("s", { text: fmtVal(b) }), " → ", el("b", { text: fmtVal(a) }))))));
+    const der = p.derivation;
+    const cb = multi ? el("input", { type: "checkbox", checked: !!S.local.pick[p.patch_id] }) : null;
+    if (cb) cb.addEventListener("change", () => { S.local.pick[p.patch_id] = cb.checked; });
+    const large = n > 25;
+    return el("div", { class: `patch ${p.status === "held" ? "held" : ""}` },
+      el("div", { class: "patch-head" }, cb, el("b", { text: p.op_text }), count ? el("span", { class: "badge", text: count }) : null,
+        p.source === "question" ? el("span", { class: "item-sub", text: " from a question" }) : null),
+      p.reason ? el("div", { class: "item-sub", text: p.reason }) : null,
+      cols.length ? el("details", { class: "saw" }, el("summary", { text: `Which columns (${cols.length})` }), el("div", { class: "ids", text: cols.join(", ") })) : null,
+      rows.length ? el("ul", { class: "np" }, rows, (pv.n_groups_changed || 0) > rows.length ? el("li", { class: "item-sub", text: `… and ${pv.n_groups_changed - rows.length} more group(s)` }) : null) : null,
+      pv.assays ? el("div", { class: "item-sub" }, "Assays: ", el("s", { text: pv.assays[0].join(", ") }), " → ", el("b", { text: pv.assays[1].join(", ") })) : null,
+      pv.n_groups_after !== pv.n_groups_before && pv.n_groups_after != null ? el("div", { class: "item-sub", text: `Groups: ${pv.n_groups_before} → ${pv.n_groups_after}` }) : null,
+      der ? el("div", { class: "item-sub" }, `Parsed ${der.n_parsed} of ${der.n_total} names. `,
+        Object.entries(der.parts).map(([k, v]) => el("div", {}, code(k), `: ${v.n_distinct} distinct — `, v.values.slice(0, 12).map((x) => `${x.label} (${x.count})`).join(", ")))) : null,
+      editable,
+      (p.warnings || []).length ? el("ul", { class: "warns" }, p.warnings.map((w) => el("li", { text: w }))) : null,
+      p.status === "held" ? el("div", { class: "notice accent", text: (p.problems || []).join(" ") }) : null,
+      (p.consequences || []).length ? el("div", { class: "notice" }, el("b", { text: "Worth knowing: " }), p.consequences.join(" ")) : null,
+      el("div", { class: "disagree-actions", style: "justify-content:flex-start" },
+        el("button", { class: "btn btn-sm btn-light", type: "button", text: count ? `Apply to ${count}` : "Apply",
+          onclick: () => applyPatches([p.patch_id], large ? [p.patch_id] : [], S.local.patchEdits[p.patch_id] ? { [p.patch_id]: S.local.patchEdits[p.patch_id] } : {}) }),
+        el("button", { class: "btn btn-sm", type: "button", style: "margin-left:6px", text: "Dismiss", onclick: () => dismissPatches([p.patch_id]) })));
+  }
+  function chatBox() {
+    if (!S.draft) return null;
+    const msgs = S.draft.chat || [];
+    const last = msgs[msgs.length - 1];
+    const box = el("div", { class: "command" });
+    if (!aiReady()) return el("div", { class: "item-sub", text: "The AI is off or unavailable: you can still edit everything yourself, and code-generated questions still work." });
+    const ta = el("textarea", { class: "input", rows: 1, placeholder: "Ask the AI to do something, e.g. “exclude all annotation columns except the ID”" });
+    ta.value = S.local.instruction || "";
+    ta.addEventListener("input", () => { S.local.instruction = ta.value; });
+    const send = async () => {
+      if (!ta.value.trim()) return;
+      await busy("The AI is reading your message", async (pid) => {
+        try {
+          const r = await api("/api/chat", { session_id: S.session.session_id, message: ta.value, step: S.step, progress_id: pid });
+          S.draft = r.draft; if (r.session) S.session = r.session; S.local.instruction = "";
+        } catch (e) { S.local.error = e.message; }
+      });
+      renderGuide();
+    };
+    ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+    box.append(el("div", { class: "command-row" }, ta, el("button", { class: "btn btn-sm", type: "button", text: "Send", onclick: send })));
+    const byId = Object.fromEntries((S.draft.patches || []).map((p) => [p.patch_id, p]));
+    if (last) {
+      const ps = (last.patch_ids || []).map((id) => byId[id]).filter(Boolean);
+      const pend = ps.filter((p) => ["pending", "held"].includes(p.status));
+      box.append(el("div", { class: "chat-turn" }, el("div", { class: "item-sub", text: `You: ${last.text}` }), el("div", { class: "reply", text: `AI: ${last.reply}` })),
+        ...ps.map((p) => patchCard(p, pend.length > 1)).filter(Boolean));
+      if (pend.length > 1) box.append(el("div", { class: "disagree-actions", style: "justify-content:flex-start" },
+        el("button", { class: "btn btn-sm btn-light", type: "button", text: "Apply all ticked",
+          onclick: () => applyPatches(pend.filter((p) => S.local.pick?.[p.patch_id]).map((p) => p.patch_id), [], S.local.patchEdits || {}) })));
+    }
     return box;
   }
+
   // ------------------------------------------------------------ changes + undo (one edit layer, v2.4)
   async function undoTo(editId) {
     await structOp("/api/undo", editId ? { edit_id: editId } : {}, "Undoing");
@@ -1305,7 +1357,7 @@
       qs.length && S.step !== "review" ? el("div", { class: "notice" }, el("b", { text: "The AI asks: " }), qs.map((q) => q.question).join(" ")) : null,
       groupingTrouble(),
       changesBox(),
-      commandBox(),
+      chatBox(),
       note,
       el("div", { class: "guide-body" }, spec.body),
       spec.disagree ? disagreeBox(...spec.disagree) : null,

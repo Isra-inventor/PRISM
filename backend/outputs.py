@@ -12,7 +12,7 @@ import csv
 import io
 from collections import Counter, OrderedDict
 
-from . import accounting
+from . import accounting, derive
 from .parsing import cell, is_missing
 from .schema import SCHEMA_VERSION
 from .profiling import apply_rule
@@ -173,18 +173,35 @@ def build(s):
     ann = [(gid, it) for gid, it in d["groups"].items()
            if it["role"] in ("feature_annotation", "feature_id") and it.get("keep", True)]
     ann_idx = [(s.groups_by_id[gid], it) for gid, it in ann]
+    der = [x for x in d.get("derived_feature_annotations", []) if x.get("keep", True)]
+    der_names = [x["name"] for x in der]
+
+    def derived(name_of):   # values of the derived parts for one feature (names are never changed)
+        out = []
+        for x in der:
+            parts = derive.split_name(name_of(x), x["rule"]["delimiter"], x["rule"]["occurrence"]) if name_of(x) is not None else None
+            out.append("" if parts is None else parts[0 if x["part"] == "left" else 1])
+        return out
+
+    def src_index(x):
+        col = x.get("column") or (s.groups_by_id[d["feature_identity"]["group_ids"][0]]["columns"][0]
+                                  if d["feature_identity"]["group_ids"] else None)
+        return s.cols.labels.index(col) if col in s.cols.labels else None
+
     if lay == "samples_in_columns":
         cols = [c for g, _ in ann_idx for c in g["columns"]]
         idxs = [i for g, _ in ann_idx for i in g["indices"]]
         fm = []
         for aid, g, keys in feature_rows_all:
-            fm.extend([[k, aid] + [_v(cell(r, i)) for i in idxs] for k, r in zip(keys, rows)])
-        artifacts["feature_metadata.csv"] = _csv(["feature_key", "assay_id"] + cols, fm)
+            fm.extend([[k, aid] + [_v(cell(r, i)) for i in idxs]
+                       + derived(lambda x, r=r: cell(r, src_index(x)).strip() if src_index(x) is not None else None)
+                       for k, r in zip(keys, rows)])
+        artifacts["feature_metadata.csv"] = _csv(["feature_key", "assay_id"] + cols + der_names, fm)
     elif lay == "samples_in_rows":
         fm = []
         for aid, g, keys in feature_rows_all:
-            fm.extend([[k, aid, g["group_id"]] for k in keys])
-        artifacts["feature_metadata.csv"] = _csv(["feature_key", "assay_id", "source_block"], fm)
+            fm.extend([[k, aid, g["group_id"]] + derived(lambda x, k=k: k) for k in keys])
+        artifacts["feature_metadata.csv"] = _csv(["feature_key", "assay_id", "source_block"] + der_names, fm)
     else:
         cols, idxs = [], []
         for g, _ in ann_idx:
@@ -209,8 +226,10 @@ def build(s):
             first.setdefault(fk, r)
         fm = []
         for aid, g, keys in feature_rows_all:
-            fm.extend([[k, aid] + [_v(cell(first[k], i)) for i in idxs] for k in keys])
-        artifacts["feature_metadata.csv"] = _csv(["feature_key", "assay_id"] + cols, fm)
+            fm.extend([[k, aid] + [_v(cell(first[k], i)) for i in idxs]
+                       + derived(lambda x, k=k: cell(first[k], src_index(x)).strip() if src_index(x) is not None else None)
+                       for k in keys])
+        artifacts["feature_metadata.csv"] = _csv(["feature_key", "assay_id"] + cols + der_names, fm)
 
     # sample metadata
     sids = sample_ids(s, d)
@@ -303,7 +322,13 @@ def build(s):
         "assays": schema_assays,
         "feature_annotations": [_annotation(s, gid, it, c, i)
                                 for gid, it in d["groups"].items() if it["role"] in ("feature_annotation", "feature_id")
-                                for c, i in zip(s.groups_by_id[gid]["columns"], s.groups_by_id[gid]["indices"])],
+                                for c, i in zip(s.groups_by_id[gid]["columns"], s.groups_by_id[gid]["indices"])] + [
+            {"column": x["name"], "label": x["label"], "derived_from": "feature_names", "source": x.get("source"),
+             "from_column": x.get("column"), "rule": dict(x["rule"], part=x["part"]),
+             "display_labels": x.get("display_labels") or {}, "coverage": x.get("coverage"), "keep": x.get("keep", True),
+             "provenance": "user_set" if x.get("set_by") == "user" else
+             ("ai_proposed_corrected" if x.get("set_corrected") else "ai_proposed_confirmed")}
+            for x in d.get("derived_feature_annotations", [])],
         "sample_metadata": [
             {"column": c, "audit_kind": it.get("audit_kind"), "label": it.get("label") or "",
              **({"detail": it["detail"]} if it.get("detail") else {}),
@@ -385,11 +410,17 @@ def _annotation(s, gid, it, column, i):
     out = {"column": column, "label": it.get("label") or "", "is_feature_id": it["role"] == "feature_id",
            "marks_rows_as_suspect": bool(it.get("marks_rows_as_suspect")), "keep": it.get("keep", True),
            "provenance": provenance(it, GROUP_FIELDS)}
+    if it.get("family"):
+        out["family"] = it["family"]
     if it.get("marks_rows_as_suspect"):
-        fv = it.get("flag_values")
-        out["flag_values"] = fv
-        out["flagged_value"] = it.get("flagged_value")
-        if it.get("flagged_value") is not None:
-            out["n_flagged"] = sum(1 for r in s.table["rows"]
-                                   if ("" if is_missing(cell(r, i)) else cell(r, i).strip()) == it["flagged_value"])
+        fv = it.get("flagged_values") or []
+        out["flag_values"] = it.get("flag_values")
+        out["flagged_values"] = fv
+        counts = {v: 0 for v in fv}
+        for r in s.table["rows"]:
+            x = "" if is_missing(cell(r, i)) else cell(r, i).strip()
+            if x in counts:
+                counts[x] += 1
+        out["flag_counts"] = counts
+        out["n_flagged"] = sum(counts.values())
     return out

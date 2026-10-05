@@ -198,43 +198,94 @@ merge in reason. If a user_hint is given, the user thinks the listed groups are 
 check it against the summaries and say in comment why you agree or not."""
 
 
-COMMAND_ACTIONS = ["set_keep", "set_role", "set_label", "set_audit_kind", "set_assay", "set_suspect", "merge", "split",
-                   "set_samples"]
+PATCH_OPS = ["set_keep", "set_role", "set_audit_kind", "set_label", "set_block_keep", "merge_groups", "split_group",
+             "merge_assays", "derive_feature_annotation", "set_design", "set_sample_label", "set_join_key",
+             "set_flag_values"]
 
-COMMAND_PROMPT = """
+CHAT_PROMPT = """
 
-## This call: do what the user asks
-The user gives an instruction (e.g. "don't include the score and count columns in the output",
-"the visit columns are time points", "mark QC_* samples as non-study"). Turn it into actions from
-this closed list, using the group_ids and column names of the summary you get:
-- set_keep {group_ids, keep}: keep false = leave these columns out of the outputs. Data is never
-  deleted; excluded columns are listed in the schema. Identifier columns cannot be excluded.
-- set_role {group_ids, role}; set_label {group_ids, label}; set_audit_kind {group_ids, audit_kind}
-  (sample information only); set_assay {group_ids, assay_label} (value blocks);
-  set_suspect {group_ids, marks_rows_as_suspect}.
-- merge {group_ids}: these groups are one group. split {group_ids: [one], columns}: take these
-  columns out of that group.
-- set_samples {samples (names or glob patterns such as "QC_*"), label and/or is_study_sample}.
-Rules: act only on what the instruction asks; be complete (if the user says "all score columns",
-include every matching group). Give each action a short reason. If something cannot be done with
-these actions (e.g. deleting rows, changing values, normalizing), do not invent an action: explain
-it in not_possible. reply: one or two sentences saying what you will do. Nothing is applied until
-the user confirms."""
+## This call: the user talks to you about the schema (chat)
+You get the user's message, the current step, the columns they selected, a compact summary of
+the draft schema (groups with role / label / columns, every annotation and sample-information
+column, assays, design, open questions, excluded columns), the computed digest of the columns
+the message refers to, and the last chat turns. Answer in `reply` (short, concrete, plain
+words). You act on the schema ONLY through `patches`, from this closed list of ops:
+- set_keep {keep}: keep false = leave the targeted columns out of the outputs (nothing is deleted;
+  they are listed with a reason). set_block_keep {keep}: the same for whole value blocks.
+- set_role {role}; set_audit_kind {audit_kind, detail?} (sample information only);
+  set_label {label, family?} (family: an optional shared descriptor such as "plasma QC metric").
+- merge_groups: the targeted columns' groups are one group. split_group: take the targeted columns
+  out of their group.
+- merge_assays {assay_labels, label?}: these assays are one measurement.
+- derive_feature_annotation {source: "column_headers" | "feature_id_column", column?, rule:
+  {delimiter, occurrence: "first" | "last", parts: [{name, label}, {name, label}]}}: new annotation
+  columns from parts of the feature names (names are never changed).
+- set_sample_label {label?, is_study_sample?} with target.selector.samples (names or patterns
+  such as "QC_*").
+- set_join_key {metadata_column}: the metadata column that names the samples.
+- set_flag_values {flagged_values}: which values of one annotation column mark rows as flagged.
+Targets: {"selector": {...}, "except_columns": [...]}. Selector keys (combined with AND): columns
+(exact names), group_id / group_ids, role, audit_kind, file ("main" | "metadata"),
+name_contains / name_starts_with / name_ends_with (plain text, no regex), samples. Use only names
+and ids from the summary; an invented name is rejected. Give each patch a patch_id, a one-line
+reason, and consequences: what later steps could lose (e.g. excluding a plate, batch, run-order,
+QC-metric, sample-type or suspect-row flag column).
+Rules:
+- Say "I've prepared a change" — never claim it is done; the user applies it.
+- If the request is ambiguous, ask with a question that has options (each option carries the
+  patches it would apply) instead of guessing.
+- The user is the authority: do what they confirm; refuse only what an invariant forbids (the
+  feature ID or sample ID column cannot be excluded; at least one value block stays kept; no op
+  changes values, renames source columns, touches processing history or finalizes).
+- Do not choose the research outcome variable, do not give preprocessing advice and do not answer
+  the processing-history questions: say that comes in a later step."""
 
 
-def command_schema():
+def _patch_schema():
     s = lambda **k: dict(type="STRING", **k)
     b = lambda **k: dict(type="BOOLEAN", **k)
-    arr = {"type": "ARRAY", "items": {"type": "STRING"}}
+    arr = lambda: {"type": "ARRAY", "items": {"type": "STRING"}}
+    selector = {"type": "OBJECT", "properties": {
+        "columns": arr(), "group_id": s(nullable=True), "group_ids": arr(),
+        "role": s(enum=VOCABULARY["column_role"], nullable=True), "audit_kind": s(enum=VOCABULARY["audit_kind"], nullable=True),
+        "file": s(enum=["main", "metadata"], nullable=True), "name_contains": s(nullable=True),
+        "name_starts_with": s(nullable=True), "name_ends_with": s(nullable=True), "samples": arr()}}
+    part = {"type": "OBJECT", "properties": {"name": s(), "label": s(nullable=True)}}
+    rule = {"type": "OBJECT", "properties": {"delimiter": s(), "occurrence": s(enum=["first", "last"]),
+                                             "parts": {"type": "ARRAY", "items": part},
+                                             "left": s(nullable=True), "right": s(nullable=True)}}
+    source = {"type": "OBJECT", "properties": {
+        "source": s(enum=["metadata_column", "derived_from_sample_names", "none"]), "column": s(nullable=True),
+        "file": s(enum=["main", "metadata"], nullable=True)}}
+    args = {"type": "OBJECT", "properties": {
+        "keep": b(nullable=True), "role": s(enum=VOCABULARY["column_role"], nullable=True),
+        "audit_kind": s(enum=VOCABULARY["audit_kind"], nullable=True), "detail": s(nullable=True),
+        "label": s(nullable=True), "family": s(nullable=True), "flagged_values": arr(), "assay_labels": arr(),
+        "metadata_column": s(nullable=True), "is_study_sample": b(nullable=True),
+        "source": s(enum=["column_headers", "feature_id_column"], nullable=True), "column": s(nullable=True),
+        "rule": rule, "subject": source, "time": source, "derivation": rule}}
     return {"type": "OBJECT", "properties": {
-        "reply": s(), "not_possible": s(nullable=True),
-        "actions": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
-            "action": s(enum=COMMAND_ACTIONS), "group_ids": arr, "columns": arr, "samples": arr,
-            "role": s(enum=VOCABULARY["column_role"], nullable=True), "label": s(nullable=True),
-            "audit_kind": s(enum=VOCABULARY["audit_kind"], nullable=True), "assay_label": s(nullable=True),
-            "keep": b(nullable=True), "marks_rows_as_suspect": b(nullable=True), "is_study_sample": b(nullable=True),
-            "reason": s()}, "required": ["action", "reason"]}}},
-        "required": ["reply", "actions"]}
+        "patch_id": s(), "op": s(enum=PATCH_OPS),
+        "target": {"type": "OBJECT", "properties": {"selector": selector, "except_columns": arr()}},
+        "args": args, "reason": s(), "consequences": arr()}, "required": ["patch_id", "op", "reason"]}
+
+
+def questions_schema():
+    s = lambda **k: dict(type="STRING", **k)
+    return {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+        "type": s(enum=["single", "multi", "confirm"]), "text": s(),
+        "applies_to": {"type": "OBJECT", "properties": {"columns": {"type": "ARRAY", "items": s()},
+                                                         "group_ids": {"type": "ARRAY", "items": s()}}},
+        "step": s(nullable=True),
+        "options": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+            "label": s(), "patches": {"type": "ARRAY", "items": _patch_schema()}}, "required": ["label"]}},
+        "allow_free_text": {"type": "BOOLEAN", "nullable": True}}, "required": ["type", "text", "options"]}}
+
+
+def chat_schema():
+    return {"type": "OBJECT", "properties": {
+        "reply": {"type": "STRING"}, "patches": {"type": "ARRAY", "items": _patch_schema()},
+        "questions": questions_schema()}, "required": ["reply"]}
 
 
 def consolidation_schema():
@@ -305,25 +356,33 @@ class ConsolidationResponse(BaseModel):
     comment: Optional[str] = ""
 
 
-class CommandAction(BaseModel):
-    action: str
-    group_ids: List[str] = []
-    columns: List[str] = []
-    samples: List[str] = []
-    role: Optional[str] = None
-    label: Optional[str] = None
-    audit_kind: Optional[str] = None
-    assay_label: Optional[str] = None
-    keep: Optional[bool] = None
-    marks_rows_as_suspect: Optional[bool] = None
-    is_study_sample: Optional[bool] = None
+class Patch(BaseModel):
+    patch_id: str = ""
+    op: str
+    target: dict = {}
+    args: dict = {}
     reason: str = ""
+    consequences: List[str] = []
 
 
-class CommandResponse(BaseModel):
+class QOption(BaseModel):
+    label: str
+    patches: List[Patch] = []
+
+
+class AIQuestion(BaseModel):
+    type: str = "single"
+    text: str
+    applies_to: dict = {}
+    step: Optional[str] = None
+    options: List[QOption] = []
+    allow_free_text: Optional[bool] = True
+
+
+class ChatResponse(BaseModel):
     reply: str = ""
-    not_possible: Optional[str] = None
-    actions: List[CommandAction] = []
+    patches: List[Patch] = []
+    questions: List[AIQuestion] = []
 
 
 class AIResponse(BaseModel):
@@ -360,7 +419,7 @@ def _call(digest, sha, log=None, mock_fn=None, kind="digest"):
         "digest": ("Digest (JSON):", system_prompt(), response_schema(), AIResponse),
         "consolidation": ("Consolidation (JSON):", BRIEFING + CONSOLIDATION_PROMPT, consolidation_schema(),
                           ConsolidationResponse),
-        "command": ("Command (JSON):", BRIEFING + COMMAND_PROMPT, command_schema(), CommandResponse),
+        "chat": ("Chat (JSON):", BRIEFING + CHAT_PROMPT, chat_schema(), ChatResponse),
     }[kind]
     ok, why = llm.available()
     meta = {"provider": llm.provider_name(), "model": llm.model_list()[0] if ok else None,
@@ -621,9 +680,10 @@ def consolidate(cols, groups, items, sha, log=None, mock_fn=None):
     return [(m.group_ids, m.reason) for m in resp.cross_chunk_merges], None
 
 
-def command(payload, sha, log=None, mock_fn=None):
-    """The user's instruction -> proposed actions (CommandResponse) or (None, error). Nothing is applied here."""
-    resp, meta = _call(payload, sha, log, mock_fn, kind="command")
+def chat(payload, sha, log=None, mock_fn=None):
+    """The user's message -> reply, proposed patches and questions (ChatResponse) or (None, error).
+    Nothing is applied here."""
+    resp, meta = _call(payload, sha, log, mock_fn, kind="chat")
     return resp, meta.get("error")
 
 

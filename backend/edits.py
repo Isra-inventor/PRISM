@@ -97,23 +97,57 @@ def recording(s, op_name, actor="user", summary="", args=None):
         raise EditError("Run the proposal first.")
     if s.draft.get("finalized"):
         raise EditError("This dataset is finalized; its schema can no longer change.")
-    snap = {"draft": _json_copy(s.draft), "groups": list(s.groups)}
+    snap = {"draft": _json_copy(s.draft), "groups": list(s.groups), "obj": s.draft}
     tx = {"op": op_name, "actor": actor, "summary": summary, "args": args, "columns": [], "warnings": []}
     s._tx = tx
     try:
         yield tx
         wf.after_edit(s)
+        wf.check_invariants(s, snap["draft"], tx)
     except BaseException:
-        s.draft, s.groups = snap["draft"], snap["groups"]
+        _restore(s, snap)
         raise
     finally:
         s._tx = None
     _commit(s, snap, tx)
 
 
+def trial(s, fn, observe):
+    """Run fn() exactly as an edit would (validation, derived state, invariants), call
+    observe(before_draft, tx) on the result, then put everything back: the diff-card
+    preview of a patch. Returns (fn's result, observation)."""
+    if s.draft is None:
+        raise EditError("Run the proposal first.")
+    if s._tx is not None:
+        raise EditError("Another change is being applied.")
+    snap = {"draft": _json_copy(s.draft), "groups": list(s.groups), "obj": s.draft}
+    tx = {"op": "preview", "actor": "ai_patch", "summary": "", "args": None, "columns": [], "warnings": [],
+          "dry": True}
+    s._tx = tx
+    try:
+        out = fn()
+        wf.after_edit(s)
+        wf.check_invariants(s, snap["draft"], tx)
+        return out, observe(snap["draft"], tx)
+    finally:
+        _restore(s, snap)
+        s._tx = None
+
+
+UNTRACKED = ("patches", "chat")   # conversation records: undo never rewinds them (undone patches go back to pending)
+
+
+def _restore(s, snap):
+    """Put the draft back in place (the same dict object, so references held elsewhere stay valid)."""
+    obj = snap["obj"]
+    obj.clear()
+    obj.update(_json_copy(snap["draft"]))
+    s.draft, s.groups = obj, snap["groups"]
+
+
 def _diff(before, after):
     keys, per = {}, {}
-    for k in set(before) | set(after):
+    for k in (set(before) | set(after)) - set(UNTRACKED):
         b, a = before.get(k, _MISSING), after.get(k, _MISSING)
         if k in ("groups", "samples") and isinstance(b, dict) and isinstance(a, dict):
             ch = {x: b.get(x, _MISSING) for x in set(b) | set(a) if b.get(x, _MISSING) != a.get(x, _MISSING)}
@@ -131,7 +165,7 @@ def _commit(s, snap, tx):
     if not keys and not per and not struct_changed:
         return None
     cols = list(dict.fromkeys(tx["columns"]))
-    entry = {"edit_id": uuid.uuid4().hex[:10], "at": now_iso(), "actor": tx["actor"], "op": tx["op"],
+    entry = {"edit_id": tx.get("edit_id") or uuid.uuid4().hex[:10], "at": now_iso(), "actor": tx["actor"], "op": tx["op"],
              "summary": tx["summary"] or tx["op"].replace("_", " "), "n_columns": len(cols),
              "columns": [{"file": f, "column": c} for f, c in cols[:50]],
              "restore": {"keys": keys, "per": per, "structure": old_struct if struct_changed else None}}
@@ -202,6 +236,10 @@ def undo(s, edit_id=None):
         if edit_id is None or e["edit_id"] == edit_id:
             break
     d["groups"] = {g["group_id"]: d["groups"][g["group_id"]] for g in s.groups if g["group_id"] in d["groups"]}
+    gone = {e["edit_id"] for e in undone}
+    for p in d.get("patches", []):
+        if p.get("status") == "applied" and p.get("edit_id") in gone:
+            p.update(status="pending", edit_id=None, undone=True)
     s.undo_dirty = True
     s.save()
     return [{"edit_id": e["edit_id"], "summary": e["summary"]} for e in undone]
@@ -260,7 +298,11 @@ def set_group_fields(ctx, gid, fields):
         raise EditError(f"Unknown group '{gid}'.")
     cur = d["groups"][gid]
     it = _json_copy(cur)
-    for f in wf.GROUP_FIELDS + ("family", "flagged_values"):
+    fields = dict(fields)
+    if "flagged_value" in fields:            # older clients: one value
+        v = fields.pop("flagged_value")
+        fields["flagged_values"] = [] if v is None else [v]
+    for f in wf.GROUP_FIELDS:
         if f not in fields:
             continue
         val = fields[f]
@@ -274,6 +316,8 @@ def set_group_fields(ctx, gid, fields):
             raise EditError(f"'{val}' is not an allowed role.")
         elif f == "audit_kind" and val is not None and val not in VOCABULARY["audit_kind"]:
             raise EditError(f"'{val}' is not an allowed audit kind.")
+        elif f == "flagged_values":
+            val = list(dict.fromkeys("" if v is None else str(v) for v in (val or [])))
         it[f] = val
     ai.normalize_item(it)
     g = s.groups_by_id[gid]
@@ -281,13 +325,19 @@ def set_group_fields(ctx, gid, fields):
         it["assay_label"] = d["assays"][0]["assay_label"]
     if it.get("marks_rows_as_suspect") and it.get("flag_values") is None:
         it["flag_values"] = wf.flag_values(s, gid)
+    if not it.get("marks_rows_as_suspect"):
+        it["flagged_values"] = []
+    elif it.get("flag_values") is not None:
+        bad = [v for v in it.get("flagged_values") or [] if v not in it["flag_values"]]
+        if bad:
+            raise EditError(f"{g['columns'][0]}: value(s) {', '.join(repr(v) for v in bad)} do not occur in this column.")
     if it["role"] == "sample_metadata" and it.get("audit_kind") == "timepoint" and not it.get("detail") \
             and g["n_columns"] == 1:
         it["detail"] = timepoint_detail(s.cols.digests[g["indices"][0]])
     it["validation"] = validate_group(it, g, s.cols, wf.layout_of(d))
     if it["validation"]["status"] == "contradicted":
         raise EditError(f"{', '.join(g['columns'][:2])}: " + " ".join(it["validation"]["messages"]))
-    changed = [f for f in wf.GROUP_FIELDS + ("family", "flagged_values") if it.get(f) != cur.get(f)]
+    changed = [f for f in wf.GROUP_FIELDS if it.get(f) != cur.get(f)]
     if not changed:
         return False
     ctx.touch(gid)
@@ -311,6 +361,141 @@ def set_group_fields(ctx, gid, fields):
             if d["steps"].get(st) == "confirmed":
                 d["steps"][st] = "pending"
     return role_changed
+
+
+# ---------------------------------------------------------------- the AI's closed set (v2.4 §4.3), on resolved targets
+# Targets arrive resolved by patches.py (selectors -> group_ids / metadata_columns /
+# sample_ids); the wizard calls the same ops with the ids it shows.
+
+def _meta_columns(ctx, names):
+    meta = ctx.d.get("metadata") or {}
+    by = {c["column"]: c for c in meta.get("columns", [])} if not meta.get("skipped") else {}
+    bad = [n for n in names if n not in by]
+    if bad:
+        raise EditError(f"Metadata column(s) {', '.join(bad[:5])} do not exist.")
+    return [by[n] for n in names]
+
+
+def _set_meta_fields(ctx, c, fields):
+    before = {k: c.get(k) for k in ("role", "audit_kind", "label", "detail", "keep", "family")}
+    if c["role"] == "sample_id" and (fields.get("keep") is False or fields.get("role") not in (None, "sample_id")):
+        raise EditError(f"'{c['column']}' joins the metadata to the samples; choose another join key first.")
+    for k, v in fields.items():
+        c[k] = v
+    if c.get("role") not in ("sample_metadata", "sample_id", "ignore"):
+        raise EditError(f"Metadata column '{c['column']}' can only be sample information or ignored.")
+    if c.get("audit_kind") is not None and c["audit_kind"] not in VOCABULARY["audit_kind"]:
+        raise EditError(f"'{c['audit_kind']}' is not an allowed audit kind.")
+    if {k: c.get(k) for k in before} != before:
+        c["set_by"], c["set_corrected"] = ctx.actor, bool(ctx.corrected)
+        ctx.columns.append(("metadata", c["column"]))
+    excluded = not c.get("keep", True) or c.get("role") == "ignore"
+    if excluded and not c.get("excluded"):
+        c["excluded"] = excluded_record(ctx, "left out of the outputs")
+    elif not excluded:
+        c.pop("excluded", None)
+
+
+def _each(ctx, a, group_fields, meta_fields, check=None):
+    gids, metas = a.get("group_ids") or [], _meta_columns(ctx, a.get("metadata_columns") or [])
+    if not gids and not metas:
+        raise EditError("Nothing to change: the target matches no column.")
+    for gid in gids:                     # validate every target before changing any
+        if gid not in ctx.d["groups"]:
+            raise EditError(f"Unknown group '{gid}'.")
+        if check:
+            check(gid, ctx.d["groups"][gid])
+    for gid in gids:
+        f = group_fields(ctx.d["groups"][gid]) if callable(group_fields) else group_fields
+        set_group_fields(ctx, gid, f)
+    for c in metas:
+        _set_meta_fields(ctx, c, meta_fields(c) if callable(meta_fields) else meta_fields)
+    n = sum(ctx.s.groups_by_id[g]["n_columns"] for g in gids) + len(metas)
+    return n
+
+
+@op("set_keep", ai=True)
+def _set_keep(ctx, a):
+    keep = a.get("keep")
+    if keep is None:
+        raise EditError("set_keep needs keep: true or false.")
+    keep = bool(keep)
+    n = _each(ctx, a, lambda it: dict({"keep": keep}, **({"role": "ignore"} if not keep and it["role"] == UNRESOLVED else {})),
+              {"keep": keep})
+    ctx.summary = f"{'Kept' if keep else 'Excluded'} {n} column(s)"
+
+
+@op("set_block_keep", ai=True)
+def _set_block_keep(ctx, a):
+    def check(gid, it):
+        if it["role"] != "value":
+            raise EditError(f"{ctx.s.groups_by_id[gid]['columns'][0]} is not a value block.")
+    keep = bool(a.get("keep", True))
+    if a.get("metadata_columns"):
+        raise EditError("Value blocks are in the main file.")
+    n = _each(ctx, a, {"keep": keep}, {}, check)
+    ctx.summary = f"{'Kept' if keep else 'Excluded'} value block(s) ({n} columns)"
+
+
+@op("set_role", ai=True)
+def _set_role(ctx, a):
+    role = a.get("role")
+    if role not in VOCABULARY["column_role"] or role == UNRESOLVED:
+        raise EditError(f"'{role}' is not an allowed role.")
+    if role == "sample_id" and a.get("metadata_columns"):
+        raise EditError("Use set_join_key to choose the metadata column that names the samples.")
+    def group_fields(it):
+        f = {"role": role}
+        if role == "value" and it.get("keep") is False:
+            f["keep"] = True
+        return f
+    n = _each(ctx, a, group_fields, {"role": role})
+    ctx.summary = f"Role '{role.replace('_', ' ')}' for {n} column(s)"
+
+
+@op("set_audit_kind", ai=True)
+def _set_audit_kind(ctx, a):
+    kind = a.get("audit_kind")
+    if kind not in VOCABULARY["audit_kind"]:
+        raise EditError(f"'{kind}' is not an allowed audit kind.")
+    def check(gid, it):
+        if it["role"] != "sample_metadata":
+            raise EditError(f"{ctx.s.groups_by_id[gid]['columns'][0]} is not sample information "
+                            f"(role '{it['role']}'); set its role first.")
+    extra = {"detail": _clean(a["detail"]) or None} if a.get("detail") is not None else {}
+    n = _each(ctx, a, dict({"audit_kind": kind}, **extra), dict({"audit_kind": kind}, **extra), check)
+    ctx.summary = f"Audit kind '{kind.replace('_', ' ')}' for {n} column(s)"
+
+
+@op("set_label", ai=True)
+def _set_label(ctx, a):
+    label = _clean(a.get("label"))
+    if not label:
+        raise EditError("The label is empty.")
+    f = {"label": label}
+    if a.get("family") is not None:
+        f["family"] = _clean(a["family"]) or None
+    n = _each(ctx, a, f, f)
+    ctx.summary = f"Label '{label}' for {n} column(s)"
+
+
+@op("set_flag_values", ai=True)
+def _set_flag_values(ctx, a):
+    """Marks rows as flagged (decoy, contaminant, non-target species ...). Removes nothing."""
+    vals = a.get("flagged_values")
+    if vals is None:
+        raise EditError("set_flag_values needs flagged_values.")
+    gids = a.get("group_ids") or []
+    if len(gids) != 1 or a.get("metadata_columns"):
+        raise EditError("set_flag_values applies to exactly one annotation column.")
+    gid = gids[0]
+    it = ctx.d["groups"].get(gid)
+    if it is None or it["role"] not in ("feature_annotation", UNRESOLVED) or ctx.s.groups_by_id[gid]["n_columns"] != 1:
+        raise EditError("set_flag_values applies to one feature annotation column.")
+    set_group_fields(ctx, gid, {"role": "feature_annotation", "marks_rows_as_suspect": bool(vals),
+                                "flagged_values": vals})
+    ctx.summary = f"Flag values of {ctx.s.groups_by_id[gid]['columns'][0]}: " + (", ".join(
+        repr(v) if v else "(empty)" for v in vals) or "none")
 
 
 @op("edit_group")

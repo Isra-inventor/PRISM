@@ -40,7 +40,7 @@ def test_A_maxquant(flow, isolated):
     rev, con = gid_of(f, "Reverse"), gid_of(f, "Potential contaminant")
     for x, n in ((rev, 3), (con, 2)):
         assert g[x]["role"] == "feature_annotation" and g[x]["marks_rows_as_suspect"] is True
-        assert g[x]["flag_values"] == {"": 60 - n, "+": n} and g[x]["flagged_value"] == "+" and g[x]["n_flagged"] == n
+        assert g[x]["flag_values"] == {"": 60 - n, "+": n} and g[x]["flagged_values"] == ["+"] and g[x]["n_flagged"] == n
     f.confirm_all_as_proposed()
     out = f.finalize()
     schema = out["schema"]
@@ -49,7 +49,7 @@ def test_A_maxquant(flow, isolated):
     assert len(blocks) == 4 and all(b["label"] and "block_role" not in b for b in blocks)
     assert len([a for a in out["artifacts"] if a.startswith("value_matrix_A1_")]) == 4   # one matrix per kept block
     rev_ann = next(a for a in schema["feature_annotations"] if a["column"] == "Reverse")
-    assert rev_ann["marks_rows_as_suspect"] is True and rev_ann["flagged_value"] == "+"
+    assert rev_ann["marks_rows_as_suspect"] is True and rev_ann["flagged_values"] == ["+"] and rev_ann["flag_counts"] == {"+": 3}
     assert rev_ann["n_flagged"] == 3 and rev_ann["provenance"] == "ai_proposed_confirmed" and rev_ann["label"]
     lfq_file = next(b["file"] for b in blocks if b["group_id"] == lfq)
     vm = rows_of(f.export(lfq_file))
@@ -81,7 +81,7 @@ def test_A_manual_mode_starts_from_signature(flow):
 def test_suspect_flag_value_is_chosen_by_the_user(flow):
     f = flow("A_maxquant_proteinGroups.txt")
     rev = gid_of(f, "Reverse")
-    f.step("annotations", {"items": [{"group_id": rev, "flagged_value": ""}]})   # user says: empty = flagged
+    f.step("annotations", {"items": [{"group_id": rev, "flagged_values": [""]}]})   # user says: empty = flagged
     assert f.draft["groups"][rev]["n_flagged"] == 57
     f.step("annotations", {"items": [{"group_id": rev, "marks_rows_as_suspect": False}]})
     assert "n_flagged" not in f.draft["groups"][rev]
