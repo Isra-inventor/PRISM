@@ -91,13 +91,31 @@ class Flow:
                     if items:
                         dec["items"] = items
                 self.step(st, dec)
-        if d["layout"]["value"] == "samples_in_columns":
+        if d["layout"]["value"] == "samples_in_columns" and not (self.draft.get("metadata") or {}).get("columns"):
             self.step("sample_info", {"metadata": {"skip": True}})
         else:
             self.step("sample_info", {})
+        self.confirm_design()
         self.step("history", {"processing_history": {q: {"answer": "not_sure"} for q in (
             "normalized", "log_transformed", "imputed", "batch_corrected",
             "features_or_samples_removed_before_upload")}})
+
+    def confirm_design(self, time_unit="weeks"):
+        self.step("design", {})
+        q = next((q for q in self.draft["questions"] if q["kind"] == "time_unit" and q["status"] == "open"), None)
+        if q is not None:
+            self.answer(q, time_unit)
+
+    def answer(self, q, label_start, expect=200):
+        opt = next(o for o in q["options"] if o["label"].startswith(label_start))
+        r = self.c.post("/api/question/answer", json={"session_id": self.sid, "question_id": q["question_id"],
+                                                      "option_ids": [opt["option_id"]]})
+        assert r.status_code == expect, r.text
+        if expect == 200:
+            self.draft = r.json()["draft"]
+            if r.json().get("session"):
+                self.upload = r.json()["session"]
+        return r.json()
 
     def finalize(self, expect=200):
         r = self.c.post("/api/finalize", json={"session_id": self.sid})

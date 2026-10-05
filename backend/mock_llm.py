@@ -181,6 +181,8 @@ class MockLLM:
             return MockLLM.consolidate(json.loads(prompt.split("\n", 1)[1]))
         if prompt.startswith("Chat"):
             return MockLLM.chat(json.loads(prompt.split("\n", 1)[1]))
+        if prompt.startswith("Metadata"):
+            return MockLLM.metadata(json.loads(prompt.split("\n", 1)[1]))
         digest = json.loads(prompt.split("\n", 1)[1])
         hints = digest["file"]["layout_hints"]
         fixed = digest.get("already_confirmed") or {}
@@ -269,7 +271,21 @@ class MockLLM:
             groups.append(e)
         if not assays:
             assays["assay"] = "unknown"
+        design = None
+        vals = [n for g, e in zip(proposed, groups) if e["role"] == "value" for n in member_names(g.get("entries") or [])]
+        if layout == "samples_in_columns" and vals and all(re.fullmatch(r"[A-Za-z0-9]+_\d+", n) for n in vals):
+            design = {"subject": {"source": "derived_from_sample_names"}, "time": {"source": "derived_from_sample_names"},
+                      "derivation": {"delimiter": "_", "occurrence": "last", "left": "subject", "right": "time"},
+                      "confidence": 0.7, "evidence": "mock: every sample name is <code>_<number>"}
+        elif layout == "samples_in_rows":
+            subj = next((e["columns"][0] for e in groups if e.get("audit_kind") == "subject_id" and e["columns"]), None)
+            tim = next((e["columns"][0] for e in groups if e.get("audit_kind") == "timepoint" and e["columns"]), None)
+            if subj or tim:
+                design = {"subject": {"source": "metadata_column", "column": subj, "file": "main"} if subj else {"source": "none"},
+                          "time": {"source": "metadata_column", "column": tim, "file": "main"} if tim else {"source": "none"},
+                          "confidence": 0.7, "evidence": "mock: subject / time columns"}
         return json.dumps({
+            "design": design,
             "layout": {"value": layout, "confidence": 0.8, "evidence": "mock: from layout hints"},
             "assays": [{"assay_label": lab, "omics_type": om, "source_software": "unknown",
                         "in_supported_scope": "yes" if om in ("proteomics", "metabolomics") else "unsure",
@@ -322,6 +338,30 @@ class MockLLM:
                                             "target": {"selector": {"samples": [pat]}},
                                             "args": {"is_study_sample": False, "label": m.group(2)}, "reason": "You asked."}]})
         return json.dumps({"reply": "mock: I did not understand that.", "patches": [], "questions": []})
+
+    @staticmethod
+    def metadata(payload):
+        """Metadata columns by name rules (the real AI reads the digest properly)."""
+        cols = []
+        jk = max(payload["columns"], key=lambda c: (c["join"]["exact_matches"], c["join"]["normalized_matches"]))
+        for c in payload["columns"]:
+            if c["column"] == jk["column"]:
+                cols.append({"column": c["column"], "role": "sample_id", "label": "sample name", "confidence": 0.9,
+                             "evidence": f"{c['join']['exact_matches']} sample names match"})
+                continue
+            rule = _first(c["column"], _NUM_RULES if c["type"] == "numeric" else _TEXT_RULES)
+            if not (rule and rule[0] == "sample_metadata"):
+                rule = _first(c["column"], _TEXT_RULES)          # names say more than types in a metadata sheet
+            kind, label = (rule[2], rule[1]) if rule and rule[0] == "sample_metadata" else ("covariate", c["column"])
+            cols.append({"column": c["column"], "role": "sample_metadata", "audit_kind": kind,
+                         "label": f"{label} ({c['column']})", "confidence": 0.6, "evidence": "mock: column name"})
+        subj = next((c["column"] for c in cols if c.get("audit_kind") == "subject_id"), None)
+        tim = next((c["column"] for c in cols if c.get("audit_kind") == "timepoint"), None)
+        design = {"subject": {"source": "metadata_column", "column": subj, "file": "metadata"} if subj else {"source": "none"},
+                  "time": {"source": "metadata_column", "column": tim, "file": "metadata"} if tim else {"source": "none"},
+                  "confidence": 0.6, "evidence": "mock: subject / time columns"}
+        return json.dumps({"join_key": {"column": jk["column"], "confidence": 0.9, "evidence": "most sample names match"},
+                           "columns": cols, "design": design, "clarifying_questions": []})
 
     @staticmethod
     def consolidate(payload):

@@ -9,7 +9,7 @@
   const ACCEPTED = [".csv", ".tsv", ".txt", ".tab"];
   const STEPS = [
     ["layout", "Layout"], ["feature_id", "Feature ID"], ["annotations", "Annotations"], ["values", "Values"],
-    ["samples", "Samples"], ["sample_info", "Sample info"], ["history", "History"], ["review", "Review"],
+    ["samples", "Samples"], ["sample_info", "Sample info"], ["design", "Design"], ["history", "History"], ["review", "Review"],
   ];
   const PREVIEW_COLS = 30;
   const S = { vocab: null, defs: {}, historyQ: [], scope: "", session: null, draft: null, digests: null, step: "layout",
@@ -1176,93 +1176,186 @@
     };
   }
 
-  function stepSampleInfo() {
-    const d = S.draft, lay = layout(), body = [];
-    if (lay !== "samples_in_columns") {
-      const gids = focusGroups("sample_info");
-      if (!gids.length) body.push(el("p", { class: "q", text: "No sample information columns besides the sample ID." }));
-      body.push(capped(gids, (g) => itemCard(g, { roles: ["sample_metadata", "sample_id", "feature_annotation", "value", "ignore"] })));
-      return { title: `${gids.length} column(s) describe the samples. Are these right?`,
-        question: "The audit kind says what the later steps use it for (subject, time point, batch…). Group-like variables are candidates only: PRISM never decides which variable is the research outcome.",
-        body,
-        decision: () => { checkItems(gids); return { items: itemDecisions(gids) }; } };
-    }
-    const meta = d.metadata;
-    const der = d.derived_sample_metadata;
-    S.local.der = S.local.der || {};
-    if (der) {
-      body.push(el("div", { class: "section-label", text: "From the column names (you merged subject blocks)" }),
-        el("div", { class: "item-sub", text: `${Object.keys(der.values).length} column names were split into a subject code and the rest of the name, e.g. ${Object.entries(der.values).slice(0, 2).map(([k, v]) => `${k} → ${v.subject_code} / ${v.name_suffix}`).join(", ")}.` }),
-        el("div", { class: "items" }, der.columns.map((c) => {
-          const l = (S.local.der[c.name] = S.local.der[c.name] || {});
-          const v = (f) => (f in l ? l[f] : c[f]);
-          const cb = el("input", { type: "checkbox", checked: v("keep") !== false });
-          cb.addEventListener("change", () => { l.keep = cb.checked; });
-          return el("div", { class: "item" }, el("div", { class: "item-head" }, el("span", { class: "item-name", text: c.name })),
-            el("div", { class: "item-controls" },
-              fieldBox("Audit kind", select(S.vocab.audit_kind, v("audit_kind"), (x) => { l.audit_kind = x; renderGuide(); })),
-              fieldBox("What it is (your words)", textInput(v("label"), (x) => { l.label = x; })),
-              el("div", { class: "full" }, el("label", { class: "check" }, cb, "keep in the outputs"))));
-        })));
-    }
-    const derDecision = () => der ? der.columns.map((c) => ({ name: c.name, audit_kind: S.local.der[c.name]?.audit_kind ?? c.audit_kind,
-      label: S.local.der[c.name]?.label ?? c.label, keep: S.local.der[c.name]?.keep ?? c.keep })) : undefined;
+  function metadataSection() {
+    const d = S.draft, meta = d.metadata, body = [];
     const fileIn = el("input", { type: "file", accept: ".csv,.tsv,.txt", class: "input" });
     fileIn.addEventListener("change", async () => {
       if (!fileIn.files[0]) return;
       const fd = new FormData(); fd.append("session_id", S.session.session_id); fd.append("file", fileIn.files[0]);
-      try { const r = await api("/api/metadata-upload", fd); S.draft = r.draft; S.local = {}; } catch (e) { S.local.error = e.message; }
-      renderGuide();
+      await busy(aiReady() ? "The AI is reading the metadata file" : "Reading the metadata file", async () => {
+        try { const r = await api("/api/metadata-upload", fd); S.draft = r.draft; S.local = {}; } catch (e) { S.local.error = e.message; }
+      });
+      renderAll();
     });
-    body.push(fieldBox("Upload a sample metadata file (optional)", fileIn));
-    if (meta && !meta.skipped && meta.report) {
-      const rep = meta.report;
-      S.local.near = S.local.near || {};
-      body.push(el("div", { class: "notice", text: `Matched ${rep.n_matched} sample(s) using column '${meta.id_column}'. Only in data: ${rep.only_in_data.length}. Only in metadata: ${rep.only_in_metadata.length}.` }));
-      if (rep.only_in_data.length) body.push(el("div", { class: "item-sub", text: "Only in data: " + rep.only_in_data.slice(0, 10).join(", ") }));
-      if (rep.only_in_metadata.length) body.push(el("div", { class: "item-sub", text: "Only in metadata: " + rep.only_in_metadata.slice(0, 10).join(", ") }));
-      if (rep.near_misses.length) {
-        body.push(el("div", { class: "section-label", text: "Near misses (suggestions — tick to accept)" }));
-        body.push(el("div", { class: "items" }, rep.near_misses.map((n) => {
-          const key = `${n.data_id}|${n.metadata_id}`;
-          const cb = el("input", { type: "checkbox", checked: !!S.local.near[key] });
-          cb.addEventListener("change", () => { S.local.near[key] = cb.checked; });
-          return el("label", { class: "item pick" }, cb, code(n.data_id), " ↔ ", code(n.metadata_id), el("span", { class: "item-sub", text: " " + n.reason }));
-        })));
-      }
-      S.local.metaCols = S.local.metaCols || {};
-      body.push(el("div", { class: "section-label", text: "Metadata columns" }));
-      body.push(el("div", { class: "items" }, meta.columns.filter((c) => c.role !== "sample_id").map((c) => {
-        const l = (S.local.metaCols[c.column] = S.local.metaCols[c.column] || {});
-        const v = (f) => (f in l ? l[f] : c[f]);
-        const cb = el("input", { type: "checkbox", checked: v("keep") !== false });
-        cb.addEventListener("change", () => { l.keep = cb.checked; });
-        return el("div", { class: `item ${S.vocab.audit_kind.includes(v("audit_kind")) ? "" : "unres"}` },
-          el("div", { class: "item-head" }, el("span", { class: "item-name", text: c.column })),
-          el("div", { class: "item-controls" },
-            fieldBox("Audit kind", select(S.vocab.audit_kind, v("audit_kind"), (x) => { l.audit_kind = x; renderGuide(); }, { placeholder: "what is it for the audit?", bad: !S.vocab.audit_kind.includes(v("audit_kind")) })),
-            fieldBox("What it is (your words)", textInput(v("label"), (x) => { l.label = x; }, { list: "dl-label" })),
-            fieldBox("Detail (optional)", textInput(v("detail"), (x) => { l.detail = x; })),
-            el("div", { class: "full" }, el("label", { class: "check" }, cb, "keep in the outputs"))),
-          el("div", { class: "item-sub", text: c.hint }));
+    body.push(fieldBox(meta && meta.columns ? "Replace the sample metadata file" : "Upload a sample metadata file (optional)", fileIn));
+    if (!(meta && !meta.skipped && meta.columns)) return body;
+    const rep = meta.report;
+    S.local.near = S.local.near || {};
+    const keyCols = meta.columns.map((c) => c.column);
+    const jk = S.local.joinKey ?? meta.id_column;
+    const fact = (c) => { const j = meta.columns.find((x) => x.column === c)?.join || {}; return `${c} — ${j.exact_matches ?? "?"}/${d.sample_list.n} exact${j.normalized_matches !== j.exact_matches ? `, ${j.normalized_matches} normalised` : ""}`; };
+    body.push(el("div", { class: "section-label", text: `Metadata file: ${meta.filename} (${meta.n_rows} rows × ${meta.n_columns} columns)` }),
+      fieldBox("Join key: the column that names the samples", select(keyCols, jk, (v) => { S.local.joinKey = v; renderGuide(); }, { labels: fact })),
+      el("div", { class: "item-sub", text: `${meta.join_key_source === "ai" ? "Proposed by the AI" : "Computed suggestion (most exact matches)"}: ${meta.join_key_evidence || ""}` }),
+      jk === meta.id_column ? el("div", { class: "notice", text: `Matched ${rep.n_matched} sample(s). Only in data: ${rep.only_in_data.length}${rep.only_in_data.length ? ` (${rep.only_in_data.slice(0, 6).join(", ")})` : ""}. Only in metadata: ${rep.only_in_metadata.length}.` })
+        : el("div", { class: "item-sub", text: "The match report updates after you confirm." }),
+      el("details", { class: "saw" }, el("summary", { text: "Parse report of the metadata file" }), el("pre", { text: JSON.stringify(meta.parse_report, null, 2) })));
+    if (meta.ai?.error) body.push(el("div", { class: "notice accent", text: `The AI could not read this file (${meta.ai.error.slice(0, 120)}): choose the audit kinds yourself.` }));
+    if (rep.near_misses.length && jk === meta.id_column) {
+      body.push(el("div", { class: "section-label", text: "Near misses (suggestions only — tick to accept)" }));
+      body.push(el("div", { class: "items" }, rep.near_misses.map((n) => {
+        const key = `${n.data_id}|${n.metadata_id}`;
+        const cb = el("input", { type: "checkbox", checked: !!S.local.near[key] });
+        cb.addEventListener("change", () => { S.local.near[key] = cb.checked; });
+        return el("label", { class: "item pick" }, cb, code(n.data_id), " ↔ ", code(n.metadata_id), el("span", { class: "item-sub", text: " " + n.reason }));
       })));
     }
+    S.local.metaCols = S.local.metaCols || {};
+    const cols = meta.columns.filter((c) => c.column !== jk);
+    body.push(el("div", { class: "section-label", text: `Metadata columns (${cols.length})` }));
+    body.push(capped(cols.map((c) => c.column), (name) => {
+      const c = meta.columns.find((x) => x.column === name);
+      const l = (S.local.metaCols[c.column] = S.local.metaCols[c.column] || {});
+      const v = (f) => (f in l ? l[f] : c[f]);
+      const cb = el("input", { type: "checkbox", checked: v("keep") !== false });
+      cb.addEventListener("change", () => { l.keep = cb.checked; renderGuide(); });
+      const needKind = v("keep") !== false && !S.vocab.audit_kind.includes(v("audit_kind"));
+      return el("div", { class: `item ${needKind ? "unres" : ""}` },
+        el("div", { class: "item-head" }, el("span", { class: "item-name", text: c.column }),
+          el("div", { class: "meta-row" }, provBadge(c.provenance || (c.source === "ai" ? "ai_proposed_confirmed" : "user_set"), c.source), confBar(c.source === "ai" ? c.confidence : null))),
+        el("div", { class: "item-controls" },
+          fieldBox("Audit kind", select(S.vocab.audit_kind, v("audit_kind"), (x) => { l.audit_kind = x; renderGuide(); }, { placeholder: "what is it for the audit?", bad: needKind })),
+          fieldBox("What it is (your words)", textInput(v("label"), (x) => { l.label = x; }, { list: "dl-label" })),
+          fieldBox("Detail (optional)", textInput(v("detail"), (x) => { l.detail = x; })),
+          el("div", { class: "full" }, el("label", { class: "check" }, cb, "keep in the outputs"))),
+        el("div", { class: "item-sub", text: `${c.hint} · join: ${c.join?.exact_matches ?? 0} exact` }), evidence(c.evidence));
+    }));
+    return body;
+  }
+  function metadataDecision() {
+    const meta = S.draft.metadata;
+    const jk = S.local.joinKey ?? meta.id_column;
+    const cols = meta.columns.filter((c) => c.column !== jk).map((c) => {
+      const l = S.local.metaCols?.[c.column] || {};
+      const x = { column: c.column, audit_kind: l.audit_kind ?? c.audit_kind, label: l.label ?? c.label, detail: l.detail ?? c.detail, keep: l.keep ?? c.keep };
+      if (x.keep !== false && !S.vocab.audit_kind.includes(x.audit_kind)) throw new Error(`Choose an audit kind for '${c.column}'.`);
+      return x;
+    });
+    const acc = Object.entries(S.local.near || {}).filter(([, v]) => v).map(([k]) => k.split("|"));
+    return { ...(jk !== meta.id_column ? { join_key: jk } : {}), metadata: { columns: cols, accept_near_misses: acc } };
+  }
+  function stepSampleInfo() {
+    const d = S.draft, lay = layout(), body = [];
+    const hasMeta = d.metadata && !d.metadata.skipped && d.metadata.columns;
+    if (lay !== "samples_in_columns") {
+      const gids = focusGroups("sample_info");
+      if (!gids.length) body.push(el("p", { class: "q", text: "No sample information columns besides the sample ID." }));
+      body.push(capped(gids, (g) => itemCard(g, { roles: ["sample_metadata", "sample_id", "feature_annotation", "value", "ignore"] })));
+      body.push(el("div", { class: "section-label", text: "A separate sample metadata file (optional)" }), ...metadataSection());
+      return { title: `${gids.length} column(s) describe the samples. Are these right?`,
+        question: "The audit kind says what the later steps use it for (subject, time point, batch…). Group-like variables are candidates only: PRISM never decides which variable is the research outcome.",
+        body,
+        decision: () => { checkItems(gids); return { items: itemDecisions(gids), ...(hasMeta ? metadataDecision() : {}) }; } };
+    }
+    body.push(...metadataSection());
     return {
-      title: "Do you have a sample metadata file?",
-      question: "Your table has samples in columns, so information about samples (subject, time point, batch, group…) usually lives in a separate sheet. You can also skip this; that is recorded.",
+      title: hasMeta ? "The sample metadata file: are the join key and the columns right?" : "Do you have a sample metadata file?",
+      question: hasMeta ? "The AI read each column (from statistics, never raw rows) and proposed the join key from how many sample names each column contains. Edit anything; nothing is merged without you."
+        : "Your table has samples in columns, so information about samples (subject, time point, batch, group…) usually lives in a separate sheet. You can also skip this; that is recorded.",
       body,
-      extraActions: [el("button", { class: "btn btn-sm", type: "button", text: der ? "No metadata file" : "Skip (record as missing)", onclick: () => submit({ metadata: { skip: true }, ...(der ? { derived: derDecision() } : {}) }) })],
+      extraActions: hasMeta ? [] : [el("button", { class: "btn btn-sm", type: "button", text: "Skip (record as missing)", onclick: () => submit({ metadata: { skip: true } }) })],
       decision: () => {
-        if ((!meta || meta.skipped || !meta.report) && der) return { metadata: { skip: true }, derived: derDecision() };
-        if (!meta || meta.skipped || !meta.report) throw new Error("Upload a file, or use 'Skip'.");
-        const cols = meta.columns.filter((c) => c.role !== "sample_id").map((c) => {
-          const l = S.local.metaCols?.[c.column] || {};
-          const x = { column: c.column, audit_kind: l.audit_kind ?? c.audit_kind, label: l.label ?? c.label, detail: l.detail ?? c.detail, keep: l.keep ?? c.keep };
-          if (!S.vocab.audit_kind.includes(x.audit_kind)) throw new Error(`Choose an audit kind for '${c.column}'.`);
-          return x;
-        });
-        const acc = Object.entries(S.local.near || {}).filter(([, v]) => v).map(([k]) => k.split("|"));
-        return { metadata: { columns: cols, accept_near_misses: acc }, ...(der ? { derived: derDecision() } : {}) };
+        if (!hasMeta) throw new Error("Upload a file, or use 'Skip'.");
+        return metadataDecision();
+      },
+    };
+  }
+
+  // ------------------------------------------------------------ study design (v2.4 §7)
+  const SIDE_LABEL = { subject: "Subject (the individual a sample came from)", time: "Time point" };
+  function designSourceOptions(rep) {
+    return ["none", "derived_from_sample_names", ...(rep.candidates || []).map((c) => `${c.file}:${c.column}`)];
+  }
+  function designSourceLabel(rep, v) {
+    if (v === "none") return "none";
+    if (v === "derived_from_sample_names") return "parsed from the sample names";
+    const c = (rep.candidates || []).find((x) => `${x.file}:${x.column}` === v);
+    return c ? `${c.column} (${c.file}${c.audit_kind ? ", " + pretty(c.audit_kind) : ""})` : v;
+  }
+  function srcKey(x) { return x.source === "metadata_column" ? `${x.file}:${x.column}` : x.source; }
+  function barChart(perSubject) {
+    const entries = Object.entries(perSubject || {});
+    if (!entries.length) return null;
+    const max = Math.max(...entries.map(([, n]) => n));
+    return el("div", { class: "bars" }, entries.slice(0, 60).map(([s, n]) => el("div", { class: "bar-row" },
+      el("span", { class: "bar-k", text: s }), el("span", { class: "bar", style: `width:${Math.round((n / max) * 100)}%` }), el("span", { class: "bar-n", text: String(n) }))));
+  }
+  function timeline(series, values) {
+    if (!series) return null;
+    const idx = Object.fromEntries((values || []).map((v, k) => [String(v), k]));
+    const nums = (values || []).map(Number), numeric = nums.every((x) => !Number.isNaN(x));
+    const lo = numeric ? Math.min(...nums) : 0, hi = numeric ? Math.max(...nums) : Math.max(1, (values || []).length - 1);
+    const pos = (v) => { const x = numeric ? Number(v) : idx[String(v)]; return hi > lo ? ((x - lo) / (hi - lo)) * 100 : 50; };
+    return el("div", { class: "timeline" }, Object.entries(series).slice(0, 60).map(([s, pts]) => el("div", { class: "tl-row" },
+      el("span", { class: "bar-k", text: s }),
+      el("span", { class: "tl-track" }, pts.filter((p) => p[1] != null).map(([sid, tv]) => el("i", { class: "tl-dot", style: `left:${pos(tv)}%`, title: `${sid}: ${tv}` }))))),
+      el("div", { class: "item-sub", text: `time axis: ${values?.[0]} … ${values?.[values.length - 1]}${numeric ? "" : " (ordered labels)"}` }));
+  }
+  async function previewRule(rule, slot) {
+    try {
+      const r = await api("/api/design/preview", { session_id: S.session.session_id, rule });
+      slot.replaceChildren(el("div", { class: "item-sub", text: `Parsed ${r.n_parsed} of ${r.n_total} sample names${r.n_failures ? ` — not parsed: ${r.failures.slice(0, 6).join(", ")}${r.n_failures > 6 ? " …" : ""}` : ""}. ${r.summary.label || ""}` }),
+        el("table", { class: "ledger" }, el("thead", {}, el("tr", {}, ["sample", "subject", "time"].map((h) => el("th", { text: h })))),
+          el("tbody", {}, r.rows.slice(0, 10).map((x) => el("tr", { class: x.subject == null && x.time == null ? "bad" : "" }, el("td", { text: x.sample }), el("td", { text: x.subject ?? "—" }), el("td", { text: x.time ?? "—" }))))));
+    } catch (e) { slot.replaceChildren(el("div", { class: "alert alert-error", text: e.message })); }
+  }
+  function stepDesign() {
+    const d = S.draft, des = d.design, rep = d.design_report || {}, body = [];
+    S.local.des = S.local.des || {};
+    const L = S.local.des;
+    const cur = (side) => L[side] ?? srcKey(des[side]);
+    const rule = L.rule || des.derivation || { delimiter: "_", occurrence: "last", left: "subject", right: "time" };
+    for (const side of ["subject", "time"]) {
+      body.push(el("div", { class: "item" },
+        el("div", { class: "item-head" }, el("span", { class: "item-name", text: SIDE_LABEL[side] }),
+          el("div", { class: "meta-row" }, provBadge(des[side].provenance, des[side].source_of_proposal === "ai" ? "ai" : "none"))),
+        fieldBox("Comes from", select(designSourceOptions(rep), cur(side), (v) => { L[side] = v; renderGuide(); }, { labels: (v) => designSourceLabel(rep, v) }))));
+    }
+    if ([cur("subject"), cur("time")].includes("derived_from_sample_names")) {
+      const slot = el("div", {});
+      const upd = (k, v) => { L.rule = { ...rule, [k]: v || null }; previewRule(L.rule, slot); };
+      body.push(el("div", { class: "block-card" }, el("h4", { text: "Rule over the sample names (no regex)" }),
+        el("div", { class: "item-controls" },
+          fieldBox("Split at", textInput(rule.delimiter, (v) => upd("delimiter", v), { placeholder: "_" })),
+          fieldBox("Occurrence", select(["first", "last"], rule.occurrence, (v) => upd("occurrence", v))),
+          fieldBox("Left part is", select(["subject", "time", ""], rule.left || "", (v) => upd("left", v), { labels: (x) => x || "nothing" })),
+          fieldBox("Right part is", select(["subject", "time", ""], rule.right || "", (v) => upd("right", v), { labels: (x) => x || "nothing" }))),
+        slot));
+      setTimeout(() => previewRule(rule, slot), 0);
+    }
+    const rm = rep.repeated_measures;
+    body.push(el("div", { class: "section-label", text: "Computed from your choices" }),
+      el("div", { class: "notice" }, el("b", { text: rep.label || "—" }),
+        rm ? ` · ${rep.n_subjects} subjects, ${rm.subjects_with_single_sample} with a single sample · repeated measures ${rm.detected ? "detected" : "not detected"} (computed)` : "",
+        rep.time_kind ? ` · time: ${rep.time_kind}, ${rep.n_distinct_time} distinct values` : ""));
+    if (rm) body.push(el("div", { class: "section-label", text: "Samples per subject" }), barChart(rm.per_subject));
+    if (rep.series) body.push(el("div", { class: "section-label", text: "Timeline (one dot per sample)" }), timeline(rep.series, rep.time_values));
+    if ((rep.cross_checks || []).length) body.push(el("div", { class: "section-label", text: "Cross-checks between sources" }),
+      el("ul", { class: "np" }, rep.cross_checks.map((c) => el("li", { class: c.disagree ? "warn-text" : "" }, `${c.check.replace(/_vs_/, " vs ").replace(/_/g, " ")}: ${c.agree} agree, ${c.disagree} disagree`))));
+    if ((rep.varies_within_subject || []).length) body.push(el("div", { class: "section-label", text: "Does it change within a subject?" }),
+      el("table", { class: "ledger" }, el("tbody", {}, rep.varies_within_subject.slice(0, 80).map((x) => el("tr", {},
+        el("td", { text: x.column }), el("td", { text: x.file }), el("td", { text: pretty(x.audit_kind || "") }),
+        el("td", { text: x.varies_within_subject === true ? "varies" : x.varies_within_subject === false ? "constant per subject" : "n/a" }))))));
+    const toSrc = (v) => v === "none" ? { source: "none" } : v === "derived_from_sample_names" ? { source: v } : { source: "metadata_column", file: v.split(":")[0], column: v.slice(v.indexOf(":") + 1) };
+    return {
+      title: rm?.detected ? "Repeated measures: is this the study design?" : "Study design: subject and time",
+      question: "Where do the subject and the time point come from? The AI proposes, code computes the facts below, and you confirm. The time unit is always asked, never guessed.",
+      body,
+      decision: () => {
+        const dec = {};
+        for (const side of ["subject", "time"]) if (L[side] && L[side] !== srcKey(des[side])) dec[side] = toSrc(L[side]);
+        if (L.rule) dec.derivation = L.rule;
+        return Object.keys(dec).length ? { design: dec } : {};
       },
     };
   }
@@ -1313,7 +1406,8 @@
       li("Annotations", `${groups.filter(([, x]) => x.role === "feature_annotation").length}${flags.length ? ` (${flags.map(([g, x]) => `${G(g).columns[0]}: ${x.n_flagged ?? "?"} flagged`).join(", ")})` : ""}`),
       li("Sample info", groups.filter(([, x]) => x.role === "sample_metadata").map(([g, x]) => `${G(g).columns[0]} (${pretty(x.audit_kind || "?")})`).join(", ")
         + (d.metadata?.columns ? ` + ${d.metadata.columns.length - 1} from the metadata file` : "") || "—"),
-      li("Samples", `${d.sample_list.n}${nonStudy ? ` (${nonStudy} non-study)` : ""}${d.sample_list.duplicates.length ? ` (${d.sample_list.duplicates.length} duplicated)` : ""}`)));
+      li("Samples", `${d.sample_list.n}${nonStudy ? ` (${nonStudy} non-study)` : ""}${d.sample_list.duplicates.length ? ` (${d.sample_list.duplicates.length} duplicated)` : ""}`),
+      li("Design", `${d.design_report?.label || "—"}${d.design?.time?.unit?.value ? ` · time unit: ${d.design.time.unit.value}` : ""}`)));
     body.push(el("div", { class: "section-label", text: "Every column of every file, accounted for" }), ledgerTable());
     const excl = d.excluded_columns || [];
     if (excl.length) body.push(el("details", { class: "saw" }, el("summary", { text: `${excl.length} column(s) left out of the outputs (nothing is deleted)` }),
@@ -1349,7 +1443,7 @@
   }
 
   const BUILDERS = { layout: stepLayout, feature_id: stepFeatureId, annotations: stepAnnotations, values: stepValues,
-                     samples: stepSamples, sample_info: stepSampleInfo, history: stepHistory, review: stepReview };
+                     samples: stepSamples, sample_info: stepSampleInfo, design: stepDesign, history: stepHistory, review: stepReview };
 
   let current = null;
   function renderGuide() {
@@ -1369,7 +1463,7 @@
     const status = st === "confirmed" ? " · confirmed" : st === "not_applicable" ? " · not needed for this layout" : "";
     $("guide").replaceChildren(...[
       datalists(),
-      el("div", { class: "guide-step" }, el("span", { text: `Step ${idx + 1} of 8 · ${STEPS[idx][1]}${status}` }),
+      el("div", { class: "guide-step" }, el("span", { text: `Step ${idx + 1} of ${STEPS.length} · ${STEPS[idx][1]}${status}` }),
         S.draft.ai.error && S.draft.ai.enabled ? el("span", { class: "badge v-warning", title: S.draft.ai.error, text: "AI unavailable" }) : null),
       el("h3", { text: spec.title }),
       spec.question ? el("p", { class: "q" }, spec.question) : null,

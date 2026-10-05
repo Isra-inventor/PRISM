@@ -19,7 +19,7 @@ import uuid
 from collections import Counter, OrderedDict
 from pathlib import Path
 
-from . import accounting, ai, consistency, derive, grouping, llm_providers as llm, questions
+from . import accounting, ai, consistency, derive, design, grouping, llm_providers as llm, questions
 from .errors import StepError
 from .format_detect import signature_hint, signature_prefill
 from .mock_llm import expand_sample_rules
@@ -31,7 +31,7 @@ from .validation import timepoint_detail, validate_feature_identity, validate_gr
 from . import edits  # noqa: E402  (the edit layer registers ops defined below)
 
 SESSIONS_DIR = Path(os.environ.get("PRISM_SESSIONS_DIR", Path(__file__).parent / "sessions"))
-STEPS = ["layout", "feature_id", "annotations", "values", "samples", "sample_info", "history", "review"]
+STEPS = ["layout", "feature_id", "annotations", "values", "samples", "sample_info", "design", "history", "review"]
 GROUP_FIELDS = ("role", "assay_label", "label", "audit_kind", "marks_rows_as_suspect",
                 "flagged_values", "detail", "keep", "family")
 ASSAY_FIELDS = ("assay_label", "omics_type", "source_software", "in_supported_scope", "scope_reason")
@@ -143,6 +143,9 @@ def get_session(sid):
     s.groups = [make_group(s.cols, g["group_id"], g["indices"], g.get("origin", "restored"),
                            **{k: g.get(k) for k in ("split_from", "merged_from")}) for g in st.get("groups", [])]
     s.draft, s.digests = st.get("draft"), st.get("digests", [])
+    if s.draft:   # drafts saved before v2.4 stage 6
+        s.draft["steps"].setdefault("design", "pending")
+        s.draft.setdefault("design", _snap_design(design.blank(), "none"))
     if (d / "undo.json").exists():
         s.undo = json.loads((d / "undo.json").read_text(encoding="utf-8"))
     md = d / "metadata_source.csv"
@@ -359,6 +362,7 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
             d["sample_rules"][g["group_id"]] = _snap(dict(g["sample_id_rule"], source="computed"),
                                                      ("strip_prefix", "strip_suffix"))
     d["sample_rules_ai"] = prop.get("samples", [])
+    d["design"] = design_from_ai(s, d, prop.get("design"), "proposal") or _snap_design(design.blank(), "none")
     old = s.draft or {}
     d["answers"] = dict(old.get("answers") or {})          # answered / dismissed questions are never asked again
     d["questions"] = [q for q in old.get("questions", []) if questions.status(old, q) != "open"]
@@ -518,12 +522,14 @@ def _confirm_step(s, step, decision, on_progress=None):
         E("set_sample_id_column", {"group_id": decision["sample_id_group"]})
     for gid, rule in (decision.get("sample_rules") or {}).items():
         E("set_sample_rule", dict(rule, group_id=gid))
-    if "derived" in decision:
-        E("set_derived", {"columns": decision["derived"]})
+    if "design" in decision:
+        E("set_design", decision["design"])
     if decision.get("samples"):
         E("set_samples", {"samples": decision["samples"]})
     if "processing_history" in decision:
         E("set_processing_history", decision["processing_history"])
+    if decision.get("join_key"):
+        E("set_join_key", {"metadata_column": decision["join_key"]})
     if "metadata" in decision:
         E("set_metadata", decision["metadata"])
 
@@ -578,6 +584,7 @@ def code_question_candidates(s, d):
                         {"label": "Ask the AI", "chat": f"Are these {n} blocks one measurement or several? "
                                                         + "; ".join(f["evidence"][:6])}]})
     out += _orphan_questions(s, d)
+    out += design_questions(s, d)
     for c in rep["sample_collisions"]:
         applies = {"group_ids": sorted(c["group_ids"])}
         labels = {g: re.sub(r"[^A-Za-z0-9]+", "_", (d["groups"][g].get("label") or g)).strip("_")[:20] or g
@@ -813,23 +820,6 @@ def _op_set_sample_rule(ctx, a):
         rule.update(new)
         rule["set_by"] = ctx.actor
         ctx.summary = f"Sample IDs of {ctx.s.groups_by_id[gid]['columns'][0]} …"
-
-
-@edits.op("set_derived")
-def _op_set_derived(ctx, a):
-    der = ctx.d.get("derived_sample_metadata")
-    if not der:
-        return
-    by = {c["name"]: c for c in der["columns"]}
-    for ed in a.get("columns") or []:
-        c = by.get(ed.get("name"))
-        if not c:
-            continue
-        if ed.get("audit_kind") not in VOCABULARY["audit_kind"]:
-            raise StepError(f"Choose an audit kind for '{c['name']}'.")
-        c["audit_kind"] = ed["audit_kind"]
-        c["label"] = _clean(ed.get("label", c.get("label")))
-        c["keep"] = bool(ed.get("keep", True))
 
 
 def _set_samples(ctx, edits_by_sample):
@@ -1579,7 +1569,275 @@ def _op_resolve_consistency(ctx, a):
         d["steps"]["samples"] = "pending"
 
 
-# ---------------------------------------------------------------- sample metadata file (samples in columns)
+# ---------------------------------------------------------------- study design (v2.4 §7)
+
+DESIGN_FIELDS = ("source", "column", "file")
+
+
+def design_column_values(s, d, file, column):
+    """{sample: value} of a sample-level column, from the main file (samples in rows) or the metadata file."""
+    if file == "metadata":
+        return design.column_values_meta(s, d, column)
+    if layout_of(d) == "samples_in_columns":
+        return {}
+    g = next((g for g in s.groups if column in g["columns"]), None)
+    if g is None:
+        return {}
+    i = g["indices"][g["columns"].index(column)]
+    ids = sample_ids(s, d)
+    if layout_of(d) == "long":
+        return {}
+    return {sid: ("" if is_missing(cell(r, i)) else cell(r, i).strip()) for sid, r in zip(ids, s.table["rows"])}
+
+
+def design_candidates(s, d):
+    """Sample-level columns a subject / time may come from: (file, column, audit_kind)."""
+    out = []
+    if layout_of(d) == "samples_in_rows":
+        for g in s.groups:
+            it = d["groups"][g["group_id"]]
+            if it["role"] == "sample_metadata" and g["n_columns"] == 1:
+                out.append(("main", g["columns"][0], it.get("audit_kind")))
+    meta = d.get("metadata") or {}
+    if not meta.get("skipped"):
+        for c in meta.get("columns", []):
+            if c["role"] == "sample_metadata":
+                out.append(("metadata", c["column"], c.get("audit_kind")))
+    return out
+
+
+def design_values(s, d):
+    """{sample: {"subject": .., "time": ..}} from the chosen sources, plus the derivation result."""
+    des = d.get("design") or design.blank()
+    ids = sample_ids(s, d)
+    per = {sid: {} for sid in ids}
+    der = None
+    rule = des.get("derivation")
+    if rule and "derived_from_sample_names" in (des["subject"]["source"], des["time"]["source"]):
+        try:
+            vals, fails = design.derived_values(ids, rule)
+            der = {"n_parsed": len(vals), "n_total": len(ids), "failures": fails[:30], "n_failures": len(fails),
+                   "coverage": round(len(vals) / len(ids), 4) if ids else 0.0}
+            for side in ("subject", "time"):
+                if des[side]["source"] == "derived_from_sample_names":
+                    for sid in ids:
+                        per[sid][side] = vals.get(sid, {}).get(side)
+        except derive.RuleError as e:
+            der = {"error": str(e)}
+    for side in ("subject", "time"):
+        src = des[side]
+        if src["source"] == "metadata_column" and src.get("column"):
+            vals = design_column_values(s, d, src.get("file"), src["column"])
+            for sid in ids:
+                per[sid][side] = vals.get(sid)
+    return per, der
+
+
+def design_report(s, d):
+    """Computed design facts for the Design step and schema.json (v2.4 §7.1)."""
+    des = d.get("design") or design.blank()
+    per, der = design_values(s, d)
+    facts = design.summarize(per)
+    facts["derivation"] = der
+    facts["coverage"] = {side: sum(1 for v in per.values() if v.get(side) not in (None, "")) for side in ("subject", "time")}
+    facts["n_samples"] = len(per)
+    cands = design_candidates(s, d)
+    facts["candidates"] = [{"file": f, "column": c, "audit_kind": k} for f, c, k in cands]
+    subj = {sid: v.get("subject") for sid, v in per.items()}
+    varies = []
+    if des["subject"]["source"] != "none":
+        for f, c, k in cands:
+            if (f, c) == (des["subject"].get("file"), des["subject"].get("column")):
+                continue
+            varies.append({"file": f, "column": c, "audit_kind": k,
+                           "varies_within_subject": design.varies_within_subject(per, design_column_values(s, d, f, c))})
+    facts["varies_within_subject"] = varies
+    checks = []
+    sides = {"subject": ("subject_id",), "time": ("timepoint",)}
+    for side, kinds in sides.items():
+        chosen = {sid: v.get(side) for sid, v in per.items()}
+        if des[side]["source"] == "none":
+            continue
+        name0 = ("derived_" + side) if des[side]["source"] == "derived_from_sample_names" else f"{side}:{des[side]['column']}"
+        others = [(f"{f}:{c}", design_column_values(s, d, f, c)) for f, c, k in cands
+                  if k in kinds and (f, c) != (des[side].get("file"), des[side].get("column"))]
+        rule = des.get("derivation")
+        if des[side]["source"] == "metadata_column" and rule and side in (rule.get("left"), rule.get("right")):
+            vals, _ = design.derived_values(list(per), rule)
+            others.append((f"derived_{side}", {sid: v.get(side) for sid, v in vals.items()}))
+        for name, vals in others:
+            checks.append(design.cross_check(f"{name0}_vs_{name}", chosen, vals))
+    facts["cross_checks"] = checks
+    facts["subject_values"] = subj if len(subj) <= 2000 else None
+    return facts
+
+
+def preview_derivation(s, rule):
+    """Live preview of a sample-name rule (sample, subject, time), with coverage and failures. Nothing is set."""
+    d = s.draft
+    rule = {k: (rule or {}).get(k) for k in ("delimiter", "occurrence", "left", "right")}
+    try:
+        out = design.preview(sample_ids(s, d), rule)
+    except derive.RuleError as e:
+        raise StepError(str(e))
+    vals, _ = design.derived_values(sample_ids(s, d), rule)
+    out["summary"] = design.summarize(vals)
+    out["candidates"] = design.derivation_candidates(sample_ids(s, d))
+    s.log("design_derivation_previewed", {"rule": rule, "coverage": out["coverage"], "n_failures": out["n_failures"]})
+    return out
+
+
+def _validate_design_source(s, d, side, src):
+    if src.get("source") not in design.SOURCES:
+        raise StepError(f"{side} source must be one of {', '.join(design.SOURCES)}.")
+    if src["source"] == "metadata_column":
+        cands = {(f, c) for f, c, _ in design_candidates(s, d)}
+        f = src.get("file") or ("metadata" if any(x[0] == "metadata" and x[1] == src.get("column") for x in cands) else "main")
+        if (f, src.get("column")) not in cands:
+            raise StepError(f"'{src.get('column')}' is not a sample information column (of the {f} file).")
+        src["file"] = f
+    else:
+        src["column"], src["file"] = None, None
+    return src
+
+
+@edits.op("set_design", ai=True)
+def _op_set_design(ctx, a):
+    """Where subject and time come from (partial update). The time unit is your answer only."""
+    s, d = ctx.s, ctx.d
+    des = d.setdefault("design", _snap_design(design.blank(), "none"))
+    new = json.loads(json.dumps(des))
+    if "derivation" in a and a["derivation"] is not None:
+        rule = {k: a["derivation"].get(k) for k in ("delimiter", "occurrence", "left", "right")}
+        try:
+            design.check_derivation(rule)
+        except derive.RuleError as e:
+            raise StepError(str(e))
+        new["derivation"] = rule
+    for side in ("subject", "time"):
+        x = a.get(side)
+        if not x:
+            continue
+        if "unit" in x:
+            if ctx.actor == "ai_patch":
+                raise StepError("The time unit is asked, never inferred: you answer it in the Design step.")
+            if x["unit"] not in design.UNITS:
+                raise StepError(f"Unit must be one of: {', '.join(design.UNITS)}.")
+            new["time"]["unit"] = {"value": x["unit"], "provenance": "user_set", "answered_at": edits.now_iso()}
+        if "source" in x:
+            src = _validate_design_source(s, d, side, {k: x.get(k) for k in DESIGN_FIELDS})
+            new[side].update(src)
+            if src["source"] == "derived_from_sample_names" and not new.get("derivation"):
+                raise StepError("Give the rule that splits the sample names (delimiter, first / last, which side is what).")
+    if new != des:
+        sources_changed = False
+        for side in ("subject", "time"):
+            if {k: new[side].get(k) for k in DESIGN_FIELDS} != {k: des[side].get(k) for k in DESIGN_FIELDS} \
+                    or (new.get("derivation") != des.get("derivation") and new[side]["source"] == "derived_from_sample_names"):
+                new[side]["set_by"], new[side]["set_corrected"] = ctx.actor, bool(ctx.corrected)
+                sources_changed = True
+        d["design"] = new
+        if sources_changed and d["steps"].get("design") == "confirmed" and ctx.step != "design":
+            d["steps"]["design"] = "pending"
+    ctx.summary = "Design: subject " + _src_text(new["subject"], new) + ", time " + _src_text(new["time"], new)
+
+
+def _src_text(src, des):
+    if src["source"] == "metadata_column":
+        return f"from '{src['column']}'"
+    if src["source"] == "derived_from_sample_names":
+        r = des.get("derivation") or {}
+        return f"from the sample names ('{r.get('delimiter')}', {r.get('occurrence')})"
+    return "none"
+
+
+def _snap_design(des, source="ai"):
+    for side in ("subject", "time"):
+        des[side].setdefault("confidence", 0.0)
+        des[side]["source_of_proposal"] = source
+        des[side]["proposed"] = {k: des[side].get(k) for k in DESIGN_FIELDS}
+        des[side]["proposed_derivation"] = des.get("derivation")
+    return des
+
+
+def design_provenance(des, side):
+    x = des[side]
+    changed = {k: x.get(k) for k in DESIGN_FIELDS} != (x.get("proposed") or {}) or (
+        x.get("source") == "derived_from_sample_names" and des.get("derivation") != x.get("proposed_derivation"))
+    if not changed:
+        return {"ai": "ai_proposed_confirmed", "computed": "computed"}.get(x.get("source_of_proposal"), "user_set")
+    if x.get("set_by") in ("ai_patch", "question_option"):
+        return "ai_proposed_corrected" if x.get("set_corrected") else "ai_proposed_confirmed"
+    return "user_set"
+
+
+def design_from_ai(s, d, raw, origin):
+    """An AI design proposal (main proposal or metadata call), validated; invalid parts are dropped."""
+    if not raw:
+        return None
+    des = design.blank()
+    rule = raw.get("derivation")
+    if rule:
+        try:
+            r = {k: rule.get(k) for k in ("delimiter", "occurrence", "left", "right")}
+            design.check_derivation(r)
+            des["derivation"] = r
+        except derive.RuleError:
+            pass
+    for side in ("subject", "time"):
+        x = raw.get(side) or {}
+        src = {k: x.get(k) for k in DESIGN_FIELDS}
+        if src.get("source") == "derived_from_sample_names" and not des["derivation"]:
+            continue
+        try:
+            des[side].update(_validate_design_source(s, d, side, src) if src.get("source") else {"source": "none"})
+        except StepError:
+            continue
+    des["evidence"] = raw.get("evidence") or ""
+    des["confidence"] = raw.get("confidence") or 0.0
+    des["origin"] = origin
+    return _snap_design(des, "ai")
+
+
+def design_questions(s, d):
+    des = d.get("design")
+    out = []
+    if not des:
+        return out
+    rep = design_report(s, d)
+    t = des["time"]
+    if t["source"] != "none" and not (t.get("unit") or {}).get("value"):
+        applies = {"time": {k: t.get(k) for k in DESIGN_FIELDS}, "derivation": des.get("derivation")
+                   if t["source"] == "derived_from_sample_names" else None}
+        vals = rep.get("time_values") or []
+        hint = ""
+        name = (t.get("column") or "") + " " + " ".join(map(str, vals[:12]))
+        if re.search(r"(?i)\bweek|\bwk|^w\d|\sw\d", name):
+            hint = " The names or values mention weeks; that is only a hint."
+        elif re.search(r"(?i)\bday|\bd\d", name):
+            hint = " The names or values mention days; that is only a hint."
+        where = f"'{t['column']}'" if t["source"] == "metadata_column" else "the part of the sample names"
+        out.append({"kind": "time_unit", "type": "single", "key": questions.key_of("time_unit", applies),
+                    "applies_to": applies, "step": "design", "allow_free_text": False,
+                    "text": f"What unit is the time in {where} (values {', '.join(map(str, vals[:8]))}"
+                            f"{' …' if len(vals) > 8 else ''})?{hint}",
+                    "options": [{"label": u, "edits": [{"op": "set_design", "args": {"time": {"unit": u}}}]}
+                                for u in design.UNITS]})
+    der = rep.get("derivation") or {}
+    if der.get("n_failures") and der.get("n_parsed"):
+        applies = {"derivation": des.get("derivation")}
+        sides = [x for x in ("subject", "time") if des[x]["source"] == "derived_from_sample_names"]
+        out.append({"kind": "design_derivation_coverage", "type": "single", "step": "design", "allow_free_text": True,
+                    "key": questions.key_of("design_derivation_coverage", applies), "applies_to": applies,
+                    "text": f"The sample-name rule parsed {der['n_parsed']} of {der['n_total']} sample names "
+                            f"(not: {', '.join(der['failures'][:5])}{' …' if der['n_failures'] > 5 else ''}). Use it anyway?",
+                    "options": [{"label": f"Use it: those {der['n_failures']} sample(s) get no {' / '.join(sides)}", "edits": []},
+                                {"label": "Do not derive: choose another source",
+                                 "edits": [{"op": "set_design", "args": {x: {"source": "none"} for x in sides}}]}]})
+    return out
+
+
+# ---------------------------------------------------------------- sample metadata file
 
 def _norm_id(x):
     x = re.sub(r"[\s_\-.]+", "", x.strip().lower())
@@ -1594,38 +1852,103 @@ def upload_metadata(s, filename, raw):
     return public_draft(s)
 
 
-def _upload_metadata(s, filename, t):
-    from .mock_llm import _NUM_RULES, _TEXT_RULES, _first
-    cols = Columns(t)
-    data_ids = sample_ids(s, s.draft)
-    best, best_hits = 0, -1
+def metadata_join_facts(cols, t, data_ids):
+    """Per metadata column: how many of the data's sample names its values contain, exactly and
+    after normalising case / spaces / separators / leading zeros (v2.4 §6). Facts, not a choice."""
+    ds = set(data_ids)
+    norm = {_norm_id(x) for x in data_ids}
+    out = []
     for i in range(len(t["header"])):
-        hits = len({cell(r, i).strip() for r in t["rows"]} & set(data_ids))
-        if hits > best_hits:
-            best, best_hits = i, hits
+        vals = {cell(r, i).strip() for r in t["rows"]} - {""}
+        ex = len(vals & ds)
+        nm = len({_norm_id(v) for v in vals} & norm)
+        out.append({"column": cols.labels[i], "exact_matches": ex, "normalized_matches": nm,
+                    "exact_share": round(ex / len(ds), 4) if ds else 0.0,
+                    "normalized_share": round(nm / len(ds), 4) if ds else 0.0})
+    return out
+
+
+def _metadata_data_ctx(s, d, ids):
+    lay = layout_of(d)
+    from .profiling import value_shapes
+    return {"layout": lay, "n_samples": len(ids),
+            "sample_source": "value column headers" if lay == "samples_in_columns" else "sample ID column",
+            "sample_name_shapes": value_shapes(Counter(ids)),
+            "derivation_candidates": design.derivation_candidates(ids),
+            "current_design": {k: (d.get("design") or {}).get(k) for k in ("subject", "time", "derivation")}}
+
+
+def _upload_metadata(s, filename, t):
+    """The metadata file's columns go through the AI like any other column (v2.4 §6): role,
+    audit_kind, a specific label, confidence and evidence, plus the join key it proposes from the
+    join facts. Without the AI: the join key with the most exact matches is suggested (computed)
+    and every audit kind is left for you to choose. Nothing is guessed from column names by code."""
+    cols = Columns(t)
+    d = s.draft
+    ids = sample_ids(s, d)
+    facts = metadata_join_facts(cols, t, ids)
     s.metadata_table = {"table": t, "cols": cols}
     columns = []
     for i in range(len(t["header"])):
         dg = cols.digests[i]
-        c = {"column": cols.labels[i], "index": i, "role": "sample_id" if i == best else "sample_metadata",
-             "hint": group_hint({"kind": "single_column", "type": dg["type"], "profile": dg, "n_columns": 1}),
-             "audit_kind": None, "label": "", "detail": None, "keep": True, "source": "computed"}
-        if i != best:
-            rule = _first(c["column"], _NUM_RULES if dg["type"] == "numeric" else _TEXT_RULES)
-            if rule and rule[0] == "sample_metadata":
-                c["audit_kind"], c["label"] = rule[2], rule[1]
-            else:
-                c["audit_kind"], c["label"] = "covariate", c["column"]
-            if c["audit_kind"] == "timepoint":
-                c["detail"] = timepoint_detail(dg)
-        c["proposed"] = {"audit_kind": c["audit_kind"], "label": c["label"]}
-        columns.append(c)
-    meta = {"filename": sanitize_filename(filename), "id_column": t["header"][best], "columns": columns,
+        columns.append({"column": cols.labels[i], "index": i, "role": "sample_metadata", "audit_kind": None,
+                        "label": "", "detail": None, "family": None, "keep": True, "source": "none", "confidence": 0.0,
+                        "evidence": "", "join": facts[i],
+                        "hint": group_hint({"kind": "single_column", "type": dg["type"], "profile": dg, "n_columns": 1})})
+    by = {c["column"]: c for c in columns}
+    ranked = sorted(range(len(columns)), key=lambda i: (-facts[i]["exact_matches"], -facts[i]["normalized_matches"], i))
+    key, key_src, key_ev, key_conf = columns[ranked[0]]["column"], "computed", "", 0.0
+    f0 = facts[ranked[0]]
+    key_ev = (f"{f0['exact_matches']} of {len(ids)} sample names found exactly in this column"
+              + (f" ({f0['normalized_matches']} after normalising)" if f0["normalized_matches"] != f0["exact_matches"] else ""))
+    ai_info = {"used": False, "error": None}
+    answer = None
+    ok, why = llm.available()
+    if ok and d["ai"]["enabled"]:
+        answer, meta_, digests = ai.propose_metadata(sanitize_filename(filename), s.sha, cols, facts,
+                                                     _metadata_data_ctx(s, d, ids), log=s.log)
+        ai_info = {"used": answer is not None, "error": meta_.get("error"), "model": meta_.get("model")}
+        s.metadata_digests = digests
+    if answer:
+        jk = answer.get("join_key") or {}
+        if jk.get("column") in by:
+            key, key_src = jk["column"], "ai"
+            key_ev, key_conf = jk.get("evidence") or key_ev, ai._clamp(jk.get("confidence"))
+        for name, x in answer["columns"].items():
+            c = by[name]
+            role = x["role"] if x["role"] in ("sample_metadata", "ignore") else "sample_metadata"
+            kind = x.get("audit_kind") if x.get("audit_kind") in VOCABULARY["audit_kind"] else None
+            c.update(role=role, audit_kind=kind if role == "sample_metadata" else None, label=(x.get("label") or "").strip(),
+                     family=(x.get("family") or "").strip() or None, detail=(x.get("detail") or "").strip() or None,
+                     confidence=ai._clamp(x.get("confidence")), evidence=x.get("evidence") or "", source="ai")
+            if role == "ignore":
+                c["keep"] = False
+                c["excluded"] = {"reason": "proposed as 'ignore' by the AI", "by": "user", "at": None}
+            if kind == "timepoint" and not c["detail"]:
+                c["detail"] = timepoint_detail(cols.digests[c["index"]])
+    k = by[key]
+    k.update(role="sample_id", audit_kind=None, keep=True, source=key_src if key_src == "ai" else k["source"],
+             evidence=key_ev if key_src == "computed" or not k["evidence"] else k["evidence"])
+    k.pop("excluded", None)
+    for c in columns:
+        _snap(c, ("role", "audit_kind", "label", "keep"))
+    meta = {"filename": sanitize_filename(filename), "id_column": key, "join_key_source": key_src,
+            "join_key_evidence": key_ev, "join_key_confidence": key_conf, "columns": columns,
             "accepted_near_misses": [], "skipped": False, "sha256": t["sha256"], "n_rows": len(t["rows"]),
-            "n_columns": len(t["header"]), "parse_report": t["parse_report"],
-            "report": match_report(data_ids, [cell(r, best).strip() for r in t["rows"]])}
-    s.draft["metadata"] = meta
-    s.log("metadata_upload", {"filename": meta["filename"], "id_column": meta["id_column"],
+            "n_columns": len(t["header"]), "parse_report": t["parse_report"], "ai": ai_info,
+            "join_facts_top": [facts[i] for i in ranked[:5]],
+            "sample_source": "value column headers" if layout_of(d) == "samples_in_columns" else "sample ID column",
+            "report": match_report(ids, [cell(r, by[key]["index"]).strip() for r in t["rows"]])}
+    d["metadata"] = meta
+    if answer:
+        if answer.get("design") and all(d["design"][x]["source"] == "none" for x in ("subject", "time")):
+            des = design_from_ai(s, d, answer["design"], "metadata")
+            if des:
+                d["design"] = des
+        for q in answer.get("questions", []):
+            questions.from_ai(s, d, q, "metadata")
+    s.log("metadata_upload", {"filename": meta["filename"], "id_column": key, "join_key_source": key_src,
+                              "ai": ai_info, "join_facts_top": meta["join_facts_top"],
                               "report": {k: v for k, v in meta["report"].items() if k != "matched"}})
 
 
@@ -1653,14 +1976,14 @@ def apply_metadata_decision(s, d, md, ctx=None):
     eds = [(by_col[ed["column"]], ed) for ed in md.get("columns", [])
            if ed.get("column") in by_col and by_col[ed["column"]]["role"] != "sample_id"]
     for c, ed in eds:   # validate everything first: a failing decision changes nothing
-        if ed.get("audit_kind") not in VOCABULARY["audit_kind"]:
+        if ed.get("keep", True) and c["role"] == "sample_metadata" and ed.get("audit_kind") not in VOCABULARY["audit_kind"]:
             raise StepError(f"Choose an audit kind for metadata column '{c['column']}'.")
     valid = {(n["data_id"], n["metadata_id"]) for n in meta["report"]["near_misses"]}
     meta["accepted_near_misses"] = [p for p in md.get("accept_near_misses", []) if tuple(p) in valid]
     actor = ctx.actor if ctx else "user"
     for c, ed in eds:
         before = {k: c.get(k) for k in ("audit_kind", "label", "detail", "keep")}
-        c["audit_kind"] = ed["audit_kind"]
+        c["audit_kind"] = ed.get("audit_kind") if ed.get("audit_kind") in VOCABULARY["audit_kind"] else c.get("audit_kind")
         c["label"] = _clean(ed.get("label", c["label"]))
         c["detail"] = _clean(ed.get("detail", c.get("detail"))) or None
         c["keep"] = bool(ed.get("keep", True))
@@ -1715,6 +2038,12 @@ def public_draft(s):
     out["chat"] = [{k: v for k, v in m.items() if k != "context"} for m in d.get("chat", [])]
     out["last_chat_context"] = d["chat"][-1].get("context") if d.get("chat") else None
     out["questions"] = questions.public(d)
+    out["design_report"] = design_report(s, d)
+    if (out.get("metadata") or {}).get("columns"):
+        for c in out["metadata"]["columns"]:
+            c["provenance"] = provenance(c, ("role", "audit_kind", "label", "keep"))
+    for side in ("subject", "time"):
+        out["design"][side]["provenance"] = design_provenance(d["design"], side)
     led = accounting.column_ledger(s, d)
     out["column_ledger"] = {f: dict(x, text=accounting.ledger_text(x)) for f, x in led.items()}
     out["excluded_columns"] = accounting.excluded_columns(s, d)
@@ -1746,6 +2075,10 @@ def unresolved_items(s, d):
     for q in questions.open_questions(d):
         out.append({"step": q.get("step") or "review", "question_id": q["question_id"],
                     "what": f"Open question: {q['text']}"})
+    meta = d.get("metadata") or {}
+    for c in meta.get("columns", []) if not meta.get("skipped") else []:
+        if c["role"] == "sample_metadata" and c.get("keep", True) and c.get("audit_kind") not in VOCABULARY["audit_kind"]:
+            out.append({"step": "sample_info", "what": f"Audit kind of metadata column '{c['column']}' is not chosen."})
     for p in accounting.ledger_problems(accounting.column_ledger(s, d)):
         out.append({"step": "review", "what": f"Column accounting: {p}."})
     if any(not d["processing_history"][q]["answer"] for q, _ in HISTORY_QUESTIONS):

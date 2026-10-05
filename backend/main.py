@@ -318,6 +318,17 @@ async def chat(req: ChatRequest):
     return await run(req.progress_id, work)
 
 
+class DerivationRequest(BaseModel):
+    session_id: str
+    rule: dict = {}
+
+
+@app.post("/api/design/preview")
+async def design_preview(req: DerivationRequest):
+    """Preview a sample-name rule {delimiter, occurrence, left, right}; nothing is set."""
+    return await run_in_threadpool(_structure_op, req, workflow.preview_derivation, req.rule)
+
+
 class SettingsRequest(BaseModel):
     session_id: str
     auto_apply: Optional[bool] = None

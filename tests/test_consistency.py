@@ -47,6 +47,7 @@ def confirm_rest(f):
     for st in ("annotations", "values", "samples"):
         f.step(st, {})
     f.step("sample_info", {"metadata": {"skip": True}})
+    f.confirm_design()
     f.step("history", HISTORY)
 
 
@@ -107,7 +108,7 @@ def test_global_sample_id_collision_is_caught(flow, monkeypatch):
     f.step("samples", {})
     out = f.finalize()
     a = out["schema"]["assays"][0]
-    assert a["sample_structure"] == "disjoint" and a["n_samples"] == 27 == len(out["schema"]["samples"])
+    assert "sample_structure" not in a and a["n_samples"] == 27 == len(out["schema"]["samples"])   # removed in v2.4
 
 
 def test_collision_with_descriptive_names_and_block_labels(flow, monkeypatch):

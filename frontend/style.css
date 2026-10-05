@@ -256,7 +256,7 @@ thead th { position: sticky; top: 0; background: #121212; font-weight: 500; colo
 .ws-file { font-family: var(--font-mono); font-size: 13px; color: var(--text-dim); }
 .ws-file b { color: var(--text); font-weight: 400; }
 
-.stepper { list-style: none; padding: 0; margin: 0 0 22px; display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px; }
+.stepper { list-style: none; padding: 0; margin: 0 0 22px; display: grid; grid-template-columns: repeat(9, 1fr); gap: 6px; }
 .stepper li button {
   width: 100%; text-align: left; background: none; border: 0; border-top: 2px solid #2a2a2a; padding: 10px 2px 4px;
   color: var(--text-faint); font-size: 12px; cursor: pointer; display: flex; gap: 8px; align-items: baseline; transition: color .2s, border-color .2s;
@@ -563,3 +563,13 @@ table.ledger tr.bad td { color: var(--c-unres); }
 .chat-sel .pill { margin: 2px 4px 2px 0; display: inline-block; }
 .chat-hint { font-size: 11px; }
 tr.chips th { cursor: default; }
+
+/* v2.4: design step */
+.bars, .timeline { margin: 6px 0 12px; font-size: 11px; }
+.bar-row, .tl-row { display: grid; grid-template-columns: 90px 1fr 28px; align-items: center; gap: 6px; margin: 2px 0; }
+.tl-row { grid-template-columns: 90px 1fr; }
+.bar-k { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar { display: block; height: 10px; background: #ff8a2a; border-radius: 2px; }
+.bar-n { text-align: right; color: var(--text-dim); }
+.tl-track { position: relative; display: block; height: 12px; border-bottom: 1px solid var(--line); }
+.tl-dot { position: absolute; top: 2px; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: #d9c7a3; }

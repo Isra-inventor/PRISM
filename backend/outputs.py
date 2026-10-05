@@ -15,9 +15,9 @@ from collections import Counter, OrderedDict
 from . import accounting, derive, questions
 from .parsing import cell, is_missing
 from .schema import SCHEMA_VERSION
-from .profiling import apply_rule
-from .workflow import (ASSAY_FIELDS, FACT_FIELDS, FI_FIELDS, GROUP_FIELDS, SAMPLE_FIELDS, layout_of,
-                       long_duplicates, provenance, sample_ids, unresolved_items, value_blocks)
+from .workflow import (ASSAY_FIELDS, FACT_FIELDS, FI_FIELDS, GROUP_FIELDS, SAMPLE_FIELDS, design_provenance,
+                       design_report, design_values, layout_of, long_duplicates, provenance, sample_ids,
+                       unresolved_items, value_blocks)
 
 
 class OutputError(Exception):
@@ -164,7 +164,6 @@ def build(s):
             "n_features": n_features,
             "n_samples": len(union),
             "n_value_columns": sum(g["n_columns"] for g in gs),
-            "sample_structure": structure,
         })
         if assay.get("in_supported_scope") in ("no", "unsure"):
             flags.append({"flag": "outside_supported_scope", "assay": aid,
@@ -281,24 +280,21 @@ def build(s):
         if rep["only_in_data"]:
             flags.append({"flag": "samples_without_metadata",
                           "detail": f"{len(rep['only_in_data'])} sample(s) have no row in the metadata file."})
-    elif lay == "samples_in_columns" and not d.get("derived_sample_metadata"):
+    elif lay == "samples_in_columns":
         flags.append({"flag": "no_sample_metadata",
                       "detail": "No sample metadata file was provided (step skipped)."})
-    der = d.get("derived_sample_metadata")
-    der_cols = [c for c in (der or {}).get("columns", []) if c.get("keep", True)] if lay == "samples_in_columns" else []
-    if der_cols:   # sample information parsed from column names (v2.3 'one block' confirmation)
-        raw_to_sid = {}
-        for gid in value_blocks(s, d):
-            rule = d["sample_rules"].get(gid) or {}
-            for i in s.groups_by_id[gid]["indices"]:
-                raw_to_sid[header[i]] = apply_rule(header[i], rule)
-        for c in der_cols:
-            smd_cols.append(c["name"])
-        for raw, vals in der["values"].items():
-            sid = raw_to_sid.get(raw)
-            if sid in sids:
-                for c in der_cols:
-                    smd_vals.setdefault(sid, {})[c["name"]] = vals.get(c["name"], "")
+    # subject / time derived from the sample names (v2.4 §7): written as sample information
+    des = d.get("design") or {}
+    per, _ = design_values(s, d)
+    rep_ = design_report(s, d)
+    derived_cols = []
+    for side, kind in (("subject", "subject_id"), ("time", "timepoint")):
+        if (des.get(side) or {}).get("source") == "derived_from_sample_names":
+            name = f"derived_{side}"
+            derived_cols.append((name, side, kind))
+            smd_cols.append(name)
+            for sid in sids:
+                smd_vals.setdefault(sid, {})[name] = per.get(sid, {}).get(side) or ""
     artifacts["sample_metadata.csv"] = _csv(
         ["sample_id", "sample_label", "is_study_sample"] + smd_cols,
         [[sid, st.get(sid, {}).get("label", ""), "true" if st.get(sid, {}).get("is_study_sample", True) else "false"]
@@ -332,21 +328,8 @@ def build(s):
              "provenance": "user_set" if x.get("set_by") == "user" else
              ("ai_proposed_corrected" if x.get("set_corrected") else "ai_proposed_confirmed")}
             for x in d.get("derived_feature_annotations", [])],
-        "sample_metadata": [
-            {"column": c, "audit_kind": it.get("audit_kind"), "label": it.get("label") or "",
-             **({"detail": it["detail"]} if it.get("detail") else {}),
-             "keep": it.get("keep", True), "source": "data_file", "provenance": provenance(it, GROUP_FIELDS)}
-            for gid, it in d["groups"].items() if it["role"] == "sample_metadata"
-            for c in s.groups_by_id[gid]["columns"]] + (
-            [{"column": c["column"], "audit_kind": c["audit_kind"], "label": c.get("label") or "",
-              **({"detail": c["detail"]} if c.get("detail") else {}), "keep": c.get("keep", True),
-              "source": "metadata_file",
-              "provenance": ("computed" if all(c.get("proposed", {}).get(k) == c.get(k) for k in ("audit_kind", "label"))
-                             else "user_set")}
-             for c in (meta or {}).get("columns", []) if c["role"] != "sample_id"]
-            if meta and not meta.get("skipped") else []) + [
-            {"column": c["name"], "audit_kind": c["audit_kind"], "label": c.get("label") or "", "keep": c.get("keep", True),
-             "source": "column_names", "provenance": "user_set"} for c in der_cols],
+        "sample_metadata": _sample_metadata_entries(s, d, meta, derived_cols, rep_),
+        "design": _design_block(d, rep_),
         "sample_id": ({"column": s.groups_by_id[d["sample_id_group"]["value"]]["columns"][0]}
                       if d["sample_id_group"]["value"] else {"from": "value column headers"}),
         "samples": [{"sample": sid, "label": v.get("label") or "", "is_study_sample": bool(v.get("is_study_sample", True)),
@@ -398,6 +381,75 @@ def _check_counts(assays, lay, ledger):
         problems.append(f"the column ledger counts {led.get('value')} value columns but the assays hold {kept}")
     if problems:
         raise OutputError("Counts do not agree: " + "; ".join(problems) + ". Nothing was written.")
+
+
+def _varies(rep_, file, column):
+    return next((x["varies_within_subject"] for x in rep_.get("varies_within_subject", [])
+                 if x["file"] == file and x["column"] == column), "not_applicable")
+
+
+def _sample_metadata_entries(s, d, meta, derived_cols, rep_):
+    out = []
+    for gid, it in d["groups"].items():
+        if it["role"] != "sample_metadata":
+            continue
+        for c in s.groups_by_id[gid]["columns"]:
+            out.append({"column": c, "audit_kind": it.get("audit_kind"), "label": it.get("label") or "",
+                        **({"detail": it["detail"]} if it.get("detail") else {}),
+                        **({"family": it["family"]} if it.get("family") else {}),
+                        "varies_within_subject": _varies(rep_, "main", c), "confidence": it.get("confidence"),
+                        "evidence": it.get("evidence") or "", "keep": it.get("keep", True), "file": "main",
+                        "source": "data_file", "provenance": provenance(it, GROUP_FIELDS)})
+    if meta and not meta.get("skipped"):
+        for c in meta.get("columns", []):
+            if c["role"] == "sample_id":
+                continue
+            out.append({"column": c["column"], "audit_kind": c.get("audit_kind"), "label": c.get("label") or "",
+                        **({"detail": c["detail"]} if c.get("detail") else {}),
+                        **({"family": c["family"]} if c.get("family") else {}),
+                        "varies_within_subject": _varies(rep_, "metadata", c["column"]),
+                        "confidence": c.get("confidence"), "evidence": c.get("evidence") or "",
+                        "keep": c.get("keep", True), "file": "metadata", "source": "metadata_file",
+                        "provenance": provenance(c, ("role", "audit_kind", "label", "keep"))})
+    des = d.get("design") or {}
+    for name, side, kind in derived_cols:
+        out.append({"column": name, "audit_kind": kind, "label": f"{side} parsed from the sample names",
+                    "derived_from": "sample_names", "rule": des.get("derivation"), "keep": True,
+                    "varies_within_subject": "not_applicable" if side == "subject" else True,
+                    "file": "derived", "source": "sample_names", "provenance": design_provenance(des, side)})
+    return out
+
+
+def _design_block(d, rep_):
+    """schema.json 'design' (v2.4 §13)."""
+    des = d.get("design") or {}
+    if not des:
+        return None
+    out = {}
+    for side in ("subject", "time"):
+        x = des[side]
+        e = {"source": x["source"], "provenance": design_provenance(des, side)}
+        if x["source"] == "metadata_column":
+            e.update(column=x["column"], file=x["file"])
+        elif x["source"] == "derived_from_sample_names":
+            e["derivation"] = des.get("derivation")
+        if side == "subject" and x["source"] != "none":
+            e["n_subjects"] = rep_.get("n_subjects", 0)
+        if side == "time":
+            if x["source"] != "none":
+                e.update(kind=rep_.get("time_kind"), n_distinct=rep_.get("n_distinct_time"))
+            unit = x.get("unit") or {}
+            e["unit"] = {"value": unit.get("value"), "provenance": unit.get("provenance") or "unanswered",
+                         **({"answered_at": unit["answered_at"]} if unit.get("answered_at") else {})}
+        out[side] = e
+    rm = rep_.get("repeated_measures")
+    out["repeated_measures"] = ({k: rm[k] for k in ("detected", "provenance", "samples_per_subject",
+                                                    "subjects_with_single_sample", "balanced")}
+                                if rm else {"detected": None, "provenance": "computed",
+                                            "note": "no subject source chosen"})
+    out["cross_checks"] = rep_.get("cross_checks", [])
+    out["label"] = rep_.get("label")
+    return out
 
 
 def _reconcile_samples(a_label, gs, block_ids, d, lay):

@@ -88,6 +88,12 @@ def build_digest(filename, cols, affixes, hints, indices, fixed=None, signature_
         "columns": [column_digest(cols, i, affixes[i], examples) for i in singles],
         "settings": {"example_values_sent": examples, "raw_rows_sent": False},
     }
+    num = [cols.labels[i] for i in indices if cols.digests[i]["type"] == "numeric"]
+    if 2 <= len(num) <= 20000:
+        from .design import derivation_candidates
+        d["file"]["sample_name_facts"] = {
+            "from": "numeric column names (sample names when samples are in columns)",
+            "derivation_candidates": derivation_candidates(num)}
     if multi:
         d["templates_note"] = ("Each template stands for several columns whose names differ only in their digits "
                                "(digits shown as '#'). Put a whole template in a group with `templates`; name single "
@@ -166,7 +172,22 @@ what the statistics suggest, e.g. "LFQ intensity, apparently raw linear scale (m
 - clarifying_questions for anything you cannot resolve from the digest: a question with type
   (single / multi / confirm), text, applies_to {{columns}}, and clickable options; each option may
   carry the patches it would apply (same format and ops as in the chat). Ask instead of guessing.
+- design (optional): where the subject (the individual a sample came from) and the time point come
+  from: source metadata_column (a sample information column), derived_from_sample_names (with a
+  derivation {{delimiter, occurrence first|last, left / right: subject | time}}; see
+  file.sample_name_facts) or none. Never state the time unit: it is asked.
 - Respect everything under already_confirmed."""
+
+
+def design_schema():
+    s = lambda **k: dict(type="STRING", **k)
+    src = {"type": "OBJECT", "properties": {"source": s(enum=["metadata_column", "derived_from_sample_names", "none"]),
+                                            "column": s(nullable=True), "file": s(enum=["main", "metadata"], nullable=True)}}
+    return {"type": "OBJECT", "nullable": True, "properties": {
+        "subject": src, "time": src,
+        "derivation": {"type": "OBJECT", "nullable": True, "properties": {
+            "delimiter": s(), "occurrence": s(enum=["first", "last"]), "left": s(nullable=True), "right": s(nullable=True)}},
+        "confidence": {"type": "NUMBER"}, "evidence": s()}}
 
 
 def response_schema():
@@ -208,6 +229,7 @@ def response_schema():
             "confidence": n(), "evidence": s()}, "required": ["pattern_or_sample", "label", "is_study_sample"]}},
         "clarifying_questions": questions_schema(),
         "propose_merge": merges_schema(),
+        "design": design_schema(),
     }, "required": ["layout", "assays", "groups"]}
 
 
@@ -234,6 +256,23 @@ whole file:
   When unsure whether blocks are one measurement or several, ask in clarifying_questions.
 - Every chunk group should be in exactly one final group. Leave out only what you cannot place:
   it becomes a question for the user."""
+
+
+METADATA_PROMPT = """
+
+## This call: a sample metadata file
+You get the digest of a sample information file (usually one row per sample): per column its
+computed statistics, and join facts: how many of the data file's sample names its values contain
+(exact, and after normalising case, spaces, separators and leading zeros). Return:
+- join_key: the column whose values name the data's samples (use the join facts), with
+  confidence and evidence. The user confirms it.
+- columns: EVERY column of the file: role (sample_id for the join key only, sample_metadata, or
+  ignore), audit_kind from the closed list, a specific label in your own words (what this column
+  is; two columns must not share a vague label), confidence, and evidence quoting the digest.
+  Two columns that mean the same thing (e.g. time_point and TimePoint) get the same audit_kind.
+- design: where the subject and the time come from (a metadata column, a rule over the sample
+  names using data.derivation_candidates, or none). Never state the time unit: it is asked.
+- clarifying_questions (with options) for anything you cannot decide from the digest."""
 
 
 PATCH_OPS = ["set_keep", "set_role", "set_audit_kind", "set_label", "set_block_keep", "merge_groups", "split_group",
@@ -324,6 +363,20 @@ def chat_schema():
     return {"type": "OBJECT", "properties": {
         "reply": {"type": "STRING"}, "patches": {"type": "ARRAY", "items": _patch_schema()},
         "questions": questions_schema()}, "required": ["reply"]}
+
+
+def metadata_schema():
+    s = lambda **k: dict(type="STRING", **k)
+    col = {"type": "OBJECT", "properties": {
+        "column": s(), "role": s(enum=["sample_id", "sample_metadata", "ignore"]),
+        "audit_kind": s(enum=VOCABULARY["audit_kind"], nullable=True), "label": s(), "family": s(nullable=True),
+        "detail": s(nullable=True), "confidence": {"type": "NUMBER"}, "evidence": s()},
+        "required": ["column", "role", "label", "confidence", "evidence"]}
+    return {"type": "OBJECT", "properties": {
+        "join_key": {"type": "OBJECT", "nullable": True, "properties": {
+            "column": s(), "confidence": {"type": "NUMBER"}, "evidence": s()}},
+        "columns": {"type": "ARRAY", "items": col}, "design": design_schema(),
+        "clarifying_questions": questions_schema()}, "required": ["columns"]}
 
 
 def consolidation_schema():
@@ -434,6 +487,24 @@ class AIQuestion(BaseModel):
     allow_free_text: Optional[bool] = True
 
 
+class MetaColumn(BaseModel):
+    column: str
+    role: str = "sample_metadata"
+    audit_kind: Optional[str] = None
+    label: Optional[str] = ""
+    family: Optional[str] = None
+    detail: Optional[str] = None
+    confidence: float = 0.0
+    evidence: str = ""
+
+
+class MetadataResponse(BaseModel):
+    join_key: Optional[dict] = None
+    columns: List[MetaColumn] = []
+    design: Optional[dict] = None
+    clarifying_questions: List[AIQuestion] = []
+
+
 class ChatResponse(BaseModel):
     reply: str = ""
     patches: List[Patch] = []
@@ -448,6 +519,7 @@ class ConsolidationResponse(BaseModel):
 
 
 class AIResponse(BaseModel):
+    design: Optional[dict] = None
     propose_merge: List[Merge] = []
     layout: Optional[Fact] = None
     assays: List[Assay] = []
@@ -482,6 +554,7 @@ def _call(digest, sha, log=None, mock_fn=None, kind="digest"):
         "consolidation": ("Consolidation (JSON):", BRIEFING + CONSOLIDATION_PROMPT, consolidation_schema(),
                           ConsolidationResponse),
         "chat": ("Chat (JSON):", BRIEFING + CHAT_PROMPT, chat_schema(), ChatResponse),
+        "metadata": ("Metadata (JSON):", BRIEFING + METADATA_PROMPT, metadata_schema(), MetadataResponse),
     }[kind]
     ok, why = llm.available()
     meta = {"provider": llm.provider_name(), "model": llm.model_list()[0] if ok else None,
@@ -566,6 +639,8 @@ def read_chunk(resp, indices, label_to_idx, ns, out, tmap=None):
     """Validate one chunk's answer into out (layout, assays, pgroups, ...). Templates a group
     names are expanded to their member columns in this call; an unknown template is rejected."""
     rej = out["rejected"]
+    if resp.design and not out.get("design"):
+        out["design"] = resp.design
     tmap, labels = tmap or {}, {i: lab for lab, i in label_to_idx.items()}
     for gl in resp.groups:
         for tp in gl.templates or []:
@@ -852,6 +927,50 @@ def consolidate(cols, groups, items, assays, sha, log=None, mock_fn=None):
     if resp is None:
         return None, meta.get("error") or "no answer"
     return resp, None
+
+
+def propose_metadata(filename, sha, cols, facts, data_ctx, fixed=None, log=None, mock_fn=None):
+    """Sample metadata columns through the AI (v2.4 §6): digest + join facts, chunked when wide.
+    Returns (merged answer dict | None, meta, digests). Nothing is applied here."""
+    examples = send_examples()
+    indices = list(range(len(cols.header)))
+    size = config.GROUPING_CHUNK_SIZE
+    chunks = [indices[k:k + size] for k in range(0, len(indices), size)] or [[]]
+    merged = {"join_key": None, "columns": {}, "design": None, "questions": []}
+    metas, digests = [], []
+    for k, ch in enumerate(chunks, 1):
+        cdig = []
+        for i in ch:
+            x = column_digest(cols, i, {}, examples)
+            x.pop("shared_prefix", None)
+            x.pop("shared_suffix", None)
+            cdig.append(dict(x, file="metadata", join=facts[i]))
+        payload = {"file": {"role": "metadata", "name_extension": Path(filename).suffix.lower(),
+                            "n_rows": cols.n_rows, "n_columns": len(cols.header)},
+                   "data": data_ctx, "join_facts_top": sorted(facts, key=lambda f: (-f["exact_matches"],
+                                                                                   -f["normalized_matches"]))[:5],
+                   "columns": cdig, "already_confirmed": fixed or {},
+                   "settings": {"example_values_sent": examples, "raw_rows_sent": False}}
+        if len(chunks) > 1:
+            payload["chunk"] = {"index": k, "of": len(chunks)}
+        digests.append(payload)
+        resp, meta = _call(payload, sha, log, mock_fn, kind="metadata")
+        metas.append(meta)
+        if resp is None:
+            continue
+        if merged["join_key"] is None and resp.join_key and resp.join_key.get("column"):
+            merged["join_key"] = resp.join_key
+        names = {cols.labels[i] for i in ch}
+        for c in resp.columns:
+            if c.column in names and c.column not in merged["columns"]:
+                merged["columns"][c.column] = c.model_dump()
+        merged["design"] = merged["design"] or resp.design
+        merged["questions"] += [q.model_dump() for q in resp.clarifying_questions]
+    meta = metas[0] if metas else {}
+    if any(m.get("error") for m in metas):
+        meta = dict(meta, error=next(m["error"] for m in metas if m.get("error")))
+    ok = any(m.get("error") is None for m in metas)
+    return (merged if ok else None), meta, digests
 
 
 def chat(payload, sha, log=None, mock_fn=None):

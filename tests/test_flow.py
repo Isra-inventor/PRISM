@@ -122,6 +122,7 @@ def test_C_mzmine_ai_path(flow):
     for st_ in ("annotations", "values", "samples"):
         f.step(st_, {})
     f.step("sample_info", {"metadata": {"skip": True}})
+    f.confirm_design()
     f.step("history", HISTORY)
     out = f.finalize()
     assert any(fl["flag"] == "no_sample_metadata" for fl in out["integrity_flags"])
@@ -279,6 +280,7 @@ def test_ai_off_full_manual_flow(flow):
     f.step("values", {"items": [i for i in items if i["role"] == "value"]})
     f.step("samples", {"samples": {"QC_01": {"label": "pooled QC", "is_study_sample": False}}})
     f.step("sample_info", {"metadata": {"skip": True}})
+    f.confirm_design()
     f.step("history", HISTORY)
     out = f.finalize()
     prov = {a["column"]: a["provenance"] for a in out["schema"]["feature_annotations"]}
@@ -394,6 +396,7 @@ def test_metadata_upload_matching(flow):
     f.step("sample_info", {"metadata": {"accept_near_misses": [["S02", "s02"]],
                                         "columns": [{"column": "group", "audit_kind": "group", "label": "arm"},
                                                     {"column": "age", "audit_kind": "covariate"}]}})
+    f.confirm_design()
     f.step("history", HISTORY)
     f.finalize()
     rows = rows_of(f.export("sample_metadata.csv"))
