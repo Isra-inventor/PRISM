@@ -187,6 +187,112 @@ def j_subject_code_blocks(rng):
     w("J_subject_code_blocks.csv", ["SeqId", "Target"] + samples, rows)
 
 
+# ---------------------------------------------------------------- v2.4: shapes of the two real runs
+
+NHP = {"DEAB": [0, 4, 16, 52], "GA43": [0, 4, 16, 136], "H7K2": [0, 4, 16, 52, 136], "R12X": [0, 4, 16, 52, 136],
+       "PB09": [0, 4, 8, 16, 52, 136], "T623": [0], "M88A": [4], "W5TA": [16]}   # 4, 4, 5, 5, 6, 1, 1, 1 samples
+NHP_SAMPLES = [f"{a}_{tp}" for a, tps in NHP.items() for tp in tps]
+
+
+def k_somascan_nhp(rng, n_features=400):
+    """SomaScan NHP shape (v2.4 §22): 76 columns = 1 ID + 48 annotations + 27 sample columns
+    named <animal>_<number>; near-duplicate annotation pairs; a Type column with non-human rows.
+    Plus a 33-column sample metadata file (nhp_id, time_point, TimePoint, study_group, SubjectID ...)."""
+    ann = ["Target", "Target Name", "TargetFullName", "UniProt", "UniProt ID", "EntrezGeneID", "EntrezGeneSymbol",
+           "Organism", "Units", "Type_meta", "Type_anno", "Dilution", "Dilution2", "PlateScale_Reference",
+           "CalReference", "Cal_Set_A", "ColCheck", "QC_CV_plasma", "QC_CV_serum", "SignalToNoise",
+           "LoD_plasma", "LoD_serum", "MedianSignal_buffer", "Aptamer_Length", "SomaId", "TargetType",
+           "Protein_Class", "Pathway", "Subcellular", "Secreted", "HPA_Tissue", "Panel", "Panel_Version",
+           "Seq_Notes", "Flag_Crossreactive", "Flag_HighCV", "Assay_Plate_Pos", "KD_nM", "Mol_Weight_kDa",
+           "GO_Process", "GO_Function", "Chromosome", "Gene_Start", "Gene_End", "Strand", "Ensembl",
+           "Annotation_Date", "Comment"]
+    assert len(ann) == 48 and len(NHP_SAMPLES) == 27
+    header = ["SeqId"] + ann[:24] + NHP_SAMPLES + ann[24:]
+    types = ["Protein"] * 18 + ["Non-Human"] + ["Hybridization Control Elution", "Spuriomer"]
+    rows = []
+    for k in range(n_features):
+        gene = f"G{k % 350}"
+        uni = f"P{10000 + k:05d}"
+        typ = types[k % len(types)] if k % 7 == 0 else "Protein"
+        base = rng.gauss(3.1, 0.5)
+        a = {"Target": f"T{k}", "Target Name": f"T{k}", "TargetFullName": f"Target protein {k}", "UniProt": uni,
+             "UniProt ID": uni if k % 50 else "", "EntrezGeneID": str(1000 + k % 350), "EntrezGeneSymbol": gene,
+             "Organism": "Human" if typ == "Protein" else "", "Units": "RFU", "Type_meta": typ, "Type_anno": typ,
+             "Dilution": rng.choice(["20", "0.5", "0.005"]), "Dilution2": rng.choice(["20", "0.5", "0.005"]),
+             "PlateScale_Reference": f"{rng.uniform(500, 5000):.1f}", "CalReference": f"{rng.uniform(500, 5000):.1f}",
+             "Cal_Set_A": f"{rng.uniform(0.8, 1.2):.3f}", "ColCheck": rng.choice(["PASS", "PASS", "FLAG"]),
+             "QC_CV_plasma": f"{rng.uniform(2, 15):.2f}", "QC_CV_serum": f"{rng.uniform(2, 15):.2f}",
+             "SignalToNoise": f"{rng.uniform(1, 40):.2f}", "LoD_plasma": f"{rng.uniform(10, 200):.1f}",
+             "LoD_serum": f"{rng.uniform(10, 200):.1f}", "MedianSignal_buffer": f"{rng.uniform(50, 400):.1f}",
+             "Aptamer_Length": str(rng.randint(40, 50)), "SomaId": f"SL{k:06d}", "TargetType": "Protein",
+             "Protein_Class": rng.choice(["enzyme", "receptor", "cytokine", "other"]),
+             "Pathway": rng.choice(["immune", "metabolism", "signalling", ""]), "Subcellular": rng.choice(["secreted", "membrane", "cytoplasm"]),
+             "Secreted": rng.choice(["yes", "no"]), "HPA_Tissue": rng.choice(["liver", "blood", "brain", "kidney"]),
+             "Panel": "7k", "Panel_Version": "4.1", "Seq_Notes": "", "Flag_Crossreactive": rng.choice(["", "", "X"]),
+             "Flag_HighCV": rng.choice(["", "", "", "Y"]), "Assay_Plate_Pos": f"{rng.choice('ABCDEFGH')}{rng.randint(1, 12)}",
+             "KD_nM": f"{rng.uniform(0.01, 50):.3f}", "Mol_Weight_kDa": f"{rng.uniform(8, 300):.1f}",
+             "GO_Process": rng.choice(["GO:0006955", "GO:0008152", ""]), "GO_Function": rng.choice(["GO:0005515", ""]),
+             "Chromosome": str(rng.randint(1, 22)), "Gene_Start": str(rng.randint(1000, 9000000)),
+             "Gene_End": str(rng.randint(9000000, 9900000)), "Strand": rng.choice(["+", "-"]),
+             "Ensembl": f"ENSG{rng.randint(10 ** 10, 10 ** 11 - 1)}", "Annotation_Date": "2021-06-01", "Comment": ""}
+        vals = {sm: f"{10 ** (base + rng.gauss(0, 0.12)):.1f}" for sm in NHP_SAMPLES}
+        rows.append([f"{10000 + k}-{k % 90 + 1}_3"] + [a[h] if h in a else vals[h] for h in header[1:]])
+    w("K_somascan_nhp.csv", header, rows)
+    groups = {"DEAB": "SIV+ART", "GA43": "SIV+ART", "H7K2": "SIV", "R12X": "SIV", "PB09": "SIV+ART", "T623": "control",
+              "M88A": "control", "W5TA": "SIV"}
+    mh = ["SampleId", "nhp_id", "time_point", "TimePoint", "study_group", "SubjectID", "nhp_week_index", "plate",
+          "slide", "scanner", "run_order", "batch", "sex", "age_years", "weight_kg", "viral_load", "cd4_count",
+          "hemolysis", "sample_volume_ul", "collection_site", "freeze_thaw", "storage_days", "operator",
+          "RowCheck", "NormScale_20", "NormScale_0_5", "NormScale_0_005", "SampleType", "SampleMatrix",
+          "Barcode", "Notes", "ART_start_week", "necropsy"]
+    assert len(mh) == 33
+    mrows = []
+    for a, tps in NHP.items():
+        sex, age = rng.choice(["F", "M"]), rng.randint(3, 9)
+        for k, tp in enumerate(tps):
+            mrows.append([f"{a}_{tp}", a, str(tp), f"W{tp}", groups[a], f"NHP-{a}", str(k + 1), f"P{1 + k % 3}",
+                          f"S{rng.randint(1, 9)}", "SC1", str(len(mrows) + 1), str(1 + len(mrows) // 14), sex, str(age),
+                          f"{rng.uniform(4, 9):.1f}", f"{10 ** rng.uniform(1, 6):.0f}", str(rng.randint(200, 1400)),
+                          rng.choice(["none", "slight"]), "50", rng.choice(["A", "B"]), str(rng.randint(0, 2)),
+                          str(rng.randint(10, 900)), rng.choice(["ab", "cd"]), "PASS", f"{rng.uniform(0.8, 1.2):.3f}",
+                          f"{rng.uniform(0.8, 1.2):.3f}", f"{rng.uniform(0.8, 1.2):.3f}", "Sample", "plasma",
+                          f"BC{rng.randint(10 ** 6, 10 ** 7)}", "", "8" if groups[a] == "SIV+ART" else "",
+                          "yes" if k == len(tps) - 1 else "no"])
+    w("K_somascan_nhp_metadata.csv", mh, mrows)
+
+
+METAB_CLASSES = [("Amino Acid", 200), ("Carbohydrate", 30), ("Cofactors and Vitamins", 40), ("Energy", 10),
+                 ("Lipid", 450), ("Nucleotide", 40), ("Peptide", 30), ("Xenobiotics", 200),
+                 ("Partially Characterized Molecules", 14), ("", 160)]
+
+
+def l_metabolon_like(rng):
+    """Metabolomics run shape (v2.4 §22): 27 rows (the K sample names, same order), an ID column and
+    1,174 numeric columns <class>_<number> (nine classes + 160 with an empty class), one export
+    median-scaled to ~1 everywhere; one column at its minimum in >= 14 of 27 samples."""
+    cols = []
+    used = set()
+    for cls, n in METAB_CLASSES:
+        for _ in range(n):
+            while True:
+                num = rng.choice([rng.randint(30, 9999), rng.randint(100000000, 100020000), rng.randint(999900000, 999999999)])
+                if num not in used:
+                    used.add(num)
+                    break
+            cols.append(f"{cls}_{num}")
+    for fixed in ("Amino Acid_100010863", "Xenobiotics_100010955"):
+        if fixed not in cols:
+            cols[[c.split("_")[0] for c in cols].index(fixed.split("_")[0])] = fixed
+    assert len(cols) == 1174
+    data = {c: [rng.lognormvariate(0, 0.35) for _ in NHP_SAMPLES] for c in cols}
+    x = data["Xenobiotics_100010955"]
+    for k in range(15):
+        x[k * 27 // 15] = 0.124948
+    data["Xenobiotics_100010955"] = [max(v, 0.124948) for v in x]
+    rows = [[sm] + [f"{data[c][r]:.6g}" for c in cols] for r, sm in enumerate(NHP_SAMPLES)]
+    w("L_metabolon_like.csv", ["ID"] + cols, rows)
+
+
 if __name__ == "__main__":
     rng = random.Random(42)
     a_maxquant(rng)
@@ -199,4 +305,6 @@ if __name__ == "__main__":
     h_16s_otu(random.Random(16))
     i_methylation(random.Random(450))
     j_subject_code_blocks(random.Random(623))
+    k_somascan_nhp(random.Random(4412))
+    l_metabolon_like(random.Random(151))
     print("fixtures written to", HERE)

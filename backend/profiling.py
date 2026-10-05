@@ -308,6 +308,74 @@ def affix_key(a):
 
 CALL_COST = 3  # in shared characters: tie-breaker between one more call and a cut through a name part
 
+_DIGITS = re.compile(r"[0-9]+")
+
+
+def name_template(name):
+    """Every run of digits becomes '#', everything else (case included) is kept:
+    'Amino Acid_100000011' -> 'Amino Acid_#', 'Pt003_visit1' -> 'Pt#_visit#', 'seq.1234.56' -> 'seq.#.#'."""
+    return _DIGITS.sub("#", name)
+
+
+def ties_at_min(vals):
+    """Share of the non-missing values equal to the column's (feature's) minimum."""
+    if not vals:
+        return None
+    m = min(vals)
+    return sum(1 for v in vals if v == m) / len(vals)
+
+
+def name_templates(cols, indices):
+    """Name templates of the given columns (a fact, no grouping decision): template ->
+    member indices in file order, with an aggregate profile of the members."""
+    by = {}
+    for i in indices:
+        by.setdefault(name_template(cols.labels[i]), []).append(i)
+    out = []
+    for tpl, members in by.items():
+        types = Counter(cols.digests[i]["type"] for i in members)
+        x = {"template": tpl, "n_columns": len(members), "indices": members, "types": dict(types)}
+        num = [cols.digests[i] for i in members if cols.digests[i]["type"] == "numeric"]
+        if num:
+            meds = sorted(d["median"] for d in num if d.get("median") is not None)
+            p1s = sorted(d["p1"] for d in num if d.get("p1") is not None)
+            p99s = sorted(d["p99"] for d in num if d.get("p99") is not None)
+            ties = [ties_at_min(cols.nums(i)) for i in members if cols.digests[i]["type"] == "numeric"]
+            x["aggregate"] = {
+                "median_of_column_medians": _r(pct(meds, 0.5)), "column_medians_range": [_r(meds[0]), _r(meds[-1])] if meds else None,
+                "p1": _r(pct(p1s, 0.5)), "p99": _r(pct(p99s, 0.5)),
+                "share_integer_valued": _r(sum(1 for d in num if d.get("integer_valued")) / len(num)),
+                "share_with_ties_at_minimum": _r(sum(1 for v, i in zip(ties, members) if v is not None
+                                                     and v * len(cols.nums(i)) >= 2) / len(num)),
+                "frac_zero": _r(sum(d.get("frac_zero") or 0 for d in num) / len(num)),
+                "frac_na": _r(sum(d.get("frac_na") or 0 for d in num) / len(num))}
+        out.append(x)
+    return out
+
+
+def chunk_units(keys, size):
+    """Split units (columns or name templates, given by their sort key) into chunks of at
+    most `size` units; boundaries go where neighbouring keys share the least text."""
+    n0 = len(keys)
+    if n0 <= size:
+        return [list(range(n0))]
+    order = sorted(range(n0), key=lambda k: keys[k])
+    n = len(order)
+    cut_cost = [0] + [_lcp(keys[order[k - 1]], keys[order[k]]) for k in range(1, n)]
+    best, prev = [0] + [None] * n, [0] * (n + 1)
+    for j in range(1, n + 1):
+        for i in range(max(0, j - size), j):
+            if best[i] is None:
+                continue
+            c = best[i] + CALL_COST + (cut_cost[i] if i else 0)
+            if best[j] is None or c < best[j]:
+                best[j], prev[j] = c, i
+    bounds, j = [], n
+    while j > 0:
+        bounds.append((prev[j], j))
+        j = prev[j]
+    return [sorted(order[i:j]) for i, j in reversed(bounds)]
+
 
 def chunk_columns(indices, labels, affixes, size):
     """Split columns into chunks of at most `size` for separate AI calls.

@@ -366,12 +366,6 @@ async def question_dismiss(req: QuestionRequest):
     return await run_in_threadpool(_structure_op, req, workflow.dismiss_question, req.question_id, req.text)
 
 
-@app.post("/api/merge-check")
-async def merge_check(req: MergeRequest):
-    """'These groups are the same thing': the AI's opinion only; nothing is applied."""
-    return await run_in_threadpool(_structure_op, req, workflow.merge_check, req.group_ids, req.user_hint)
-
-
 @app.post("/api/merge")
 async def merge(req: MergeRequest):
     """Your decision: merge these groups (applied by code only on this confirmation)."""

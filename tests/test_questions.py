@@ -26,7 +26,7 @@ def qs(f, **match):
 def test_code_question_answer_applies_and_undo_reopens(flow, monkeypatch):
     monkeypatch.setattr(mock_llm.MockLLM, "respond", staticmethod(per_code))
     f = flow(J)
-    (q,) = qs(f, kind="near_identical_blocks")
+    (q,) = qs(f, kind="fragmentation")
     assert q["source"] == "code" and q["status"] == "open" and q["step"] == "values" and q["type"] == "single"
     assert [o["label"].split(":")[0] for o in q["options"]] == ["One measurement", "Separate measurements", "Ask the AI"]
     assert any(u.get("question_id") == q["question_id"] for u in f.draft["unresolved"])      # blocks finishing
@@ -45,12 +45,12 @@ def test_code_question_answer_applies_and_undo_reopens(flow, monkeypatch):
 def test_dismissed_question_is_not_asked_again_after_reproposal(flow, monkeypatch):
     monkeypatch.setattr(mock_llm.MockLLM, "respond", staticmethod(per_code))
     f = flow(J)
-    (q,) = qs(f, kind="near_identical_blocks")
+    (q,) = qs(f, kind="fragmentation")
     post(f, "/api/question/dismiss", question_id=q["question_id"], text="they are different arrays")
     assert qs(f, question_id=q["question_id"])[0]["status"] == "dismissed"
     r = f.c.post("/api/propose", json={"session_id": f.sid, "ai": True})
     f.draft = r.json()["draft"]
-    assert [x["status"] for x in qs(f, kind="near_identical_blocks")] == ["dismissed"]
+    assert [x["status"] for x in qs(f, kind="fragmentation")] == ["dismissed"]
     open_kinds = {q["kind"] for q in f.draft["questions"] if q["status"] == "open"}
     assert open_kinds == {"sample_id_collision"}       # separate blocks: their stripped IDs now collide
 

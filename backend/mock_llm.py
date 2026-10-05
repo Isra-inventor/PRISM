@@ -7,6 +7,7 @@ offline demo. It reads only the digest, exactly like a real model would.
 from __future__ import annotations
 
 import fnmatch
+from .profiling import name_template  # noqa: F401  (for test mocks)
 import json
 import math
 import re
@@ -69,9 +70,34 @@ def _omics(names):
     return "metabolomics"
 
 
+def digest_entries(digest):
+    """Single columns plus one pseudo-column per name template (v2.4 digests list templates first)."""
+    out = list(digest.get("columns", []))
+    for tp in digest.get("templates", []):
+        agg = tp.get("aggregate") or {}
+        first = tp.get("first_column") or {}
+        out.append({"column": tp["template"], "position": tp["first_position"],
+                    "type": "numeric" if set(tp["types"]) == {"numeric"} else first.get("type", "text"),
+                    "median": agg.get("median_of_column_medians"), "p99": agg.get("p99"),
+                    "integer_valued": agg.get("share_integer_valued") == 1, "frac_zero": agg.get("frac_zero"),
+                    "unique_ratio": first.get("unique_ratio"), "n_unique": first.get("n_unique"),
+                    "_template": tp["template"], "_n": tp["n_columns"],
+                    "_members": [n for n in tp["columns"] if not n.startswith("... (")]})
+    return out
+
+
+def member_names(entries):
+    return [n for c in entries for n in (c["_members"] if c.get("_template") else [c["column"]])]
+
+
 def _family_key(c):
     """The mock's own reading of the shared-name facts: a prefix cut at its first
     digit, or a suffix cut after its last digit (e.g. 'LFQ intensity S', ' Peak area')."""
+    if c.get("_template"):
+        tp = c["_template"]
+        pre, suf = tp.split("#")[0], tp.split("#")[-1]
+        k = max((len(pre), "prefix", pre), (len(suf), "suffix", suf))
+        return k[1:] if len(k[2].strip()) >= 3 else ("template", tp)
     keys = []
     p = (c.get("shared_prefix") or [{}])[0].get("text") or ""
     p = re.split(r"\d", p, maxsplit=1)[0]
@@ -110,8 +136,8 @@ def _group_columns(columns, layout):
             rest.append(c)
     groups = []
     for key, cs in fam.items():
-        if len(cs) >= 2:
-            groups.append((key[1], cs))
+        if sum(c.get("_n", 1) for c in cs) >= 2:
+            groups.append((key[1] if key[0] != "template" else "", cs))
         else:
             rest.extend(cs)
     singles = []
@@ -129,8 +155,8 @@ def _group_columns(columns, layout):
 
 
 def _pseudo_group(gid, key, cs):
-    names = [c["column"] for c in cs]
-    if len(cs) == 1:
+    names = member_names(cs)
+    if len(cs) == 1 and not cs[0].get("_template"):
         return {"group_id": gid, "kind": "single_column", "type": cs[0]["type"], "columns": names,
                 "pattern": None, "profile": cs[0], "n_columns": 1}
     meds = sorted(c.get("median") or 0 for c in cs)
@@ -138,8 +164,12 @@ def _pseudo_group(gid, key, cs):
             "integer_valued": all(c.get("integer_valued") for c in cs)}
     samples = [n[len(key):] if n.startswith(key or "\0") else (n[:len(n) - len(key)] if key and n.endswith(key) else n)
                for n in names]
+    if not all(c["type"] == "numeric" for c in cs):
+        return {"group_id": gid, "kind": "column_group", "type": "text", "columns": names, "pattern": key,
+                "profile": cs[0], "n_columns": sum(c.get("_n", 1) for c in cs), "entries": cs}
     return {"group_id": gid, "kind": "numeric_block", "type": "numeric", "columns": names, "pattern": key,
-            "profile": prof, "n_columns": len(cs), "sample_names": [x.strip(" _.-") for x in samples]}
+            "profile": prof, "n_columns": sum(c.get("_n", 1) for c in cs),
+            "sample_names": [x.strip(" _.-") for x in samples], "entries": cs}
 
 
 class MockLLM:
@@ -163,15 +193,18 @@ class MockLLM:
                 layout = "samples_in_rows"
             else:
                 layout = "samples_in_columns"
-        proposed = [_pseudo_group(f"m{k}", key, cs)
-                    for k, (key, cs) in enumerate(_group_columns(digest["columns"], layout), 1)]
+        entries = digest_entries(digest)
+        proposed = [_pseudo_group(f"m{k}", key, cs) for k, (key, cs) in enumerate(_group_columns(entries, layout), 1)]
         groups, samples, fid, assays = [], [], [], {}
-        file_omics = _omics([c["column"] for c in digest["columns"]])
+        file_omics = _omics(member_names(entries))
         for g in proposed:
             names = _names(g)
             name = names[0] if names else ""
             prof = g.get("profile") or {}
-            e = {"group_id": g["group_id"], "columns": names, "role": "unresolved", "assay_label": None, "label": "",
+            ents = g.get("entries") or []
+            e = {"group_id": g["group_id"], "role": "unresolved", "assay_label": None, "label": "",
+                 "columns": [c["column"] for c in ents if not c.get("_template")] if ents else names,
+                 "templates": [c["_template"] for c in ents if c.get("_template")],
                  "audit_kind": None, "marks_rows_as_suspect": False,
                  "confidence": 0.6, "evidence": "mock rule", "suggest_split": None}
             if g["kind"] == "numeric_block" and not re.search(r"scale|norm", (g.get("pattern") or "").lower()):
@@ -292,18 +325,30 @@ class MockLLM:
 
     @staticmethod
     def consolidate(payload):
-        groups = payload["groups"]
-        if payload.get("user_hint"):
-            same = len({g["role"] for g in groups}) == 1
-            return json.dumps({"cross_chunk_merges": [{"group_ids": [g["group_id"] for g in groups],
-                                                       "reason": "mock: same role"}] if same else [],
-                               "comment": "mock: roles agree" if same else "mock: different roles"})
+        """The final answer for a chunked file: value groups with the same label become one group;
+        every other chunk group stays as it is; unresolved ones are left out (they become questions)."""
         by = {}
-        for g in groups:
-            if g["role"] == "value":
-                by.setdefault((g["role"], g["label"]), []).append(g["group_id"])
-        return json.dumps({"cross_chunk_merges": [{"group_ids": ids, "reason": "mock: same label across chunks"}
-                                                  for ids in by.values() if len(ids) > 1]})
+        for g in payload["groups"]:
+            if g["role"] == "unresolved":
+                continue
+            key = (g["role"], g["label"]) if g["role"] == "value" else ("one", g["group_id"])
+            by.setdefault(key, []).append(g)
+        final = []
+        for k, gs in enumerate(by.values(), 1):
+            g = gs[0]
+            final.append({"group_id": f"f{k}", "members": [x["group_id"] for x in gs], "role": g["role"],
+                          "assay_label": g.get("assay_label"), "label": g.get("label") or "",
+                          "audit_kind": g.get("audit_kind"), "marks_rows_as_suspect": g.get("marks_rows_as_suspect"),
+                          "confidence": 0.8, "evidence": "mock: same role and label in every chunk"})
+        fid = [f["group_id"] for f in final if f["role"] == "feature_id"][:1]
+        labels = list(dict.fromkeys(f["assay_label"] for f in final if f["role"] == "value" and f["assay_label"]))
+        om = {a["assay_label"]: a.get("omics_type") or "unknown" for a in payload.get("chunk_assays", [])}
+        assays = [{"assay_label": lab, "omics_type": om.get(lab, "unknown"), "in_supported_scope": "yes",
+                   "feature_identity": {"group_ids": fid}, "confidence": 0.7, "evidence": "mock"} for lab in labels]
+        return json.dumps({"groups": final, "assays": assays or [{"assay_label": "assay", "omics_type": "unknown",
+                                                                  "in_supported_scope": "unsure", "confidence": 0.5,
+                                                                  "evidence": "mock", "feature_identity": {"group_ids": fid}}],
+                           "clarifying_questions": []})
 
 
 def _literature(payload):

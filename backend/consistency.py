@@ -1,12 +1,8 @@
-"""Deterministic consistency checks on the proposed structure (v2.3). Flags, never fixes.
+"""Deterministic consistency checks on the proposed structure. Questions, never fixes.
 
-1. Near-identical value blocks (v2.3 §2): two or more value blocks of one assay
-   whose computed profiles are near-identical AND whose names look like
-   identifiers (short codes such as 'DEAB', 'GA43', 'T623', not measurement
-   terms such as 'LFQ intensity') are flagged: they may be one measurement
-   split per subject. The user confirms (one block, subject / name suffix parsed
-   into sample information) or dismisses. This runs in addition to the AI's own
-   propose_merge.
+1. Fragmentation (v2.4 §16): kept value blocks, across assays, with the same samples
+   and near-identical value distributions may be one measurement split in pieces. Code
+   only asks (a queued question); it never merges by itself.
 2. Sample-ID collisions across blocks (v2.3 §3): within an assay, blocks either
    measure the same samples in parallel (identical ID sets, descriptive names,
    e.g. LFQ / iBAQ / raw intensity) or hold different samples (disjoint sets).
@@ -52,71 +48,69 @@ def identifier_like(code):
     return bool(code and _CODE.fullmatch(code) and (re.search(r"\d", code) or code.isupper()))
 
 
-def _close(a, b, tol):
-    return a is not None and b is not None and abs(a - b) <= tol
+def _within(a, b, factor):
+    """a and b within a factor of each other (both positive), or both not positive."""
+    if a is None or b is None:
+        return False
+    if a <= 0 or b <= 0:
+        return a <= 0 and b <= 0
+    return max(a, b) / min(a, b) <= factor
 
 
-def similar(p, q):
-    """Near-identical computed profiles (median, log10 span, zeros, missing, whole numbers)."""
-    ma, mb = p.get("median"), q.get("median")
-    if not ma or not mb or ma <= 0 or mb <= 0:
-        return False
-    if abs(math.log10(ma / mb)) > config.CONSISTENCY_MEDIAN_DECADES:
-        return False
-    sa, sb = p.get("log10_span"), q.get("log10_span")
-    if sa is not None and sb is not None and abs(sa - sb) > config.CONSISTENCY_SPAN_TOL:
-        return False
-    if not _close(p.get("frac_zero") or 0, q.get("frac_zero") or 0, config.CONSISTENCY_FRAC_TOL):
-        return False
-    if not _close(p.get("frac_na") or 0, q.get("frac_na") or 0, config.CONSISTENCY_FRAC_TOL):
-        return False
-    return bool(p.get("integer_valued")) == bool(q.get("integer_valued"))
+def near_identical(p, q):
+    """Near-identical value distributions (v2.4 §16): medians within a factor of
+    FRAGMENT_MEDIAN_FACTOR, p1 and p99 each within FRAGMENT_TAIL_FACTOR."""
+    return (_within(p.get("median"), q.get("median"), config.FRAGMENT_MEDIAN_FACTOR)
+            and _within(p.get("p1"), q.get("p1"), config.FRAGMENT_TAIL_FACTOR)
+            and _within(p.get("p99"), q.get("p99"), config.FRAGMENT_TAIL_FACTOR))
 
 
-def _stat_line(g):
+def _stat_line(g, label, assay):
     p = g.get("profile") or {}
-    return (f"{', '.join(g['columns'][:2])}{' ...' if g['n_columns'] > 2 else ''} ({g['n_columns']} col): median "
-            f"{p.get('median')}, span {p.get('log10_span')} decades, zeros {round(100 * (p.get('frac_zero') or 0))}%")
+    return (f"{label or g['columns'][0]} ({g['n_columns']} col, assay '{assay}'): median {p.get('median')}, "
+            f"p1 {p.get('p1')}, p99 {p.get('p99')}, zeros {round(100 * (p.get('frac_zero') or 0))}%, "
+            f"missing {round(100 * (p.get('frac_na') or 0))}%")
 
 
-def block_flags(groups_by_id, items, dismissed=()):
-    """Clusters of near-identical identifier-named value blocks within one assay."""
-    by_assay = {}
-    for gid, it in items.items():
-        g = groups_by_id.get(gid)
-        if g and it["role"] == "value" and it.get("keep", True) and g["type"] == "numeric":
-            by_assay.setdefault(it.get("assay_label"), []).append(gid)
-    flags = []
-    for assay, gids in by_assay.items():
-        cand = [g for g in gids if identifier_like(name_code(groups_by_id[g]))]
-        parent = {g: g for g in cand}
-        def find(x):
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-        for i, a in enumerate(cand):
-            for b in cand[i + 1:]:
-                if similar(groups_by_id[a]["profile"], groups_by_id[b]["profile"]):
-                    parent[find(a)] = find(b)
-        clusters = {}
-        for g in cand:
-            clusters.setdefault(find(g), []).append(g)
-        for members in clusters.values():
-            if len(members) < 2:
-                continue
-            members = sorted(members, key=lambda g: min(groups_by_id[g]["indices"]))
-            key = "|".join(sorted(members))
-            if key in dismissed:
-                continue
-            flags.append({
-                "kind": "near_identical_blocks", "key": key, "assay": assay, "group_ids": members,
-                "codes": [name_code(groups_by_id[g]) for g in members],
-                "n_columns": sum(groups_by_id[g]["n_columns"] for g in members),
-                "message": (f"These {len(members)} blocks look statistically identical — are they really different "
-                            "measurements, or the same measurement across different subjects/samples?"),
-                "evidence": [_stat_line(groups_by_id[g]) for g in members]})
-    return flags
+def fragmentation(groups_by_id, items, layout, block_samples):
+    """Kept value blocks, compared ACROSS assays (v2.4 §16, replacing the v2.3 identifier-name
+    condition): two blocks are one measurement candidate when their value distributions are
+    near-identical and they can be pieces of one matrix: samples in rows, the blocks are different
+    features of the same samples; samples in columns, the same feature rows for different sample
+    columns (blocks whose sample IDs are identical sets are parallel measurements such as LFQ vs
+    iBAQ and are not compared). Returns clusters of two or more blocks."""
+    gids = [g for g, it in items.items() if it["role"] == "value" and it.get("keep", True)
+            and groups_by_id.get(g, {}).get("type") == "numeric"]
+    if layout not in ("samples_in_rows", "samples_in_columns") or len(gids) < 2:
+        return []
+    parent = {g: g for g in gids}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    sets = {g: set(block_samples.get(g) or []) for g in gids}
+    for i, a in enumerate(gids):
+        for b in gids[i + 1:]:
+            if layout == "samples_in_columns" and sets[a] and sets[a] == sets[b]:
+                continue          # identical sample sets: parallel measurements (LFQ vs iBAQ), not pieces
+            if near_identical(groups_by_id[a]["profile"], groups_by_id[b]["profile"]):
+                parent[find(a)] = find(b)
+    clusters = {}
+    for g in gids:
+        clusters.setdefault(find(g), []).append(g)
+    out = []
+    for members in clusters.values():
+        if len(members) < 2:
+            continue
+        members = sorted(members, key=lambda g: min(groups_by_id[g]["indices"]))
+        assays = list(dict.fromkeys(items[g].get("assay_label") for g in members))
+        out.append({"group_ids": members, "assays": assays,
+                    "n_columns": sum(groups_by_id[g]["n_columns"] for g in members),
+                    "evidence": [_stat_line(groups_by_id[g], items[g].get("label"), items[g].get("assay_label"))
+                                 for g in members]})
+    return out
 
 
 def sample_collisions(blocks_ids, codes):

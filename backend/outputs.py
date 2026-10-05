@@ -82,7 +82,7 @@ def build(s):
     for a_n, (a_label, (assay, gs)) in enumerate(assays.items(), 1):
         aid = f"A{a_n}"
         blocks = []
-        n_features = 0
+        all_feature_keys = []
         block_ids = {}
         for b_n, g in enumerate(gs, 1):
             it = d["groups"][g["group_id"]]
@@ -128,7 +128,7 @@ def build(s):
             # except samples-in-rows, where each block's columns are its own features
             if lay == "samples_in_rows" or b_n == 1:
                 feature_rows_all.append((aid, g, feat_keys))
-            n_features = max(n_features, len(feat_keys))
+            all_feature_keys.extend(feat_keys)
             block_ids[g["group_id"]] = sids
             blocks.append({
                 "block_id": bid, "group_id": g["group_id"], "file": fname, "keep": True,
@@ -143,6 +143,9 @@ def build(s):
         if not blocks:
             continue
         union, structure = _reconcile_samples(a_label, gs, block_ids, d, lay)
+        # v2.4 §19: samples in columns -> the feature rows the blocks share; samples in rows -> the
+        # distinct feature columns of all kept blocks; long -> the distinct feature keys
+        n_features = len(rows) if lay == "samples_in_columns" else len(set(all_feature_keys))
         fi = d["feature_identity"]
         schema_assays.append({
             "assay_id": aid,
@@ -312,6 +315,8 @@ def build(s):
         flags.append({"flag": "decimal_comma_values",
                       "detail": "Values with a decimal comma were copied as-is: " + ", ".join(pr["decimal_comma_columns"][:5])})
 
+    _check_counts(schema_assays, lay, accounting.column_ledger(s, d))
+
     schema = {
         "schema_version": SCHEMA_VERSION,
         "source_file": s.filename,
@@ -366,6 +371,33 @@ def build(s):
         "log_ref": f"{s.sid}.jsonl",
     }
     return schema, artifacts, flags
+
+
+def _check_counts(assays, lay, ledger):
+    """Finalization invariant (v2.4 §19): assay counts equal the sums over their blocks, and the
+    ledger's value columns equal the kept blocks' columns."""
+    problems = []
+    for a in assays:
+        bl = a["value_blocks"]
+        n_cols = sum(len(b["columns"]) for b in bl)
+        if a["n_value_columns"] != n_cols:
+            problems.append(f"assay {a['assay_id']}: n_value_columns {a['n_value_columns']} but its blocks hold {n_cols}")
+        if lay == "samples_in_rows":
+            total = sum(b["n_features"] for b in bl)
+            if a["n_features"] != total:
+                problems.append(f"assay {a['assay_id']}: {a['n_features']} distinct features but its blocks hold "
+                                f"{total} feature columns (the same feature name occurs in more than one column)")
+        elif lay == "samples_in_columns":
+            bad = [b["block_id"] for b in bl if b["n_features"] != a["n_features"]]
+            if bad:
+                problems.append(f"assay {a['assay_id']}: blocks {', '.join(bad)} do not have the assay's "
+                                f"{a['n_features']} feature rows")
+    led = ledger.get("main") or {}
+    kept = sum(a["n_value_columns"] for a in assays)
+    if led and led.get("value") != kept:
+        problems.append(f"the column ledger counts {led.get('value')} value columns but the assays hold {kept}")
+    if problems:
+        raise OutputError("Counts do not agree: " + "; ".join(problems) + ". Nothing was written.")
 
 
 def _reconcile_samples(a_label, gs, block_ids, d, lay):

@@ -286,7 +286,8 @@
       el("button", { type: "button", onclick: () => go(id), title: stepStatus(id).replace("_", " ") },
         el("b", { text: String(k + 1) }), el("span", { text: label })))));
     const hint = S.draft.signature_hint, aiUsed = S.draft.ai.used, gr = S.draft.grouping || {};
-    const how = { ai: `grouped by the AI${gr.chunks > 1 ? ` in ${gr.chunks} chunks + 1 consolidation call` : ""}`,
+    const tpl = gr.n_templates ? ` from ${gr.n_templates} name template${gr.n_templates > 1 ? "s" : ""}` : "";
+    const how = { ai: `grouped by the AI${tpl}${gr.chunks > 1 ? ` in ${gr.chunks} chunks + 1 final call` : ""}`,
                   signature: "grouped from the known format",
                   manual: S.session.groups.length < S.session.n_columns ? "grouped by you" : "not grouped yet: use shared name parts" }[gr.source] || "";
     $("ws-sig").textContent = (aiUsed ? "AI-assisted" : "Manual mode") + ` · ${S.session.groups.length} groups, ${how}`
@@ -653,12 +654,13 @@
                 S.draft = r.draft; if (r.session) S.session = r.session; S.local = {};
               } catch (e) { S.local.error = e.message; }
             });
-            if (!S.local.error && gr.chunks > 1) await structOp("/api/consolidate", {}, "Joining families across chunks");
+            if (!S.local.error && gr.chunks > 1) await structOp("/api/consolidate", {}, "Asking the AI for the final grouping");
             else renderAll();
           } })) : null,
-      gr.consolidation_error ? el("div", {}, "Joining families across chunks failed (" + gr.consolidation_error.slice(0, 120) + "). ",
-        el("button", { class: "linkbtn", type: "button", text: "Retry joining chunks",
-          onclick: () => structOp("/api/consolidate", {}, "Asking the AI which groups are one family") })) : null);
+      gr.consolidation_error ? el("div", {}, "The AI's final answer for the whole file failed (" + gr.consolidation_error.slice(0, 120)
+        + "). Chunk proposals are drafts, so their labels and assays are not used. ",
+        el("button", { class: "linkbtn", type: "button", text: "Retry the final answer",
+          onclick: () => structOp("/api/consolidate", {}, "Asking the AI for the final grouping") })) : null);
   }
   // ------------------------------------------------------------ question queue (v2.4 §5)
   async function answerQuestion(q, optionIds) {

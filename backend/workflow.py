@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import re
 import threading
@@ -291,7 +292,8 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
     d["grouping"] = {"source": "ai" if not manual else ("signature" if prop.get("signature") else "manual"),
                      "chunks": prop.get("chunks", 1), "merges_applied": prop.get("merges_applied", []),
                      "splits_applied": prop.get("splits_applied", []),
-                     "chunk_size": ai.GROUPING_CHUNK_SIZE, "failed_chunks": prop.get("failed_chunks", []),
+                     "chunk_size": ai.config.GROUPING_CHUNK_SIZE, "failed_chunks": prop.get("failed_chunks", []),
+                     "chunk_mode": prop.get("chunk_mode"), "n_templates": prop.get("n_templates"),
                      "consolidation_error": prop.get("consolidation_error")}
 
     # layout
@@ -558,16 +560,24 @@ def code_question_candidates(s, d):
     answered or dismissed one is never asked again."""
     out = []
     rep = consistency_report(s, d)
-    for f in rep["block_flags"]:
+    for f in rep["fragmentation"]:
         applies = {"group_ids": sorted(f["group_ids"])}
-        out.append({"kind": "near_identical_blocks", "type": "single", "key": questions.key_of("near_identical_blocks", applies),
-                    "applies_to": applies, "step": "values", "text": f["message"], "evidence": f["evidence"],
-                    "allow_free_text": True, "options": [
-                        {"label": f"One measurement: treat the {len(f['group_ids'])} blocks as one ({f['n_columns']} columns)",
-                         "edits": [{"op": "resolve_consistency", "args": {"action": "one_block", "key": f["key"]}}]},
-                        {"label": "Separate measurements: keep them as they are",
-                         "edits": [{"op": "resolve_consistency", "args": {"action": "dismiss", "key": f["key"]}}]},
-                        {"label": "Ask the AI", "chat": "Are these blocks one measurement or several? " + "; ".join(f["evidence"][:4])}]})
+        n, m = len(f["group_ids"]), len(f["assays"])
+        same = ("have the same samples" if layout_of(d) == "samples_in_rows"
+                else "hold different samples of the same features")
+        edits_one = ([{"op": "merge_assays", "args": {"assay_labels": f["assays"], "label": f["assays"][0]}}] if m > 1 else []) + \
+            [{"op": "merge_groups", "args": {"group_ids": f["group_ids"], "reason": "one measurement (your answer)"}}]
+        out.append({"kind": "fragmentation", "type": "single", "key": questions.key_of("fragmentation", applies),
+                    "applies_to": applies, "step": "values", "evidence": f["evidence"], "allow_free_text": True,
+                    "text": f"{n} blocks in {m} assay{'s' if m > 1 else ''} {same} and near-identical value "
+                            "distributions. One measurement or several?",
+                    "options": [
+                        {"label": f"One measurement: one {'assay and one ' if m > 1 else ''}block ({f['n_columns']} columns)",
+                         "edits": edits_one, "n_columns": f["n_columns"]},
+                        {"label": "Separate measurements: keep them as they are", "edits": []},
+                        {"label": "Ask the AI", "chat": f"Are these {n} blocks one measurement or several? "
+                                                        + "; ".join(f["evidence"][:6])}]})
+    out += _orphan_questions(s, d)
     for c in rep["sample_collisions"]:
         applies = {"group_ids": sorted(c["group_ids"])}
         labels = {g: re.sub(r"[^A-Za-z0-9]+", "_", (d["groups"][g].get("label") or g)).strip("_")[:20] or g
@@ -604,6 +614,51 @@ def code_question_candidates(s, d):
                             {"label": "Keep it", "edits": []},
                             {"label": "Remove the derived column",
                              "edits": [{"op": "set_derived_annotation", "args": {"name": x["name"], "keep": False}}]}]})
+    return out
+
+
+def _orphan_questions(s, d):
+    """Columns the AI left unplaced (v2.4 §16): a question with up to 3 candidate blocks
+    (same name template first, then the closest median), its own block, or exclude."""
+    from .profiling import name_template
+    if not d["ai"].get("used"):
+        return []
+    blocks = [g for g in value_blocks(s, d) if s.groups_by_id[g]["type"] == "numeric"]
+    tpl = {b: {name_template(c) for c in s.groups_by_id[b]["columns"]} for b in blocks}
+    out = []
+    orphans = [g for g in s.groups if d["groups"][g["group_id"]]["role"] == UNRESOLVED
+               and g["origin"] in ("unmentioned", "unconsolidated")]
+    for g in orphans[:40]:
+        gid = g["group_id"]
+        applies = {"columns": g["columns"][:50]}
+        mine = {name_template(c) for c in g["columns"]}
+        med = (g.get("profile") or {}).get("median")
+        def rank(b):
+            bm = (s.groups_by_id[b].get("profile") or {}).get("median")
+            dist = abs(math.log10(med / bm)) if med and bm and med > 0 and bm > 0 else 99
+            return (0 if mine & tpl[b] else 1, dist)
+        opts = []
+        if g["type"] == "numeric":
+            for b in sorted(blocks, key=rank)[:3]:
+                it = d["groups"][b]
+                opts.append({"label": f"Add to '{it.get('label') or s.groups_by_id[b]['columns'][0]}' "
+                                      f"({s.groups_by_id[b]['n_columns']} columns, {it.get('assay_label')})",
+                             "edits": [{"op": "merge_groups", "args": {"group_ids": [b, gid],
+                                                                       "reason": "your answer: same block"}}]})
+            opts.append({"label": "Keep it as its own block", "edits": [{"op": "edit_group", "args": {
+                "group_id": gid, "fields": {"role": "value"}}}]})
+        else:
+            role = "sample_metadata" if layout_of(d) == "samples_in_rows" else "feature_annotation"
+            opts.append({"label": "It describes the " + ("samples" if role == "sample_metadata" else "features"),
+                         "edits": [{"op": "edit_group", "args": {"group_id": gid, "fields": dict(
+                             {"role": role}, **({"audit_kind": "other"} if role == "sample_metadata" else {}))}}]})
+        opts.append({"label": "Exclude it from the outputs", "edits": [{"op": "edit_group", "args": {
+            "group_id": gid, "fields": {"role": "ignore", "keep": False}}}]})
+        name = ", ".join(g["columns"][:2]) + (" …" if g["n_columns"] > 2 else "")
+        out.append({"kind": "orphan", "type": "single", "key": questions.key_of("orphan", applies), "applies_to": applies,
+                    "step": step_for_group(s, d, gid), "allow_free_text": True, "options": opts,
+                    "text": f"The AI did not place {name}. Where does it belong?",
+                    "evidence": [group_hint(g)]})
     return out
 
 
@@ -1128,17 +1183,17 @@ def reconsider(s, gids, hint, on_progress=None):
 
 
 def retry_consolidation(s):
-    """Run the cross-chunk consolidation again on the current groups; merges naming
-    groups that exist are applied (as in the first proposal), others are rejected."""
+    """Run the final-answer call again on the current groups (e.g. after a quota error):
+    groups it joins are merged; labels, roles and assays come from its answer."""
     d = s.draft
     ok, why = llm.available()
     if not (ok and d["ai"]["enabled"]):
         raise StepError("The AI is off or unavailable: " + (why or ""))
-    merges, err = ai.consolidate(s.cols, s.groups_by_id, d["groups"], s.sha, log=s.log)
+    resp, err = ai.consolidate(s.cols, s.groups_by_id, d["groups"], d["assays"], s.sha, log=s.log)
     if err:
         raise StepError("The AI could not answer: " + err)
-    applied, rejected = edits.apply_edit(s, "apply_consolidation", {}, extra={"merges": merges},
-                                         summary="Joined families across chunks (AI consolidation)")["result"]
+    applied, rejected = edits.apply_edit(s, "apply_consolidation", {}, extra={"resp": resp},
+                                         summary="The AI's final answer for the whole file")["result"]
     s.log("consolidation_retry", {"applied": applied, "rejected": rejected})
     s.save()
     return {"draft": public_draft(s), "merges": applied}
@@ -1146,22 +1201,50 @@ def retry_consolidation(s):
 
 @edits.op("apply_consolidation")
 def _op_apply_consolidation(ctx, a):
+    """A new proposal (asked for by you): merges, final labels and assays from the AI's answer."""
     s, d = ctx.s, ctx.d
-    applied, rejected = [], []
-    for gids, reason in ctx.extra["merges"]:
-        gids = [g for g in dict.fromkeys(gids)]
-        if len(gids) < 2 or any(g not in d["groups"] for g in gids):
-            rejected.append({"group_ids": gids, "reason": "merge names groups that do not exist", "merge_reason": reason})
+    resp = ctx.extra["resp"]
+    applied, rejected, claimed = [], [], set()
+    finals = []
+    for fg in resp.groups:
+        gids = [g for g in dict.fromkeys(fg.members) if g in d["groups"] and g not in claimed]
+        bad = [g for g in fg.members if g not in d["groups"]]
+        if bad:
+            rejected.append({"group_id": fg.group_id, "members": bad, "reason": "names groups that do not exist"})
+        if not gids:
             continue
-        keep = max(gids, key=lambda g: s.groups_by_id[g]["n_columns"])
-        item = copy.deepcopy(d["groups"][keep])
-        pg = {"m": {"indices": [i for g in gids for i in s.groups_by_id[g]["indices"]], "item": item,
-                    "origin": "merged_consolidation", "merged_from": gids, "keep_id": keep}}
-        _replace_groups(s, d, gids, pg, {"consolidation": gids, "reason": reason}, ctx)
-        applied.append({"group_ids": gids, "into": keep, "reason": reason})
+        claimed.update(gids)
+        if len(gids) > 1:
+            keep = max(gids, key=lambda g: s.groups_by_id[g]["n_columns"])
+            pg = {"m": {"indices": [i for g in gids for i in s.groups_by_id[g]["indices"]],
+                        "item": copy.deepcopy(d["groups"][keep]), "origin": "merged_consolidation",
+                        "merged_from": gids, "keep_id": keep}}
+            _replace_groups(s, d, gids, pg, {"consolidation": gids}, ctx)
+            applied.append({"group_ids": gids, "into": keep, "reason": fg.evidence})
+            gids = [keep]
+        finals.append((gids[0], fg))
+    if resp.assays:
+        old = d["assays"]
+        d["assays"] = [_snap(dict(ai._assay_entry(x)), ASSAY_FIELDS) for x in resp.assays]
+        for x in d["assays"]:
+            x.pop("feature_pids", None)
+    labels = [x["assay_label"] for x in d["assays"]]
+    for gid, fg in finals:
+        it = d["groups"][gid]
+        new = ai.finalize_item(_blank(ai._final_item(fg)), s.groups_by_id[gid], s.cols, layout_of(d))
+        if new["role"] == "value" and new.get("assay_label") not in labels:
+            new["assay_label"] = labels[0]
+        new["hint"] = it.get("hint")
+        new["keep"] = it.get("keep", True)
+        _attach_flags(s, gid, new)
+        d["groups"][gid] = _snap(new, GROUP_FIELDS)
+    for gid, it in d["groups"].items():
+        if it["role"] == "value" and it.get("assay_label") not in labels:
+            it["assay_label"] = labels[0]
     d["grouping"]["consolidation_error"] = None
     d["grouping"]["merges_applied"] = d["grouping"].get("merges_applied", []) + applied
     d["rejected"] = d.get("rejected", []) + rejected
+    ctx.summary = f"Final answer: {len(finals)} group(s) relabelled, {len(applied)} merge(s)"
     return applied, rejected
 
 
@@ -1169,18 +1252,6 @@ def _op_apply_consolidation(ctx, a):
 def _op_regroup(ctx, a):
     """Apply an AI regrouping of these groups' columns (asked for by you)."""
     return _replace_groups(ctx.s, ctx.d, a["group_ids"], ctx.extra["pgroups"], a.get("why"), ctx)
-
-
-def merge_check(s, gids, hint=""):
-    """'These groups are actually the same thing': ask the AI; nothing is applied."""
-    d = s.draft
-    gids = _check_gids(d, gids, 2)
-    ok, why = llm.available()
-    if not (ok and d["ai"]["enabled"]):
-        return {"agrees": None, "reason": "The AI is off: you can merge them yourself.", "comment": ""}
-    res = ai.merge_check(s.cols, s.groups_by_id, d["groups"], gids, _clean(hint, 1000), s.sha, log=s.log)
-    s.log("merge_check", {"group_ids": gids, "user_hint": hint, "result": res})
-    return res
 
 
 def merge_groups(s, gids, why=None):
@@ -1461,8 +1532,9 @@ def dismiss_patches(s, patch_ids):
 def consistency_report(s, d):
     """Deterministic checks: near-identical identifier-named blocks, and sample-ID
     collisions between blocks of one assay (samples in columns)."""
-    dismissed = set(d.get("consistency_dismissed", []))
-    flags = consistency.block_flags(s.groups_by_id, d["groups"], dismissed)
+    lay = layout_of(d)
+    frag = consistency.fragmentation(s.groups_by_id, d["groups"], lay,
+                                     {g: sample_ids(s, d, g) for g in value_blocks(s, d)} if lay == "samples_in_columns" else {})
     collisions, structure = [], {}
     if layout_of(d) == "samples_in_columns":
         by_assay = {}
@@ -1478,83 +1550,33 @@ def consistency_report(s, d):
                                        message=(f"Sample ID '{first}' appears in more than one block"
                                                 + (f" ({c['n_ids']} IDs in total)" if c["n_ids"] > 1 else "")
                                                 + " — these need to be distinguished.")))
-    return {"block_flags": flags, "sample_collisions": collisions, "sample_structure": structure}
-
-
-def resolve_consistency(s, action, key=None, group_ids=None, labels=None):
-    edits.apply_edit(s, "resolve_consistency", {"action": action, "key": key, "group_ids": group_ids or [],
-                                                "labels": labels or {}})
-    s.save()
-    return {"draft": public_draft(s)}
+    return {"fragmentation": frag, "sample_collisions": collisions, "sample_structure": structure}
 
 
 @edits.op("resolve_consistency")
 def _op_resolve_consistency(ctx, a):
+    """Telling colliding sample IDs apart (v2.3 §3): full column names, or a label per block."""
     s, d = ctx.s, ctx.d
-    action, key, group_ids, labels = a["action"], a.get("key"), a.get("group_ids"), a.get("labels")
-    ctx.summary = {"dismiss": "Blocks kept as different measurements", "one_block": "Blocks treated as one measurement",
-                   "full_names": "Full column names as sample IDs", "labels": "Block labels added to sample IDs"}.get(action, action)
-    if action == "dismiss":
-        if not any(f["key"] == key for f in consistency_report(s, d)["block_flags"]):
-            raise StepError("This flag no longer applies.")
-        d.setdefault("consistency_dismissed", []).append(key)
-        s.log("consistency", {"action": "dismiss", "key": key})
-    elif action == "one_block":
-        flag = next((f for f in consistency_report(s, d)["block_flags"] if f["key"] == key), None)
-        if flag is None:
-            raise StepError("This flag no longer applies.")
-        _treat_as_one_block(s, d, flag, ctx)
-    elif action in ("full_names", "labels"):
-        gids = [g for g in (group_ids or []) if g in d["sample_rules"]]
-        if not gids:
-            raise StepError("Choose the blocks whose sample IDs collide.")
-        for g in gids:
-            rule = d["sample_rules"][g]
-            if action == "full_names":
-                rule.update(strip_prefix="", strip_suffix="", add_prefix="")
-            else:
-                lab = _clean((labels or {}).get(g), 60)
-                if not lab:
-                    raise StepError("Give every block a short label.")
-                rule["add_prefix"] = lab if lab.endswith(("_", "-", ".", " ")) else lab + "_"
-        s.log("consistency", {"action": action, "group_ids": gids, "labels": labels})
-    else:
+    action, group_ids, labels = a["action"], a.get("group_ids"), a.get("labels")
+    if action not in ("full_names", "labels"):
         raise StepError(f"Unknown action '{action}'.")
+    ctx.summary = {"full_names": "Full column names as sample IDs", "labels": "Block labels added to sample IDs"}[action]
+    gids = [g for g in (group_ids or []) if g in d["sample_rules"]]
+    if not gids:
+        raise StepError("Choose the blocks whose sample IDs collide.")
+    for g in gids:
+        rule = d["sample_rules"][g]
+        if action == "full_names":
+            rule.update(strip_prefix="", strip_suffix="", add_prefix="")
+        else:
+            lab = _clean((labels or {}).get(g), 60)
+            if not lab:
+                raise StepError("Give every block a short label.")
+            rule["add_prefix"] = lab if lab.endswith(("_", "-", ".", " ")) else lab + "_"
+        rule["set_by"] = ctx.actor
+    s.log("consistency", {"action": action, "group_ids": gids, "labels": labels})
     if d["steps"].get("samples") == "confirmed":
         d["steps"]["samples"] = "pending"
-
-
-DERIVED_COLUMNS = [
-    {"name": "subject_code", "audit_kind": "subject_id", "label": "code at the start of the column name", "keep": True},
-    {"name": "name_suffix", "audit_kind": "timepoint", "label": "rest of the column name (e.g. a time point)", "keep": True},
-]
-
-
-def _treat_as_one_block(s, d, flag, ctx=None):
-    """Your confirmation: one block; the former block boundaries (subject codes) and the
-    rest of each column name become sample information; sample IDs are the full names."""
-    gids = flag["group_ids"]
-    codes = {g: consistency.name_code(s.groups_by_id[g]) for g in gids}
-    der = d.get("derived_sample_metadata") or {"source": "column names of merged blocks",
-                                              "columns": [dict(c) for c in DERIVED_COLUMNS], "values": {}}
-    for g in gids:
-        code = codes[g]
-        for i in s.groups_by_id[g]["indices"]:
-            name = s.table["header"][i]
-            rest = name[len(code):].strip(consistency._SEP) if code and name.startswith(code) else ""
-            der["values"][name] = {"subject_code": code or "", "name_suffix": rest}
-    d["derived_sample_metadata"] = der
-    keep = max(gids, key=lambda g: s.groups_by_id[g]["n_columns"])
-    item = copy.deepcopy(d["groups"][keep])
-    item.update(source="user", evidence=f"You confirmed these {len(gids)} blocks are one measurement "
-                                        f"({', '.join(c or '?' for c in codes.values())} are subjects / samples).")
-    pg = {"m": {"indices": [i for g in gids for i in s.groups_by_id[g]["indices"]], "item": item,
-                "origin": "merged_consistency", "merged_from": gids, "keep_id": keep}}
-    new = _replace_groups(s, d, gids, pg, {"consistency_one_block": gids}, ctx)
-    for g in new:
-        d["sample_rules"][g] = _snap({"strip_prefix": "", "strip_suffix": "", "source": "user"},
-                                     ("strip_prefix", "strip_suffix"))
-    s.log("consistency", {"action": "one_block", "group_ids": gids, "codes": codes, "into": new})
 
 
 # ---------------------------------------------------------------- sample metadata file (samples in columns)

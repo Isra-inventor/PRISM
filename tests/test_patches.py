@@ -194,6 +194,12 @@ def test_merge_assays_and_derive_feature_annotation(flow, monkeypatch):
     apply(f, [m["patch_id"], d["patch_id"]])
     assert [a["assay_label"] for a in f.draft["assays"]] == ["metabolon"]
     assert {it["assay_label"] for it in f.draft["groups"].values() if it["role"] == "value"} == {"metabolon"}
+    fr = next(q for q in f.draft["questions"] if q["kind"] == "fragmentation")     # still two blocks
+    assert fr["text"].startswith("2 blocks in 1 assay have the same samples")
+    r = f.c.post("/api/question/answer", json={"session_id": f.sid, "question_id": fr["question_id"], "option_ids": ["o1"]})
+    assert r.status_code == 200, r.text
+    f.draft = r.json()["draft"]
+    assert sum(1 for it in f.draft["groups"].values() if it["role"] == "value") == 1
     q = next(q for q in f.draft["questions"] if q["kind"] == "unclassified_part")
     assert q["status"] == "open" and q["text"].startswith("3 feature name(s) have an empty feature class")
     r = f.c.post("/api/question/answer", json={"session_id": f.sid, "question_id": q["question_id"], "option_ids": ["o1"]})

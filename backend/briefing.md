@@ -68,6 +68,17 @@ Mark these carefully; they drive the audit:
 - Tables that are not omics at all, or omics types outside the current scope: still describe
   them, and say so in the scope fields.
 
+## Assays: one measurement or several?
+- An assay is a separate measurement: its own platform or run, usually its own feature set and
+  scale. Feature classes inside one export (pathway, super-pathway, protein family, lipid class)
+  are annotations of the features, not assays: `Amino Acid_35`, `Lipid_1234` and `_999912007`
+  from one median-scaled export are one assay and one block, whose class can be derived from the
+  names.
+- When you are unsure whether blocks are one measurement or several, ask (a question with
+  options) instead of splitting.
+- The digest lists name templates first (digits shown as '#'): `Pt003_visit1` and `Pt104_visit2`
+  are one template. Group by templates; split a member out only when its own statistics say so.
+
 ## Layouts
 - samples_in_columns: each row is one feature; each sample has its own column.
 - samples_in_rows: each row is one sample; each feature has its own column.
