@@ -318,6 +318,17 @@ async def chat(req: ChatRequest):
     return await run(req.progress_id, work)
 
 
+class SettingsRequest(BaseModel):
+    session_id: str
+    auto_apply: Optional[bool] = None
+
+
+@app.post("/api/settings")
+async def settings(req: SettingsRequest):
+    """Per-session settings: 'apply what I ask for automatically' (default off; still logged and undoable)."""
+    return await run_in_threadpool(_structure_op, req, workflow.set_settings, req.auto_apply)
+
+
 class PatchRequest(BaseModel):
     session_id: str
     patch_ids: List[str]

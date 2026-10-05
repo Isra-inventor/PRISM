@@ -134,7 +134,7 @@ def trial(s, fn, observe):
         s._tx = None
 
 
-UNTRACKED = ("patches", "chat", "questions")   # records; their state lives in tracked keys (answers)   # conversation records: undo never rewinds them (undone patches go back to pending)
+UNTRACKED = ("patches", "chat", "questions", "settings")   # records; their state lives in tracked keys (answers)   # conversation records: undo never rewinds them (undone patches go back to pending)
 
 
 def _restore(s, snap):

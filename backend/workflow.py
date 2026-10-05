@@ -361,6 +361,7 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
     d["answers"] = dict(old.get("answers") or {})          # answered / dismissed questions are never asked again
     d["questions"] = [q for q in old.get("questions", []) if questions.status(old, q) != "open"]
     d["chat"], d["patches"] = old.get("chat", []), [p for p in old.get("patches", []) if p["status"] == "applied"]
+    d["settings"] = dict(old.get("settings") or {})
     d["rejected"] = prop.get("rejected", [])
     refresh_samples(s, d)
     s.draft = d
@@ -1400,6 +1401,15 @@ def chat(s, message, step=None, selection=None):
     msg = {"message_id": mid, "at": edits.now_iso(), "text": message, "step": step, "selection": selection or [],
            "reply": resp.reply, "patch_ids": [p["patch_id"] for p in made],
            "question_ids": [q["question_id"] for q in qs], "context": payload}
+    auto = []
+    if (d.get("settings") or {}).get("auto_apply"):
+        for p in made:   # what you asked for, unless it is large, warned about or near an invariant
+            if p["status"] == "pending" and auto_applicable(s, d, p):
+                r = P.apply(s, [p["patch_id"]], actor="ai_patch")[0]
+                if r["status"] == "applied":
+                    auto.append(p["patch_id"])
+        d = s.draft
+    msg["auto_applied"] = auto
     d.setdefault("chat", []).append(msg)
     del d["chat"][:-50]
     s.log("chat_message", {"message_id": mid, "text": message, "step": step, "selection": selection or [],
@@ -1407,6 +1417,31 @@ def chat(s, message, step=None, selection=None):
                            "rejected": [p["patch_id"] for p in made if p["status"] == "rejected"]})
     s.save()
     return {"draft": public_draft(s), "message": {k: v for k, v in msg.items() if k != "context"}}
+
+
+def auto_applicable(s, d, p):
+    """Auto-apply (an opt-in per session) never covers ops over 25 columns, patches with
+    warnings, or ops near an invariant (excluding a value block, merging, assays, join key)."""
+    if p.get("large") or p.get("warnings"):
+        return False
+    if p["op"] in ("set_block_keep", "merge_groups", "split_group", "merge_assays", "set_join_key", "set_role"):
+        return False
+    if p["op"] == "set_keep" and (p.get("args") or {}).get("keep") is False:
+        cols = set((p.get("resolved") or {}).get("columns") or [])
+        if any(it["role"] in ("value", "feature_id", "sample_id") for g, it in d["groups"].items()
+               if set(s.groups_by_id[g]["columns"]) & cols):
+            return False
+    return True
+
+
+def set_settings(s, auto_apply=None):
+    d = s.draft
+    st = d.setdefault("settings", {})
+    if auto_apply is not None:
+        st["auto_apply"] = bool(auto_apply)
+        s.log("settings", {"auto_apply": st["auto_apply"]})
+    s.save()
+    return {"draft": public_draft(s)}
 
 
 def apply_patches(s, patch_ids, confirm_large=(), overrides=None):
@@ -1655,6 +1690,8 @@ def public_draft(s):
     out["ai_ungrouped"] = [g["group_id"] for g in s.groups if g.get("origin") == "ai_unavailable"]
     out["consistency"] = consistency_report(s, d)
     out["changes"] = edits.changes(s)
+    out["chat"] = [{k: v for k, v in m.items() if k != "context"} for m in d.get("chat", [])]
+    out["last_chat_context"] = d["chat"][-1].get("context") if d.get("chat") else None
     out["questions"] = questions.public(d)
     led = accounting.column_ledger(s, d)
     out["column_ledger"] = {f: dict(x, text=accounting.ledger_text(x)) for f, x in led.items()}

@@ -269,6 +269,7 @@
 
   // ------------------------------------------------------------ render
   function renderAll(scroll) {
+    renderChat();
     renderStepper();
     renderLegend();
     renderNameParts();
@@ -332,7 +333,8 @@
     const head = d.ai.enabled && d.ai.available
       ? `Provider: ${d.ai.provider} · model: ${(d.ai.models_used || []).join(", ") || d.ai.model || "—"} · prompt ${d.ai.prompt_version} · temperature ${d.ai.temperature}${d.ai.cached ? " · cached proposal" : ""}\nRaw data rows sent: no. Only the digest below.\n\n`
       : "The AI is off: nothing was sent.\n\n";
-    $("saw-pre").textContent = head + (S.digests && S.digests.length ? JSON.stringify(S.digests.length === 1 ? S.digests[0] : S.digests, null, 2) : "");
+    $("saw-pre").textContent = head + (S.digests && S.digests.length ? JSON.stringify(S.digests.length === 1 ? S.digests[0] : S.digests, null, 2) : "")
+      + (d.last_chat_context ? "\n\nLast chat turn (what the AI received):\n" + JSON.stringify(d.last_chat_context, null, 2) : "");
   }
 
   // ------------------------------------------------------------ preview table
@@ -363,7 +365,8 @@
       while (j + 1 < entries.length && entries[j + 1].gid === entries[k].gid) j++;
       const gid = entries[k].gid, it = D(gid);
       const cls = chipClass(gid);
-      chips.append(el("th", { colspan: j - k + 1, class: focus.has(gid) ? "focus" : "", "data-gid": gid },
+      chips.append(el("th", { colspan: j - k + 1, class: focus.has(gid) ? "focus" : "", "data-gid": gid,
+        onclick: () => { if (S.chatOpen) openChat(G(gid).columns.slice(0, 200)); } },
         el("span", { class: `chip ${cls} ${S.hop?.has(gid) ? "hop" : ""}`, title: `${roleLabel(it)} — ${G(gid).n_columns} column(s)` },
           cls === "k-pending" ? `? ${roleLabel(it)}` : roleLabel(it))));
       k = j + 1;
@@ -515,53 +518,8 @@
     return out;
   }
 
-  function askAI(gids, hint, label) {
-    return busy(label || "Asking the AI to reconsider", async (pid) => {
-      try {
-        const r = await api("/api/reconsider", { session_id: S.session.session_id, group_ids: gids, user_hint: hint, progress_id: pid });
-        S.draft = r.draft;
-        if (r.session) S.session = r.session;
-        if (r.digest) S.digests = [r.digest];
-        // keep what the user already edited in this step; everything else shows the new proposal
-        S.local = { items: S.local.items, samples: S.local.samples, rules: S.local.rules,
-                    note: r.questions?.length ? "The AI asks: " + r.questions.map((q) => q.question).join(" ") : null };
-      } catch (err) { S.local.error = err.message; }
-    }).then(() => renderAll());
-  }
   function reconsiderOne(gid) {
-    if (!aiReady()) return null;
-    const open = S.local.reconsider === gid;
-    if (!open) return el("button", { class: "linkbtn", type: "button", text: "Ask the AI about this one", onclick: () => { S.local.reconsider = gid; renderGuide(); } });
-    const inp = textInput("", () => {}, { placeholder: "What's wrong? e.g. ‘these are ion adducts, not names’", cls: "grow" });
-    setTimeout(() => inp.focus(), 0);
-    return el("div", { class: "reconsider" }, inp, el("button", { class: "btn btn-sm", type: "button", text: "Ask", onclick: () => askAI([gid], inp.value) }));
-  }
-  // the visible per-step "disagree" box
-  const touched = (gid) => Object.keys(S.local.items?.[gid] || {}).length > 0;
-  function disagreeBox(gids, what) {
-    gids = gids.filter((g) => D(g));
-    if (!gids.length) return null;
-    const ask = gids.filter((g) => !touched(g));
-    const box = el("div", { class: "disagree" });
-    const head = el("div", { class: "disagree-head" }, el("strong", { text: "Disagree? Tell the AI what's wrong" }));
-    if (!aiReady()) {
-      box.append(head, el("p", { class: "item-sub", text: "The AI is off, so there is nothing to ask. Every field above is editable: change it directly and confirm." }));
-      return box;
-    }
-    const ta = el("textarea", { class: "input", rows: 2, placeholder: `e.g. “the iron column is a clinical value, not a metabolite” or “these are peptide counts, not intensities”` });
-    ta.value = S.local.feedback || "";
-    ta.addEventListener("input", () => { S.local.feedback = ta.value; });
-    const kept = gids.length - ask.length;
-    box.append(head,
-      el("p", { class: "item-sub", text: `You can edit any field above yourself. Or describe what is wrong: the AI re-proposes the ${ask.length} ${what} in this step with your note, and you still confirm the result.`
-        + (kept ? ` The ${kept} you already edited are kept as you set them.` : "") }),
-      ta,
-      el("div", { class: "disagree-actions" }, el("button", { class: "btn btn-sm", type: "button", text: "Ask the AI again", onclick: () => {
-        if (!ta.value.trim()) { S.local.error = "Write a short note about what is wrong first."; renderGuide(); return; }
-        if (!ask.length) { S.local.error = "You have edited every item in this step yourself; just confirm."; renderGuide(); return; }
-        askAI(ask, ta.value, "Asking the AI to reconsider this step");
-      } })));
-    return box;
+    return el("button", { class: "linkbtn", type: "button", text: "Ask the AI about this one", onclick: () => openChat(G(gid).columns.slice(0, 200)) });
   }
 
   // generic item editor (annotations, sample info, other columns)
@@ -646,26 +604,19 @@
     const open = S.local.struct === gid;
     if (!open) return el("button", { class: "linkbtn", type: "button", style: "margin-left:12px",
       text: g.n_columns > 1 ? "Same thing as… / take columns out" : "Same thing as another group…",
-      onclick: () => { S.local.struct = gid; S.local.verdict = null; renderGuide(); } });
+      onclick: () => { S.local.struct = gid; renderGuide(); } });
     const others = S.session.groups.filter((x) => x.group_id !== gid).map((x) => x.group_id);
     const near = focusGroups(S.step).filter((x) => x !== gid);
     const opts = [...near, ...others.filter((x) => !near.includes(x))];
     const sel = S.local.mergeWith && opts.includes(S.local.mergeWith) ? S.local.mergeWith : null;
-    const pick = select(opts, sel, (v) => { S.local.mergeWith = v; S.local.verdict = null; renderGuide(); },
+    const pick = select(opts, sel, (v) => { S.local.mergeWith = v; renderGuide(); },
       { placeholder: "choose the group it is the same as…", labels: groupName });
-    const v = S.local.verdict;
     const box = el("div", { class: "struct" },
       el("div", { class: "disagree-head" }, el("strong", { text: "These are actually the same thing" })),
       fieldBox("Same as", pick),
-      sel && aiReady() ? el("button", { class: "btn btn-sm", type: "button", text: "Ask the AI to check", onclick: async () => {
-        await busy("Asking the AI whether they are one family", async () => {
-          try { S.local.verdict = await api("/api/merge-check", { session_id: S.session.session_id, group_ids: [gid, sel] }); }
-          catch (e) { S.local.error = e.message; }
-        });
-        renderGuide();
+      sel && aiReady() ? el("button", { class: "btn btn-sm", type: "button", text: "Ask the AI to check", onclick: () => {
+        S.chatDraft = "Are these two groups the same thing (one family)?"; openChat([...G(gid).columns.slice(0, 100), ...G(sel).columns.slice(0, 100)]);
       } }) : null,
-      v ? el("div", { class: `notice ${v.agrees === false ? "accent" : ""}` },
-        v.agrees === true ? "The AI agrees: " : v.agrees === false ? "The AI does not think so: " : "", v.reason || v.comment || "") : null,
       sel ? el("button", { class: "btn btn-sm btn-light", type: "button", style: "margin-left:6px", text: "Merge them",
         onclick: () => structOp("/api/merge", { group_ids: [gid, sel] }, "Merging") }) : null);
     if (g.n_columns > 1) {
@@ -841,39 +792,75 @@
           onclick: () => applyPatches([p.patch_id], large ? [p.patch_id] : [], S.local.patchEdits[p.patch_id] ? { [p.patch_id]: S.local.patchEdits[p.patch_id] } : {}) }),
         el("button", { class: "btn btn-sm", type: "button", style: "margin-left:6px", text: "Dismiss", onclick: () => dismissPatches([p.patch_id]) })));
   }
-  function chatBox() {
-    if (!S.draft) return null;
-    const msgs = S.draft.chat || [];
-    const last = msgs[msgs.length - 1];
-    const box = el("div", { class: "command" });
-    if (!aiReady()) return el("div", { class: "item-sub", text: "The AI is off or unavailable: you can still edit everything yourself, and code-generated questions still work." });
-    const ta = el("textarea", { class: "input", rows: 1, placeholder: "Ask the AI to do something, e.g. “exclude all annotation columns except the ID”" });
-    ta.value = S.local.instruction || "";
-    ta.addEventListener("input", () => { S.local.instruction = ta.value; });
-    const send = async () => {
-      if (!ta.value.trim()) return;
-      await busy("The AI is reading your message", async (pid) => {
-        try {
-          const r = await api("/api/chat", { session_id: S.session.session_id, message: ta.value, step: S.step, progress_id: pid });
-          S.draft = r.draft; if (r.session) S.session = r.session; S.local.instruction = "";
-        } catch (e) { S.local.error = e.message; }
-      });
-      renderGuide();
-    };
-    ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
-    box.append(el("div", { class: "command-row" }, ta, el("button", { class: "btn btn-sm", type: "button", text: "Send", onclick: send })));
-    const byId = Object.fromEntries((S.draft.patches || []).map((p) => [p.patch_id, p]));
-    if (last) {
-      const ps = (last.patch_ids || []).map((id) => byId[id]).filter(Boolean);
-      const pend = ps.filter((p) => ["pending", "held"].includes(p.status));
-      box.append(el("div", { class: "chat-turn" }, el("div", { class: "item-sub", text: `You: ${last.text}` }), el("div", { class: "reply", text: `AI: ${last.reply}` })),
-        ...ps.map((p) => patchCard(p, pend.length > 1)).filter(Boolean));
-      if (pend.length > 1) box.append(el("div", { class: "disagree-actions", style: "justify-content:flex-start" },
-        el("button", { class: "btn btn-sm btn-light", type: "button", text: "Apply all ticked",
-          onclick: () => applyPatches(pend.filter((p) => S.local.pick?.[p.patch_id]).map((p) => p.patch_id), [], S.local.patchEdits || {}) })));
-    }
-    return box;
+  // ------------------------------------------------------------ chat drawer (v2.4 §4.1): the one way to talk to the AI
+  const EXAMPLES = ["Exclude all annotation columns except the ID", "The animal is the subject; the number after the underscore is time",
+                    "Are these two columns the same?"];
+  function openChat(sel) {
+    S.chatOpen = true;
+    if (sel) S.chatSel = [...new Set([...(S.chatSel || []), ...sel])];
+    renderChat();
+    setTimeout(() => $("chat-drawer").querySelector("textarea")?.focus(), 30);
   }
+  function closeChat() { S.chatOpen = false; renderChat(); }
+  async function sendChat(text) {
+    if (!text.trim()) return;
+    await busy("The AI is reading your message", async (pid) => {
+      try {
+        const r = await api("/api/chat", { session_id: S.session.session_id, message: text, step: S.step, selection: S.chatSel || [], progress_id: pid });
+        S.draft = r.draft; if (r.session) S.session = r.session; S.chatDraft = ""; S.chatSel = [];
+      } catch (e) { S.chatError = e.message; }
+    });
+    renderAll();
+    const box = $("chat-drawer").querySelector(".chat-msgs");
+    if (box) box.scrollTop = box.scrollHeight;
+  }
+  function renderChat() {
+    const dr = $("chat-drawer"), fab = $("chat-fab");
+    if (!S.draft) { show(dr, false); show(fab, false); return; }
+    show(fab, !S.chatOpen); show(dr, !!S.chatOpen);
+    if (!S.chatOpen) return;
+    const byP = Object.fromEntries((S.draft.patches || []).map((p) => [p.patch_id, p]));
+    const byQ = Object.fromEntries((S.draft.questions || []).map((q) => [q.question_id, q]));
+    const msgs = S.draft.chat || [];
+    const stepName = (STEPS.find(([id]) => id === S.step) || ["", ""])[1];
+    const auto = el("input", { type: "checkbox", checked: !!S.draft.settings?.auto_apply });
+    auto.addEventListener("change", () => structOp("/api/settings", { auto_apply: auto.checked }, "Saving"));
+    const ta = el("textarea", { class: "input", rows: 2, placeholder: aiReady() ? "Ask, or tell the AI what to change…" : "The AI is off", disabled: !aiReady() });
+    ta.value = S.chatDraft || "";
+    ta.addEventListener("input", () => { S.chatDraft = ta.value; });
+    ta.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(ta.value); } });
+    const sel = S.chatSel || [];
+    dr.replaceChildren(...[
+      el("div", { class: "chat-head" }, el("b", { text: "Talk to the AI" }), el("span", { class: "item-sub", text: ` · step ${STEPS.findIndex(([id]) => id === S.step) + 1}: ${stepName}` }),
+        el("span", { class: "spacer" }), el("button", { class: "linkbtn", type: "button", text: "close ✕", onclick: closeChat })),
+      aiReady() ? null : el("div", { class: "notice", text: "The AI is off or unavailable. Manual editing and all computed questions still work." }),
+      el("label", { class: "check chat-auto", title: "Still logged and undoable. Large changes (over 25 columns), changes with warnings or near an invariant always wait for your click." },
+        auto, "Apply what I ask for automatically"),
+      el("div", { class: "chat-msgs" },
+        msgs.length ? msgs.map((m) => el("div", { class: "chat-msg" },
+          el("div", { class: "bubble user" }, m.text, (m.selection || []).length ? el("div", { class: "item-sub", text: `about: ${m.selection.slice(0, 6).join(", ")}${m.selection.length > 6 ? " …" : ""}` }) : null),
+          el("div", { class: "bubble ai", text: m.reply || "" }),
+          (m.auto_applied || []).length ? el("div", { class: "item-sub", text: `Applied automatically: ${m.auto_applied.length} change(s) (undo below or in Changes).` }) : null,
+          (m.patch_ids || []).map((id) => byP[id] && patchCard(byP[id], (m.patch_ids || []).filter((x) => ["pending", "held"].includes(byP[x]?.status)).length > 1)),
+          (m.question_ids || []).map((id) => byQ[id] && questionCard(byQ[id])),
+          (() => {
+            const pend = (m.patch_ids || []).map((id) => byP[id]).filter((p) => p && ["pending", "held"].includes(p.status));
+            return pend.length > 1 ? el("button", { class: "btn btn-sm btn-light", type: "button", text: "Apply all ticked",
+              onclick: () => applyPatches(pend.filter((p) => S.local.pick?.[p.patch_id] !== false).map((p) => p.patch_id), [], S.local.patchEdits || {}) }) : null;
+          })()))
+          : el("div", { class: "chat-empty" }, el("p", { class: "item-sub", text: "The AI can only propose changes; you apply them. Try:" }),
+            EXAMPLES.map((x) => el("button", { class: "linkbtn", type: "button", text: `“${x}”`, onclick: () => { S.chatDraft = x; renderChat(); } })))),
+      S.chatError ? el("div", { class: "alert alert-error", text: S.chatError }) : null,
+      sel.length ? el("div", { class: "chat-sel" }, el("span", { class: "item-sub", text: "About: " }),
+        sel.slice(0, 12).map((c) => el("span", { class: "pill" }, c, el("button", { class: "linkbtn", type: "button", text: " ✕",
+          onclick: () => { S.chatSel = sel.filter((x) => x !== c); renderChat(); } }))), sel.length > 12 ? ` +${sel.length - 12}` : "") : 
+        el("div", { class: "item-sub chat-hint", text: "Tip: click a column group in the table to ask about it." }),
+      el("div", { class: "command-row" }, ta, el("button", { class: "btn btn-sm", type: "button", text: "Send", disabled: !aiReady(), onclick: () => sendChat(ta.value) }))].filter(Boolean));
+    S.chatError = null;
+    const box = dr.querySelector(".chat-msgs");
+    if (box) box.scrollTop = box.scrollHeight;
+  }
+  $("chat-fab").addEventListener("click", () => openChat());
 
   // ------------------------------------------------------------ changes + undo (one edit layer, v2.4)
   async function undoTo(editId) {
@@ -1020,7 +1007,6 @@
       title: sel.length ? (sel.length > 1 ? "These columns together identify each feature. Confirm?" : "This column uniquely identifies each feature. Confirm?") : "Which column identifies each feature?",
       question: sel.length ? el("span", {}, labels.map((l, k) => [k ? " + " : "", code(l)]), ". Duplicates or empty IDs are only reported; nothing is merged or removed.") : "Tick the identifier column(s).",
       body,
-      disagree: [candidateIdGroups().map((g) => g.group_id), "candidate ID columns"],
       decision: () => {
         if (!sel.length) throw new Error("Choose at least one column.");
         const dec = { feature_identity: { group_ids: sel } };
@@ -1041,7 +1027,6 @@
       title: `${gids.length} column(s) describe the features. Are these right?`,
       question: "Each shows the AI's description in plain words. Edit any label, role or flag directly; everything is kept unless you untick it.",
       body,
-      disagree: [gids, "annotation columns"],
       decision: () => { checkItems(gids); return { items: itemDecisions(gids) }; },
     };
   }
@@ -1106,7 +1091,6 @@
       title: blocks.length > 1 ? `${blocks.length} measurement blocks. What is each one?` : "Is this the measurement block?",
       question: "Nothing is ranked: every block you keep is exported as its own matrix. Check each description against the computed profile. Which block to analyse is decided later, after the research-focus step.",
       body,
-      disagree: [all, "column groups"],
       decision: () => {
         checkItems(all);
         if (!all.some((g) => cur(g, "role") === "value" && cur(g, "keep") !== false)) throw new Error("Keep at least one value block.");
@@ -1198,7 +1182,7 @@
       body.push(capped(gids, (g) => itemCard(g, { roles: ["sample_metadata", "sample_id", "feature_annotation", "value", "ignore"] })));
       return { title: `${gids.length} column(s) describe the samples. Are these right?`,
         question: "The audit kind says what the later steps use it for (subject, time point, batch…). Group-like variables are candidates only: PRISM never decides which variable is the research outcome.",
-        body, disagree: [gids, "sample information columns"],
+        body,
         decision: () => { checkItems(gids); return { items: itemDecisions(gids) }; } };
     }
     const meta = d.metadata;
@@ -1391,10 +1375,8 @@
       stepQuestions(S.step),
       groupingTrouble(),
       changesBox(),
-      chatBox(),
       note,
       el("div", { class: "guide-body" }, spec.body),
-      spec.disagree ? disagreeBox(...spec.disagree) : null,
       err, actions].filter(Boolean));
     setTimeout(drawCallout, 30);
   }
@@ -1425,6 +1407,9 @@
     const t = e.target.tagName;
     if (e.key === "Escape") {
       if (["INPUT", "SELECT", "TEXTAREA"].includes(t)) e.target.blur();
+      else if (S.chatOpen) closeChat();
+    } else if (e.key === "/" && !["INPUT", "SELECT", "TEXTAREA"].includes(t)) {
+      e.preventDefault(); openChat();
     } else if (e.key === "Enter" && !["INPUT", "SELECT", "TEXTAREA", "BUTTON", "A"].includes(t) && !e.metaKey && !e.ctrlKey) {
       e.preventDefault();
       if (current?.custom) { if (!current.confirmDisabled) current.custom(); } else submit();
