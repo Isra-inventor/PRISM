@@ -508,3 +508,95 @@ def layout_hints(cols):
 def profile_table(table):
     cols = Columns(table)
     return cols, shared_affixes(cols.labels), layout_hints(cols)
+
+
+# ---------------------------------------------------------------- v2.4 §18: per-feature facts of a value block
+
+def feature_facts(cols, indices, layout):
+    """'Feature' = a column when samples are in rows, a row when samples are in columns.
+    Per-feature median summary (p5 / p50 / p95 of the per-feature medians) and ties at the
+    minimum (per feature, the share of non-missing values equal to its minimum; block summary:
+    features with >= 2 samples at their minimum, and p50 / p90 / max of that share).
+    Facts only: they decide nothing."""
+    feats = []
+    if layout == "samples_in_rows":
+        for i in indices:
+            feats.append(cols.nums(i))
+    elif layout == "samples_in_columns":
+        dc = {i: cols.labels[i] in cols.decimal_comma for i in indices}
+        for r in cols.rows:
+            vals = []
+            for i in indices:
+                x = parse_number(cell(r, i), dc[i])
+                if x is not None and not math.isnan(x):
+                    vals.append(x)
+            feats.append(vals)
+    else:
+        return None
+    meds, shares, n_ties = [], [], 0
+    for v in feats:
+        if not v:
+            continue
+        sv = sorted(v)
+        meds.append(sv[len(sv) // 2] if len(sv) % 2 else (sv[len(sv) // 2 - 1] + sv[len(sv) // 2]) / 2)
+        m = sv[0]
+        k = sum(1 for x in sv if x == m)
+        shares.append(k / len(sv))
+        if k >= 2:
+            n_ties += 1
+    meds.sort()
+    shares.sort()
+    return {"n_features": len(feats), "n_features_with_values": len(meds),
+            "per_feature_median": {"p5": _r(pct(meds, 0.05)), "p50": _r(pct(meds, 0.5)), "p95": _r(pct(meds, 0.95))},
+            "ties_at_minimum": {"n_features_with_2_or_more_at_min": n_ties,
+                                "share_p50": _r(pct(shares, 0.5)), "share_p90": _r(pct(shares, 0.9)),
+                                "share_max": _r(shares[-1]) if shares else None}}
+
+
+# ---------------------------------------------------------------- v2.4 §8.3: near-duplicate columns
+
+NEAR_DUP_MAX_COLUMNS = 300
+NEAR_DUP_MAX_PAIRS = 50
+NEAR_DUP_MIN_ROWS = 50
+NEAR_DUP_MIN_SHARE = 0.99
+
+
+def near_duplicate_pairs(cols, indices):
+    """Pairs of columns whose non-missing values match in >= 99% of the rows where both have a
+    value (at least 50 such rows); exact duplicates (by hash) first. A fact, never a decision.
+    Returns (pairs, skipped_reason)."""
+    indices = list(indices)
+    if len(indices) > NEAR_DUP_MAX_COLUMNS:
+        return [], f"{len(indices)} columns outside value blocks (more than {NEAR_DUP_MAX_COLUMNS}): not computed"
+    vals = {i: [None if is_missing(cell(r, i)) else cell(r, i).strip() for r in cols.rows] for i in indices}
+    pairs, seen = [], set()
+    by_hash = {}
+    for i in indices:
+        by_hash.setdefault(hash(tuple(vals[i])), []).append(i)
+    for group in by_hash.values():
+        for a_k, a in enumerate(group):
+            for b in group[a_k + 1:]:
+                if vals[a] == vals[b] and sum(1 for x in vals[a] if x is not None) >= NEAR_DUP_MIN_ROWS:
+                    pairs.append({"columns": [cols.labels[a], cols.labels[b]], "match_share": 1.0,
+                                  "n_compared": sum(1 for x in vals[a] if x is not None), "exact": True})
+                    seen.add((a, b))
+    nu = {i: len({x for x in vals[i] if x is not None}) for i in indices}
+    for k, a in enumerate(indices):
+        for b in indices[k + 1:]:
+            if (a, b) in seen or len(pairs) >= NEAR_DUP_MAX_PAIRS * 2:
+                continue
+            if cols.digests[a]["type"] != cols.digests[b]["type"] or abs(nu[a] - nu[b]) > 0.05 * max(nu[a], nu[b]) + 2:
+                continue
+            va, vb = vals[a], vals[b]
+            co = eq = 0
+            for x, y in zip(va, vb):
+                if x is not None and y is not None:
+                    co += 1
+                    eq += x == y
+                    if co == 100 and eq < 97:
+                        break
+            if co >= NEAR_DUP_MIN_ROWS and eq / co >= NEAR_DUP_MIN_SHARE and not (co == 100 and eq < 97):
+                pairs.append({"columns": [cols.labels[a], cols.labels[b]], "match_share": _r(eq / co, 4),
+                              "n_compared": co, "exact": False})
+    pairs.sort(key=lambda p: (not p["exact"], -p["match_share"]))
+    return pairs[:NEAR_DUP_MAX_PAIRS], None

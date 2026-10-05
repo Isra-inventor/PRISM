@@ -25,7 +25,7 @@ from .format_detect import signature_hint, signature_prefill
 from .mock_llm import expand_sample_rules
 from .parsing import cell, is_missing, parse_bytes, sanitize_filename
 from .profiling import Columns, apply_rule, layout_hints, make_group, shared_affixes
-from .schema import HISTORY_QUESTIONS, UNRESOLVED, VOCABULARY
+from .schema import HISTORY_QUESTIONS, SCHEMA_VERSION, UNRESOLVED, VOCABULARY
 from .session_log import log_event
 from .validation import timepoint_detail, validate_feature_identity, validate_group
 from . import edits  # noqa: E402  (the edit layer registers ops defined below)
@@ -34,7 +34,7 @@ SESSIONS_DIR = Path(os.environ.get("PRISM_SESSIONS_DIR", Path(__file__).parent /
 STEPS = ["layout", "feature_id", "annotations", "values", "samples", "sample_info", "design", "history", "review"]
 GROUP_FIELDS = ("role", "assay_label", "label", "audit_kind", "marks_rows_as_suspect",
                 "flagged_values", "detail", "keep", "family")
-ASSAY_FIELDS = ("assay_label", "omics_type", "source_software", "in_supported_scope", "scope_reason")
+ASSAY_FIELDS = ("assay_label", "omics_type", "omics_family", "source_software", "in_supported_scope", "scope_reason")
 FACT_FIELDS = ("value",)
 FI_FIELDS = ("group_ids", "composite")
 SAMPLE_FIELDS = ("label", "is_study_sample")
@@ -282,7 +282,7 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
     alias = prop.get("alias", {})
     to_gid = lambda pid: id_map.get(alias.get(pid, pid)) if pid else None
 
-    d = {"schema_version": "0.2.1", "groups": {}, "sample_rules": {}, "samples": {}, "sample_rules_ai": [],
+    d = {"schema_version": SCHEMA_VERSION, "groups": {}, "sample_rules": {}, "samples": {}, "sample_rules_ai": [],
          "processing_history": {q: {"answer": None, "note": "", "provenance": "unanswered", "answered_at": None}
                                 for q, _ in HISTORY_QUESTIONS},
          "software_and_version": "", "history_notes": "", "metadata": None,
@@ -314,10 +314,14 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
     # assays
     assays = [dict(a) for a in prop.get("assays", [])]
     if not assays:
-        assays = [{"assay_label": "assay 1", "omics_type": "unknown", "source_software": "unknown",
+        assays = [{"assay_label": "assay 1", "omics_type": "unknown", "omics_family": "unknown", "source_software": "unknown",
                    "in_supported_scope": "unsure", "scope_reason": "not described yet", "confidence": 0.0,
                    "evidence": "", "source": "none"}]
+    for a in assays:
+        a.setdefault("omics_family", "unknown")
     d["assays"] = [_snap(a, ASSAY_FIELDS) for a in assays]
+    for q, hint in (prop.get("processing_hints") or {}).items():
+        d["processing_history"][q]["ai_hint"] = hint
 
     # groups
     labels = [a["assay_label"] for a in d["assays"]]
@@ -329,9 +333,15 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
             item["assay_label"] = labels[0]
         _attach_flags(s, gid, item)
         d["groups"][gid] = item
+    if use_ai and not manual:
+        _relabel_repeats(s, d)
     for gid, item in d["groups"].items():
         if item["role"] != UNRESOLVED:
             item["validation"] = validate_group(item, s.groups_by_id[gid], s.cols, layout)
+        for w in item.pop("label_warning", None) or []:
+            item["validation"]["messages"].append(w)
+            if item["validation"]["status"] == "ok":
+                item["validation"]["status"] = "warning"
         _snap(item, GROUP_FIELDS)
 
     # feature identity: first assay that names one, or the groups labelled feature_id
@@ -380,6 +390,48 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
                        "feature_identity": d["feature_identity"]})
     s.save()
     return d
+
+
+LABEL_REPEAT_MAX = 5
+
+
+def _relabel_repeats(s, d):
+    """v2.4 §8.1: more than 5 annotation columns sharing one identical label get a warning and
+    one retry asking the AI for column-specific labels."""
+    by = {}
+    for gid, it in d["groups"].items():
+        g = s.groups_by_id[gid]
+        if it["role"] == "feature_annotation" and g["n_columns"] == 1 and it.get("label"):
+            by.setdefault(it["label"].strip().lower(), []).append(gid)
+    retries = []
+    for lab, gids in by.items():
+        if len(gids) <= LABEL_REPEAT_MAX:
+            continue
+        idx = [s.groups_by_id[g]["indices"][0] for g in gids]
+        shared = d["groups"][gids[0]]["label"]
+        got, err = ai.relabel(s.cols, s.affixes, idx, shared, s.sha, log=s.log)
+        fixed = 0
+        for g, i in zip(gids, idx):
+            x = (got or {}).get(s.cols.labels[i])
+            it = d["groups"][g]
+            if x:
+                it["label"] = x["label"].strip()[:300]
+                if x.get("family"):
+                    it["family"] = str(x["family"]).strip()[:120] or None
+                elif not it.get("family"):
+                    it["family"] = shared
+                fixed += 1
+        after = Counter(d["groups"][g]["label"].strip().lower() for g in gids)
+        for g in gids:
+            n = after[d["groups"][g]["label"].strip().lower()]
+            if n > LABEL_REPEAT_MAX:
+                d["groups"][g]["label_warning"] = [f"{n} annotation columns share the label "
+                                                   f"'{d['groups'][g]['label']}': describe each column specifically."]
+        retries.append({"label": shared, "n_columns": len(gids), "relabelled": fixed, "error": err,
+                        "still_shared": sum(1 for g in gids if d["groups"][g].get("label_warning"))})
+    if retries:
+        d["grouping"]["label_retries"] = retries
+        s.log("label_retry", {"retries": retries})
 
 
 def _attach_flags(s, gid, item):
@@ -528,6 +580,8 @@ def _confirm_step(s, step, decision, on_progress=None):
         E("set_samples", {"samples": decision["samples"]})
     if "processing_history" in decision:
         E("set_processing_history", decision["processing_history"])
+    for x in decision.get("derived_annotations") or []:
+        E("set_derived_annotation", x)
     if decision.get("join_key"):
         E("set_join_key", {"metadata_column": decision["join_key"]})
     if "metadata" in decision:
@@ -758,6 +812,10 @@ def _op_set_assays(ctx, a):
         before = {f: old.get(f) for f in ASSAY_FIELDS}
         old["assay_label"] = label
         old["omics_type"] = _clean(x.get("omics_type"), 80) or "unknown"
+        if x.get("omics_family") is not None:
+            if x["omics_family"] not in VOCABULARY["omics_family"]:
+                raise StepError(f"omics family must be one of: {', '.join(VOCABULARY['omics_family'])}.")
+            old["omics_family"] = x["omics_family"]
         old["source_software"] = _clean(x.get("source_software"), 120) or "unknown"
         if x.get("in_supported_scope") in VOCABULARY["in_supported_scope"]:
             old["in_supported_scope"] = x["in_supported_scope"]
@@ -2039,6 +2097,8 @@ def public_draft(s):
     out["last_chat_context"] = d["chat"][-1].get("context") if d.get("chat") else None
     out["questions"] = questions.public(d)
     out["design_report"] = design_report(s, d)
+    out["feature_facts"] = {g: block_feature_facts(s, d, g) for g in value_blocks(s, d)}
+    out["near_duplicates"] = near_duplicates(s, d)
     if (out.get("metadata") or {}).get("columns"):
         for c in out["metadata"]["columns"]:
             c["provenance"] = provenance(c, ("role", "audit_kind", "label", "keep"))
@@ -2048,6 +2108,29 @@ def public_draft(s):
     out["column_ledger"] = {f: dict(x, text=accounting.ledger_text(x)) for f, x in led.items()}
     out["excluded_columns"] = accounting.excluded_columns(s, d)
     return out
+
+
+def block_feature_facts(s, d, gid):
+    """v2.4 §18 facts of one value block (cached by its columns and the layout)."""
+    from .profiling import feature_facts
+    key = (tuple(s.groups_by_id[gid]["indices"]), layout_of(d))
+    cache = s.__dict__.setdefault("_ff_cache", {})
+    if key not in cache:
+        cache[key] = feature_facts(s.cols, list(key[0]), key[1])
+    return cache[key]
+
+
+def near_duplicates(s, d):
+    """v2.4 §8.3: near-duplicate pairs among the columns outside value blocks (a fact)."""
+    from .profiling import near_duplicate_pairs
+    idx = tuple(sorted(i for g in s.groups if d["groups"][g["group_id"]]["role"] != "value" for i in g["indices"]))
+    cache = s.__dict__.setdefault("_nd_cache", {})
+    if idx not in cache:
+        pairs, skipped = near_duplicate_pairs(s.cols, idx)
+        if skipped:
+            s.log("near_duplicates_skipped", {"reason": skipped})
+        cache[idx] = {"pairs": pairs, "skipped": skipped}
+    return cache[idx]
 
 
 def unresolved_items(s, d):

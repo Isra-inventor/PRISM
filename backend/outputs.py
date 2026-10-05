@@ -15,7 +15,8 @@ from collections import Counter, OrderedDict
 from . import accounting, derive, questions
 from .parsing import cell, is_missing
 from .schema import SCHEMA_VERSION
-from .workflow import (ASSAY_FIELDS, FACT_FIELDS, FI_FIELDS, GROUP_FIELDS, SAMPLE_FIELDS, design_provenance,
+from .workflow import (ASSAY_FIELDS, FACT_FIELDS, FI_FIELDS, GROUP_FIELDS, SAMPLE_FIELDS, block_feature_facts,
+                       design_provenance,
                        design_report, design_values, layout_of, long_duplicates, provenance, sample_ids,
                        unresolved_items, value_blocks)
 
@@ -138,6 +139,7 @@ def build(s):
                 "label": it.get("label") or "", "confidence": it.get("confidence"),
                 "provenance": provenance(it, GROUP_FIELDS),
                 "profile": prof,
+                "feature_facts": block_feature_facts(s, d, g["group_id"]),
                 "n_features": len(feat_keys), "n_samples": len(sids),
             })
         if not blocks:
@@ -151,6 +153,8 @@ def build(s):
             "assay_id": aid,
             "assay_label": a_label,
             "omics_type": assay.get("omics_type") or "unknown",
+            "omics_family": {"value": assay.get("omics_family") or "unknown",
+                             "provenance": provenance(assay, ASSAY_FIELDS) if assay.get("proposed") else "user_set"},
             "source_software": assay.get("source_software") or "unknown",
             "in_supported_scope": assay.get("in_supported_scope") or "unsure",
             "scope_reason": assay.get("scope_reason") or "",
@@ -318,6 +322,7 @@ def build(s):
         "source_file": s.filename,
         "file_sha256": s.sha,
         "layout": _fact(d["layout"]),
+        "omics_family": _omics_family(schema_assays),
         "assays": schema_assays,
         "feature_annotations": [_annotation(s, gid, it, c, i)
                                 for gid, it in d["groups"].items() if it["role"] in ("feature_annotation", "feature_id")
@@ -381,6 +386,13 @@ def _check_counts(assays, lay, ledger):
         problems.append(f"the column ledger counts {led.get('value')} value columns but the assays hold {kept}")
     if problems:
         raise OutputError("Counts do not agree: " + "; ".join(problems) + ". Nothing was written.")
+
+
+def _omics_family(assays):
+    fams = list(dict.fromkeys(a["omics_family"]["value"] for a in assays))
+    if len(fams) == 1:
+        return {"value": fams[0], "provenance": assays[0]["omics_family"]["provenance"]}
+    return {"values": fams, "per_assay": {a["assay_id"]: a["omics_family"]["value"] for a in assays}}
 
 
 def _varies(rep_, file, column):

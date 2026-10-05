@@ -535,7 +535,8 @@
       ctr.append(fieldBox("Audit kind", auditKindSelect(gid)),
         fieldBox("Detail (optional)", textInput(cur(gid, "detail"), (v) => { local(gid).detail = v; }, { placeholder: cur(gid, "audit_kind") === "timepoint" ? "e.g. ordinal label, days, date" : "optional" })));
     }
-    if (role === "feature_annotation") ctr.append(el("div", { class: "full" }, suspectControls(gid)));
+    if (role === "feature_annotation") ctr.append(fieldBox("Family (optional, shared descriptor)", textInput(cur(gid, "family"), (v) => { local(gid).family = v; }, { placeholder: "e.g. plasma QC metric", list: "dl-label" })),
+      el("div", { class: "full" }, suspectControls(gid)));
     if (role === "value") {
       ctr.append(fieldBox("Assay", textInput(cur(gid, "assay_label") || assayLabels()[0], (v) => { local(gid).assay_label = v; }, { list: "dl-assay" })));
     }
@@ -938,6 +939,7 @@
       el("div", { class: "item-controls" },
         fieldBox("Assay label", textInput(v("assay_label"), set("assay_label"), { list: "dl-assay" })),
         fieldBox("Omics type (your words)", textInput(v("omics_type") === "unknown" ? "" : v("omics_type"), set("omics_type"), { placeholder: "e.g. proteomics, 16S microbiome", list: "dl-omics" })),
+        fieldBox("Omics family (closed list)", select(S.vocab.omics_family, v("omics_family") || "unknown", (x) => { l.omics_family = x; renderGuide(); })),
         fieldBox("Source software", textInput(v("source_software") === "unknown" ? "" : v("source_software"), set("source_software"), { placeholder: "unknown", list: "dl-software" })),
         fieldBox("In PRISM's supported scope?", select(S.vocab.in_supported_scope, v("in_supported_scope"), (x) => { l.in_supported_scope = x; renderGuide(); }))),
       scopeNotice({ ...a, ...l }), evidence(a.evidence));
@@ -963,7 +965,7 @@
         if (!LAYOUT_TEXT[lay]) throw new Error("Choose one of the three layouts.");
         const assays = d.assays.map((a, k) => {
           const l = S.local.assays?.[k] || {};
-          const x = { assay_label: l.assay_label ?? a.assay_label, omics_type: l.omics_type ?? a.omics_type,
+          const x = { assay_label: l.assay_label ?? a.assay_label, omics_type: l.omics_type ?? a.omics_type, omics_family: l.omics_family ?? a.omics_family,
                       source_software: l.source_software ?? a.source_software, in_supported_scope: l.in_supported_scope ?? a.in_supported_scope,
                       scope_reason: a.scope_reason };
           if (!String(x.assay_label || "").trim()) throw new Error(`Give assay ${k + 1} a label.`);
@@ -1025,12 +1027,42 @@
     const flagged = gids.filter((g) => D(g).marks_rows_as_suspect);
     if (flagged.length) body.push(el("div", { class: "notice", text: `${flagged.length} column(s) mark rows as suspect. Choose which value means ‘flagged’; nothing is removed now.` }));
     body.push(capped(gids, (g) => itemCard(g, { roles: ["feature_annotation", "feature_id", "sample_metadata", "value", "ignore"] })));
+    const nd = S.draft.near_duplicates || {};
+    if ((nd.pairs || []).length) body.push(el("details", { class: "saw" }, el("summary", { text: `${nd.pairs.length} pair(s) of near-duplicate columns (a computed fact; nothing is removed)` }),
+      el("ul", { class: "np" }, nd.pairs.map((p) => el("li", {}, code(p.columns[0]), " ≈ ", code(p.columns[1]),
+        el("span", { class: "item-sub", text: ` ${p.exact ? "identical" : Math.round(p.match_share * 1000) / 10 + "% equal"} over ${p.n_compared} rows ` }),
+        el("button", { class: "linkbtn", type: "button", text: "ask the AI", onclick: () => { S.chatDraft = `Are ${p.columns[0]} and ${p.columns[1]} the same? Should I keep both?`; openChat(p.columns); } }))))));
+    else if (nd.skipped) body.push(el("div", { class: "item-sub", text: `Near-duplicate check: ${nd.skipped}.` }));
+    const der = S.draft.derived_feature_annotations || [];
+    S.local.derA = S.local.derA || {};
+    if (der.length) body.push(el("div", { class: "section-label", text: "Derived from the feature names (names are never changed)" }),
+      el("div", { class: "items" }, der.map((x) => {
+        const l = (S.local.derA[x.name] = S.local.derA[x.name] || {});
+        const cb = el("input", { type: "checkbox", checked: (l.keep ?? x.keep) !== false });
+        cb.addEventListener("change", () => { l.keep = cb.checked; });
+        return el("div", { class: "item" }, el("div", { class: "item-head" }, el("span", { class: "item-name", text: x.name }),
+          el("span", { class: "item-sub", text: ` split at '${x.rule.delimiter}' (${x.rule.occurrence}), ${x.part} part · ${x.n_distinct} values${x.n_empty ? `, ${x.n_empty} empty` : ""} · coverage ${Math.round(x.coverage * 100)}%` })),
+          el("div", { class: "item-controls" }, fieldBox("What it is", textInput(l.label ?? x.label, (v) => { l.label = v; })),
+            el("div", { class: "full" }, el("label", { class: "check" }, cb, "keep in feature_metadata.csv"))));
+      })));
     return {
       title: `${gids.length} column(s) describe the features. Are these right?`,
       question: "Each shows the AI's description in plain words. Edit any label, role or flag directly; everything is kept unless you untick it.",
       body,
-      decision: () => { checkItems(gids); return { items: itemDecisions(gids) }; },
+      decision: () => {
+        checkItems(gids);
+        const derA = Object.entries(S.local.derA || {}).filter(([, l]) => Object.keys(l).length).map(([name, l]) => ({ name, ...l }));
+        return { items: itemDecisions(gids), ...(derA.length ? { derived_annotations: derA } : {}) };
+      },
     };
+  }
+
+  function factsLine(ff) {
+    if (!ff) return null;
+    const m = ff.per_feature_median, tz = ff.ties_at_minimum;
+    return el("div", { class: "item-sub facts" }, `Per-feature medians: p5 ${fmtNum(m.p5)} · p50 ${fmtNum(m.p50)} · p95 ${fmtNum(m.p95)}. `,
+      `Ties at the minimum: ${tz.n_features_with_2_or_more_at_min} of ${ff.n_features} features have 2+ samples at their minimum `
+      + `(share p50 ${pct(tz.share_p50)}, p90 ${pct(tz.share_p90)}, max ${pct(tz.share_max)}). Facts only.`);
   }
 
   function drawHist(canvas, h) {
@@ -1063,7 +1095,8 @@
       el("div", { class: "stats" }, [["min", p.min], ["p1", p.p1], ["median", p.median], ["p99", p.p99], ["max", p.max],
         ["zeros", pct(p.frac_zero)], ["missing", pct(p.frac_na)], ["whole numbers", p.integer_valued ? "yes" : "no"], ["span", p.log10_span != null ? `${fmtNum(p.log10_span)} decades` : "—"]]
         .map(([k, v]) => el("div", {}, el("span", { text: k }), el("b", { text: typeof v === "number" ? fmtNum(v) : v })))),
-      samples.length ? el("div", { class: "item-sub", style: "margin-top:6px" }, `Samples: ${samples.slice(0, 6).join(", ")}${samples.length > 6 ? ` … (${samples.length})` : ""}`) : null);
+      samples.length ? el("div", { class: "item-sub", style: "margin-top:6px" }, `Samples: ${samples.slice(0, 6).join(", ")}${samples.length > 6 ? ` … (${samples.length})` : ""}`) : null,
+      factsLine(S.draft.feature_facts?.[gid]));
     const described = el("div", { class: "described" },
       el("div", { class: "section-label", text: "Described by " + (it.source === "ai" ? "the AI" : it.source === "computed" ? "the known format" : "you") }),
       fieldBox("What these values are (your words)", textInput(cur(gid, "label"), (v) => { local(gid).label = v; }, { placeholder: "e.g. LFQ intensity, apparently linear", list: "dl-label" })),
@@ -1369,9 +1402,13 @@
     const body = [];
     const described = kept.map((g) => D(g).label).filter(Boolean);
     if (described.length) body.push(el("div", { class: "notice", text: `Value block(s) described as: ${described.map((x) => `“${x}”`).join(", ")}. That is only a description; please answer below.` }));
+    const facts = kept.map((g) => S.draft.feature_facts?.[g]).filter(Boolean);
     for (const q of S.historyQ) {
       const a = S.local.hist[q.id];
+      const hint = d.processing_history[q.id]?.ai_hint;
       body.push(el("div", { class: "hq" }, el("p", { text: q.question }),
+        hint ? el("div", { class: "item-sub" }, el("span", { class: "badge p-ai", text: "AI hint" }), " ", hint, " (a hint raises the question; it answers nothing)") : null,
+        ["normalized", "imputed"].includes(q.id) && facts.length ? el("div", {}, facts.slice(0, 3).map(factsLine)) : null,
         el("div", { class: "radios" }, S.vocab.yes_no_unsure.map((v) => el("label", { class: a.answer === v ? "on" : "" },
           el("input", { type: "radio", name: q.id, checked: a.answer === v, onchange: () => { a.answer = v; renderGuide(); } }), pretty(v)))),
         textInput(a.note, (x) => { a.note = x; }, { placeholder: "note (optional)", cls: "wide" })));

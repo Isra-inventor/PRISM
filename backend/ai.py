@@ -32,8 +32,8 @@ from pydantic import BaseModel, ValidationError
 from . import grouping, llm_providers as llm
 from . import config
 from .config import SCOPE_DESCRIPTION
-from .profiling import chunk_columns, chunk_units, common_pattern, name_templates
-from .schema import DEFINITIONS, PROMPT_VERSION, UNRESOLVED, VOCABULARY
+from .profiling import chunk_columns, chunk_units, common_pattern, name_templates, near_duplicate_pairs
+from .schema import DEFINITIONS, HISTORY_QUESTIONS, PROMPT_VERSION, UNRESOLVED, VOCABULARY
 from .validation import timepoint_detail, validate_feature_identity, validate_group
 
 CACHE_DIR = Path(os.environ.get("PRISM_CACHE_DIR", Path(__file__).parent / "cache"))
@@ -88,6 +88,9 @@ def build_digest(filename, cols, affixes, hints, indices, fixed=None, signature_
         "columns": [column_digest(cols, i, affixes[i], examples) for i in singles],
         "settings": {"example_values_sent": examples, "raw_rows_sent": False},
     }
+    cand = sorted(i for t in templates for i in t["indices"] if t["n_columns"] < 5 or cols.digests[i]["type"] != "numeric")
+    pairs, skipped = near_duplicate_pairs(cols, cand)
+    d["file"]["near_duplicate_columns"] = pairs if not skipped else {"skipped": skipped}
     num = [cols.labels[i] for i in indices if cols.digests[i]["type"] == "numeric"]
     if 2 <= len(num) <= 20000:
         from .design import derivation_candidates
@@ -172,6 +175,20 @@ what the statistics suggest, e.g. "LFQ intensity, apparently raw linear scale (m
 - clarifying_questions for anything you cannot resolve from the digest: a question with type
   (single / multi / confirm), text, applies_to {{columns}}, and clickable options; each option may
   carry the patches it would apply (same format and ops as in the chat). Ask instead of guessing.
+- omics_family per assay: one value of the closed list {closed['omics_family']}; omics_type stays your
+  own words.
+- Every annotation column gets its OWN specific label (what this column is, from its digest: value
+  shapes, ranges, repeated values); a shared descriptor goes in `family` (e.g. "plasma QC metric").
+- For low-cardinality text annotation columns, consider whether a value marks rows that are not
+  ordinary measured features (non-target species, controls, spike-ins, decoys, contaminants). If
+  plausible, ask a multi question "Which values mark rows to flag?" with one option per value
+  (with its count) carrying set_flag_values. Work only from the names and values in the digest.
+- near_duplicate_columns (a fact) lists pairs of columns with (nearly) identical values; you may
+  ask whether to keep both. Never drop one yourself.
+- processing_hints (optional): a short hint per processing-history question when the statistics
+  suggest something (e.g. "every column's median is close to 1: possibly median-scaled"). A hint
+  raises the question for the user; it never answers it. Platform exports may already include
+  normalization.
 - design (optional): where the subject (the individual a sample came from) and the time point come
   from: source metadata_column (a sample information column), derived_from_sample_names (with a
   derivation {{delimiter, occurrence first|last, left / right: subject | time}}; see
@@ -197,7 +214,7 @@ def response_schema():
     fact = {"type": "OBJECT", "properties": {"value": s(enum=VOCABULARY["layout"]), "confidence": n(),
                                              "evidence": s()}, "required": ["value", "confidence", "evidence"]}
     assay = {"type": "OBJECT", "properties": {
-        "assay_label": s(), "omics_type": s(), "source_software": s(),
+        "assay_label": s(), "omics_type": s(), "omics_family": s(enum=VOCABULARY["omics_family"]), "source_software": s(),
         "in_supported_scope": s(enum=VOCABULARY["in_supported_scope"]), "scope_reason": s(),
         "feature_identity": {"type": "OBJECT", "properties": {
             "group_ids": {"type": "ARRAY", "items": s()}, "composite": b()}, "required": ["group_ids"]},
@@ -230,6 +247,8 @@ def response_schema():
         "clarifying_questions": questions_schema(),
         "propose_merge": merges_schema(),
         "design": design_schema(),
+        "processing_hints": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+            "question": s(enum=[q for q, _ in HISTORY_QUESTIONS]), "hint": s()}, "required": ["question", "hint"]}},
     }, "required": ["layout", "assays", "groups"]}
 
 
@@ -273,6 +292,14 @@ computed statistics, and join facts: how many of the data file's sample names it
 - design: where the subject and the time come from (a metadata column, a rule over the sample
   names using data.derivation_candidates, or none). Never state the time unit: it is asked.
 - clarifying_questions (with options) for anything you cannot decide from the digest."""
+
+
+RELABEL_PROMPT = """
+
+## This call: column-specific labels
+Several annotation columns were all given the same label. For EACH column listed, write its own
+specific label (what this column is, from its digest: value shapes, ranges, repeated values,
+name). Put a descriptor they share in `family`. Never reuse one label for several columns."""
 
 
 PATCH_OPS = ["set_keep", "set_role", "set_audit_kind", "set_label", "set_block_keep", "merge_groups", "split_group",
@@ -379,6 +406,13 @@ def metadata_schema():
         "clarifying_questions": questions_schema()}, "required": ["columns"]}
 
 
+def relabel_schema():
+    s = lambda **k: dict(type="STRING", **k)
+    return {"type": "OBJECT", "properties": {"labels": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+        "column": s(), "label": s(), "family": s(nullable=True)}, "required": ["column", "label"]}}},
+        "required": ["labels"]}
+
+
 def consolidation_schema():
     s = lambda **k: dict(type="STRING", **k)
     final = {"type": "OBJECT", "properties": {
@@ -410,6 +444,7 @@ class FeatureIdentity(BaseModel):
 class Assay(BaseModel):
     assay_label: str
     omics_type: str = "unknown"
+    omics_family: Optional[str] = "unknown"
     source_software: Optional[str] = "unknown"
     in_supported_scope: str = "unsure"
     scope_reason: Optional[str] = ""
@@ -505,6 +540,10 @@ class MetadataResponse(BaseModel):
     clarifying_questions: List[AIQuestion] = []
 
 
+class RelabelResponse(BaseModel):
+    labels: List[dict] = []
+
+
 class ChatResponse(BaseModel):
     reply: str = ""
     patches: List[Patch] = []
@@ -520,6 +559,7 @@ class ConsolidationResponse(BaseModel):
 
 class AIResponse(BaseModel):
     design: Optional[dict] = None
+    processing_hints: List[dict] = []
     propose_merge: List[Merge] = []
     layout: Optional[Fact] = None
     assays: List[Assay] = []
@@ -555,6 +595,7 @@ def _call(digest, sha, log=None, mock_fn=None, kind="digest"):
                           ConsolidationResponse),
         "chat": ("Chat (JSON):", BRIEFING + CHAT_PROMPT, chat_schema(), ChatResponse),
         "metadata": ("Metadata (JSON):", BRIEFING + METADATA_PROMPT, metadata_schema(), MetadataResponse),
+        "relabel": ("Relabel (JSON):", BRIEFING + RELABEL_PROMPT, relabel_schema(), RelabelResponse),
     }[kind]
     ok, why = llm.available()
     meta = {"provider": llm.provider_name(), "model": llm.model_list()[0] if ok else None,
@@ -641,6 +682,9 @@ def read_chunk(resp, indices, label_to_idx, ns, out, tmap=None):
     rej = out["rejected"]
     if resp.design and not out.get("design"):
         out["design"] = resp.design
+    for h in resp.processing_hints or []:
+        if h.get("question") in dict(HISTORY_QUESTIONS) and h.get("hint"):
+            out.setdefault("processing_hints", {}).setdefault(h["question"], str(h["hint"])[:300])
     tmap, labels = tmap or {}, {i: lab for lab, i in label_to_idx.items()}
     for gl in resp.groups:
         for tp in gl.templates or []:
@@ -676,6 +720,7 @@ def read_chunk(resp, indices, label_to_idx, ns, out, tmap=None):
         fi = a.feature_identity or FeatureIdentity()
         out["assays"].append({
             "assay_label": a.assay_label.strip() or "assay", "omics_type": a.omics_type or "unknown",
+            "omics_family": a.omics_family if a.omics_family in VOCABULARY["omics_family"] else "unknown",
             "source_software": a.source_software or "unknown",
             "in_supported_scope": a.in_supported_scope if a.in_supported_scope in VOCABULARY["in_supported_scope"]
             else "unsure", "scope_reason": a.scope_reason or "",
@@ -765,6 +810,7 @@ def _final_item(fg):
 def _assay_entry(a, ns="", map_fid=None):
     fi = a.feature_identity or FeatureIdentity()
     return {"assay_label": a.assay_label.strip() or "assay", "omics_type": a.omics_type or "unknown",
+            "omics_family": a.omics_family if a.omics_family in VOCABULARY["omics_family"] else "unknown",
             "source_software": a.source_software or "unknown",
             "in_supported_scope": a.in_supported_scope if a.in_supported_scope in VOCABULARY["in_supported_scope"] else "unsure",
             "scope_reason": a.scope_reason or "",
@@ -971,6 +1017,18 @@ def propose_metadata(filename, sha, cols, facts, data_ctx, fixed=None, log=None,
         meta = dict(meta, error=next(m["error"] for m in metas if m.get("error")))
     ok = any(m.get("error") is None for m in metas)
     return (merged if ok else None), meta, digests
+
+
+def relabel(cols, affixes, indices, shared_label, sha, log=None, mock_fn=None):
+    """One retry for annotation columns that all got the same label (v2.4 §8.1)."""
+    examples = send_examples()
+    payload = {"shared_label": shared_label, "instruction": "Give each column its own specific label.",
+               "columns": [column_digest(cols, i, affixes[i], examples) for i in indices]}
+    resp, meta = _call(payload, sha, log, mock_fn, kind="relabel")
+    if resp is None:
+        return None, meta.get("error")
+    names = {cols.labels[i] for i in indices}
+    return {x["column"]: x for x in resp.labels if x.get("column") in names and (x.get("label") or "").strip()}, None
 
 
 def chat(payload, sha, log=None, mock_fn=None):

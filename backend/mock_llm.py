@@ -183,6 +183,10 @@ class MockLLM:
             return MockLLM.chat(json.loads(prompt.split("\n", 1)[1]))
         if prompt.startswith("Metadata"):
             return MockLLM.metadata(json.loads(prompt.split("\n", 1)[1]))
+        if prompt.startswith("Relabel"):
+            p = json.loads(prompt.split("\n", 1)[1])
+            return json.dumps({"labels": [{"column": c["column"], "label": f"{c['column']} ({c['type']})",
+                                           "family": p["shared_label"]} for c in p["columns"]]})
         digest = json.loads(prompt.split("\n", 1)[1])
         hints = digest["file"]["layout_hints"]
         fixed = digest.get("already_confirmed") or {}
@@ -284,16 +288,32 @@ class MockLLM:
                 design = {"subject": {"source": "metadata_column", "column": subj, "file": "main"} if subj else {"source": "none"},
                           "time": {"source": "metadata_column", "column": tim, "file": "main"} if tim else {"source": "none"},
                           "confidence": 0.7, "evidence": "mock: subject / time columns"}
+        questions = []
+        for c in entries:
+            vals = [v for v in (c.get("values") or [])]
+            odd = [v for v in vals if re.search(r"(?i)non.?human|decoy|reverse|contaminant|spuriomer|control", v["value"])]
+            if odd and c["type"] != "numeric" and not c.get("_template"):
+                questions.append({"type": "multi", "text": f"Which values of '{c['column']}' mark rows to flag?",
+                                  "applies_to": {"columns": [c["column"]]}, "allow_free_text": True,
+                                  "options": [{"label": f"{v['value']} ({v['count']} rows)", "patches": [
+                                      {"op": "set_flag_values", "target": {"selector": {"columns": [c["column"]]}},
+                                       "args": {"flagged_values": [v["value"]]}, "reason": "mock"}]} for v in vals]})
+        hints = []
+        meds = [g["profile"].get("median") for g, e in zip(proposed, groups) if e["role"] == "value"]
+        if meds and all(m and 0.5 <= m <= 2 for m in meds):
+            hints.append({"question": "normalized", "hint": "Every value block's median is close to 1: possibly median-scaled."})
         return json.dumps({
             "design": design,
+            "processing_hints": hints,
             "layout": {"value": layout, "confidence": 0.8, "evidence": "mock: from layout hints"},
             "assays": [{"assay_label": lab, "omics_type": om, "source_software": "unknown",
+                        "omics_family": om if om in ("proteomics", "metabolomics") else "unknown",
                         "in_supported_scope": "yes" if om in ("proteomics", "metabolomics") else "unsure",
                         "scope_reason": "mock", "feature_identity": {"group_ids": fid, "composite": len(fid) > 1},
                         "confidence": 0.7, "evidence": "mock: from column names"} for lab, om in assays.items()],
             "groups": groups,
             "samples": samples,
-            "clarifying_questions": [],
+            "clarifying_questions": questions,
             "propose_merge": [],
         })
 

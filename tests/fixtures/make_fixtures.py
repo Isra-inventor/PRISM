@@ -213,7 +213,7 @@ def k_somascan_nhp(rng, n_features=400):
     for k in range(n_features):
         gene = f"G{k % 350}"
         uni = f"P{10000 + k:05d}"
-        typ = types[k % len(types)] if k % 7 == 0 else "Protein"
+        typ = types[(k // 7) % len(types)] if k % 7 == 0 else "Protein"
         base = rng.gauss(3.1, 0.5)
         a = {"Target": f"T{k}", "Target Name": f"T{k}", "TargetFullName": f"Target protein {k}", "UniProt": uni,
              "UniProt ID": uni if k % 50 else "", "EntrezGeneID": str(1000 + k % 350), "EntrezGeneSymbol": gene,

@@ -54,6 +54,12 @@ def one_block_with_metadata(flow, monkeypatch):
     r = f.c.post("/api/metadata-upload", data={"session_id": f.sid}, files={"file": (KM, fixture_bytes(KM))})
     assert r.status_code == 200, r.text
     f.draft = r.json()["draft"]
+    for q in [q for q in f.draft["questions"] if q["text"].startswith("Which values of") and q["status"] == "open"]:
+        assert q["type"] == "multi"                                   # suspect rows: asked, never assumed
+        ids = [o["option_id"] for o in q["options"] if o["label"].startswith("Non-Human")]
+        r = f.c.post("/api/question/answer", json={"session_id": f.sid, "question_id": q["question_id"], "option_ids": ids})
+        assert r.status_code == 200, r.text
+        f.draft = r.json()["draft"]
     return f
 
 
@@ -83,6 +89,9 @@ def test_metadata_columns_go_through_the_ai_and_the_join_is_recorded(flow, monke
     assert smd["study_group"]["varies_within_subject"] is False         # constant per animal
     assert smd["viral_load"]["varies_within_subject"] is True
     assert "nhp_week_index" in smd                                      # nothing disappears silently
+    ann = {x["column"]: x for x in out["feature_annotations"]}
+    assert ann["Type_meta"]["marks_rows_as_suspect"] and ann["Type_meta"]["flagged_values"] == ["Non-Human"]
+    assert ann["Type_meta"]["flag_counts"] == {"Non-Human": 2}
 
 
 def test_design_facts_for_the_nhp_study(flow, monkeypatch):

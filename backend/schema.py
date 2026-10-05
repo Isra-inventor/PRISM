@@ -8,8 +8,8 @@ written by the AI (or the user) and are never enumerated here.
 
 from .config import SCOPE_DESCRIPTION
 
-SCHEMA_VERSION = "0.3.3"
-PROMPT_VERSION = "step0-v3.3"
+SCHEMA_VERSION = "0.4.0"
+PROMPT_VERSION = "step0-v4.0"
 UNRESOLVED = "unresolved"
 
 VOCABULARY = {
@@ -23,6 +23,9 @@ VOCABULARY = {
                    "group", "covariate", "other"],
     "yes_no_unsure": ["yes", "no", "not_sure"],
     "in_supported_scope": ["yes", "no", "unsure"],
+    # v2.4 §11: a deliberate exception to "open labels": the audit steps branch on it
+    "omics_family": ["proteomics", "metabolomics", "lipidomics", "transcriptomics", "epigenomics", "genomics",
+                     "microbiome", "other", "unknown"],
     "provenance": ["computed", "ai_proposed_confirmed", "ai_proposed_corrected", "user_set"],
     "booleans": ["keep", "marks_rows_as_suspect", "is_study_sample"],
 }
@@ -45,6 +48,8 @@ DEFINITIONS = {
               "PRISM never decides which variable is the research outcome."),
     "covariate": "Any other sample characteristic (age, sex, CD4 count, iron...).",
     "other": "Sample information that fits none of the above.",
+    "omics_family": ("What kind of omics an assay is, from a closed list (the audit steps branch on it). "
+                     "omics_type stays free text."),
     "samples_in_columns": "Each row is one feature; each sample has its own column.",
     "samples_in_rows": "Each row is one sample; each feature has its own column.",
     "long": "Each row is one (feature, sample) pair with a single value column.",
