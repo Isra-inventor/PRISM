@@ -170,4 +170,9 @@ def publish_output(study, did, src_output, origin_manifest):
     study.set_status(did, "confirmed")
     study.log("dataset_confirmed", {"dataset_id": did, "schema_sha256": manifest["schema_sha256"],
                                     "mode": origin_manifest.get("mode")})
+    try:   # keep session_schema.json / session_sample_table.csv current; the merge report rewrites them anyway
+        from .session import merge
+        merge.write(study)
+    except Exception as e:
+        study.log("merge_outputs_not_written", {"error": str(e)})
     return manifest

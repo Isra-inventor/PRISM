@@ -147,3 +147,55 @@ def step0_state(step0_sid: str):
     if s.draft is None:
         raise HTTPException(409, "No proposal yet.")
     return {"session": session_payload(s), "draft": workflow.public_draft(s), "digests": s.digests}
+
+
+# ---------------------------------------------------------------- merge (v3 §5)
+
+
+def _merge(sid, fn):
+    from prism.session import merge
+    st = _load(sid)
+    try:
+        return fn(st, merge)
+    except merge.MergeError as e:
+        raise HTTPException(422, str(e))
+
+
+@router.get("/api/sessions/{sid}/merge-report")
+def merge_report(sid: str):
+    return _merge(sid, lambda st, m: m.report(st))
+
+
+class MergeDecision(BaseModel):
+    item_id: str
+    decision: str
+    unified_id: Optional[str] = None
+
+
+@router.post("/api/sessions/{sid}/merge/confirm-mapping")
+def merge_confirm_mapping(sid: str, req: MergeDecision):
+    """An ID suggestion: confirm (optionally with the unified ID to use), dismiss or reopen."""
+    if not req.item_id.startswith("ms"):
+        raise HTTPException(422, "Not an ID suggestion.")
+    return _merge(sid, lambda st, m: m.decide(st, req.item_id, req.decision, "user", req.unified_id))
+
+
+@router.post("/api/sessions/{sid}/merge/resolve-conflict")
+def merge_resolve_conflict(sid: str, req: MergeDecision):
+    """A value conflict (take:D1 / keep_both / drop / reopen) or a merge question (option or dismiss)."""
+    if not req.item_id.startswith(("mc", "mq")):
+        raise HTTPException(422, "Not a conflict or a merge question.")
+    return _merge(sid, lambda st, m: m.decide(st, req.item_id, req.decision, "user"))
+
+
+@router.post("/api/sessions/{sid}/merge/mapping-csv")
+async def merge_mapping_csv(sid: str, file: UploadFile = File(...)):
+    raw = await file.read(MAX_BYTES + 1)
+    if len(raw) > MAX_BYTES:
+        raise HTTPException(413, "File is too large.")
+    return _merge(sid, lambda st, m: m.set_mapping_csv(st, raw, file.filename or "mapping.csv"))
+
+
+@router.delete("/api/sessions/{sid}/merge/mapping-csv")
+def merge_clear_mapping_csv(sid: str):
+    return _merge(sid, lambda st, m: m.clear_mapping_csv(st))

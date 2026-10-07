@@ -72,6 +72,8 @@
       el("div", { class: "sb-head" }, el("b", { text: "Session " }), el("code", { text: ST.session_id }),
         el("span", { class: "spacer" }),
         el("button", { class: "linkbtn", type: "button", text: "Add another dataset", onclick: showStart }),
+        ST.datasets.filter((d) => d.status === "confirmed").length > 1 ?
+          el("button", { class: "linkbtn", type: "button", id: "open-merge", text: "Merge", onclick: () => showMerge() }) : null,
         el("button", { class: "linkbtn", type: "button", text: "New session", onclick: async () => { ST = null; store.set(null); await ensure(); showStart(); } }),
         el("button", { class: "btn btn-sm", type: "button", id: "run-audit", disabled: !ready(), title: ready() ? "Run the Tier 1 audit" : "Every dataset must be confirmed first",
           text: "Run audit", onclick: () => window.PRISM_AUDIT && window.PRISM_AUDIT.open(ST) })),
@@ -183,7 +185,75 @@
             if (await act("reject")) { show(box, false); showStart(); } } }))));
   }
 
-  window.PRISM_SESSION = { ensure, refresh, showStart, current: () => ST };
+
+  // ---------------------------------------------------------------- merge (v3 §5)
+  const MCOLS = { single: "one dataset", merged: "merged", taken: "taken from one dataset", kept_per_dataset: "kept per dataset",
+                  dropped: "dropped", conflict_open: "conflict: both kept until resolved" };
+  async function showMerge() {
+    const box = $("panel-import");
+    const base = `/api/sessions/${ST.session_id}`;
+    let doc;
+    try { doc = await api(`${base}/merge-report`, undefined, "GET"); } catch (e) { alert(e.message); return; }
+    show($("panel-upload"), false); show($("workspace"), false); show(box);
+    const x = doc.cross_dataset;
+    const decide = async (path, body) => { try { await api(`${base}/merge/${path}`, body); } catch (e) { alert(e.message); } showMerge(); };
+    const csvIn = el("input", { type: "file", accept: ".csv,text/csv" });
+    const sug = x.id_mapping.suggestions || [];
+    box.replaceChildren(
+      el("div", { class: "panel-head" }, el("h2", { text: "Merge the datasets" }),
+        el("span", { class: `pill ${doc.ready_for_audit ? "mode-exact" : "mode-template"}`, text: doc.ready_for_audit ? "Ready for audit" : "Not ready yet" })),
+      el("div", { class: "panel-body" },
+        el("p", { class: "q", text: "Sample IDs are compared exactly; near misses are only suggested. Nothing is mapped or merged until you decide, and the IDs in the datasets are never rewritten." }),
+        doc.blocking.length ? el("ul", { class: "warns" }, doc.blocking.map((b) => el("li", { text: b }))) : null,
+        el("div", { class: "section-label", text: "Sample overlap" }),
+        el("table", { class: "ledger" }, el("thead", {}, el("tr", {}, ["pair", "shared", "only in first", "only in second", "Jaccard"].map((h) => el("th", { text: h })))),
+          el("tbody", {}, x.sample_overlap.pairs.map((p) => el("tr", {}, el("td", { text: `${p.a} · ${p.b}` }), el("td", { text: p.n_shared }),
+            el("td", { text: p.n_only_a, title: p.only_a.join(", ") }), el("td", { text: p.n_only_b, title: p.only_b.join(", ") }), el("td", { text: p.jaccard ?? "—" }))))),
+        el("p", { class: "item-sub", text: `${x.sample_overlap.n_unified} unified sample(s), ${x.sample_overlap.n_in_all} in every dataset.` }),
+        el("div", { class: "section-label", text: `ID suggestions (${sug.length})` }),
+        sug.length ? sug.map((g) => el("div", { class: `question${g.status === "open" ? "" : " done"}` },
+          el("b", { text: `${g.a.dataset_id} '${g.a.sample_id}'  ≈  ${g.b.dataset_id} '${g.b.sample_id}'` }), ` (differ by: ${g.rules.join(", ")}) · ${g.status.replace(/_/g, " ")}`,
+          el("div", { class: "question-opts" },
+            g.status === "open" ? [el("button", { class: "btn btn-sm", type: "button", text: `Same sample (unified ID '${g.a.sample_id}')`, onclick: () => decide("confirm-mapping", { item_id: g.suggestion_id, decision: "confirm" }) }),
+              el("button", { class: "linkbtn", type: "button", text: "Dismiss", onclick: () => decide("confirm-mapping", { item_id: g.suggestion_id, decision: "dismiss" }) })]
+              : el("button", { class: "linkbtn", type: "button", text: "Reopen", onclick: () => decide("confirm-mapping", { item_id: g.suggestion_id, decision: "reopen" }) }))))
+          : el("p", { class: "item-sub", text: "None." }),
+        el("div", { class: "section-label", text: "Mapping file (dataset_id, sample_id, unified_id)" }),
+        el("div", { class: "question-opts" }, csvIn,
+          el("button", { class: "btn btn-sm", type: "button", text: "Upload mapping", onclick: async () => {
+            if (!csvIn.files[0]) return; const fd = new FormData(); fd.append("file", csvIn.files[0]); await decide("mapping-csv", fd); } }),
+          x.id_mapping.mapping_csv ? el("button", { class: "linkbtn", type: "button", text: `Remove ${x.id_mapping.mapping_csv.name}`, onclick: async () => {
+            try { await api(`${base}/merge/mapping-csv`, undefined, "DELETE"); } catch (e) { alert(e.message); } showMerge(); } }) : null),
+        x.id_mapping.entries.length ? el("p", { class: "item-sub", text: `${x.id_mapping.entries.length} sample(s) mapped: ` + x.id_mapping.entries.slice(0, 10).map((e) => `${e.dataset_id} ${e.sample_id} → ${e.unified_id}`).join("; ") }) : null,
+        el("div", { class: "section-label", text: `Value conflicts (${x.conflicts.length})` }),
+        x.conflicts.length ? x.conflicts.map((c) => el("div", { class: `question${c.status === "open" ? "" : " done"}` },
+          el("b", { text: `'${c.column}' (${c.audit_kind}): ${c.n_disagree} shared sample(s) disagree` }), c.resolution ? ` · ${c.resolution}` : "",
+          el("div", { class: "item-sub", text: c.disagreements.slice(0, 5).map((d) => `${d.unified_id}: ` + Object.entries(d.values).map(([k, v]) => `${k}=${v}`).join(" / ")).join("  ·  ") }),
+          el("div", { class: "question-opts" }, c.options.map((o) => el("button", { class: `btn btn-sm${c.resolution === o ? " sel" : ""}`, type: "button", text: o.replace("take:", "take ").replace("_", " "),
+            onclick: () => decide("resolve-conflict", { item_id: c.conflict_id, decision: o }) })))))
+          : el("p", { class: "item-sub", text: "None." }),
+        el("div", { class: "section-label", text: `Questions (${x.questions.length})` }),
+        x.questions.length ? x.questions.map((q) => el("div", { class: `question${q.status === "open" ? "" : " done"}` },
+          el("b", { text: q.text }), q.status !== "open" ? ` · ${q.answer || q.status}` : "",
+          el("div", { class: "question-opts" }, q.options.map((o) => el("button", { class: "btn btn-sm", type: "button", text: o.label,
+            onclick: () => decide("resolve-conflict", { item_id: q.question_id, decision: o.option_id }) })),
+            el("button", { class: "linkbtn", type: "button", text: q.status === "open" ? "Dismiss" : "Reopen",
+              onclick: () => decide("resolve-conflict", { item_id: q.question_id, decision: q.status === "open" ? "dismiss" : "reopen" }) }))))
+          : el("p", { class: "item-sub", text: "None." }),
+        el("div", { class: "section-label", text: "Design agreement" }),
+        el("ul", { class: "np" }, x.design_agreement.map((d) => el("li", {}, `${d.a} · ${d.b}: subject `,
+          d.subject ? (d.subject.agree ? "agrees" : `${d.subject.n_disagree} disagree`) : "not compared",
+          ", time ", d.time ? (d.time.agree ? "agrees" : `${d.time.n_disagree} disagree`) : "not compared",
+          d.time_unit ? ` (units ${d.time_unit[d.a] || "?"} / ${d.time_unit[d.b] || "?"})` : ""))),
+        x.column_suggestions.length ? el("div", {}, el("div", { class: "section-label", text: "Columns that look the same (suggestion only, not merged)" }),
+          el("ul", { class: "np" }, x.column_suggestions.map((c) => el("li", { text: `${c.a.dataset_id} '${c.a.column}' = ${c.b.dataset_id} '${c.b.column}' on ${c.n_shared} shared samples` })))) : null,
+        el("div", { class: "section-label", text: "Unified sample table" }),
+        el("ul", { class: "np" }, x.columns.map((c) => el("li", { text: `${c.column}: ${c.take ? `taken from ${c.take}` : MCOLS[c.status] || c.status} (${[].concat(c.datasets).join(", ")})` }))),
+        el("div", { class: "guide-actions" },
+          el("button", { class: "btn btn-light btn-sm", type: "button", text: "Close", onclick: () => { show(box, false); showStart(); } }))));
+  }
+
+  window.PRISM_SESSION = { ensure, refresh, showStart, showMerge, current: () => ST };
   const saved = store.get();
   if (saved) load(saved); else renderBar();
 })();

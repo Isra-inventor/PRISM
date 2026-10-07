@@ -6,6 +6,8 @@
     python -m prism session add --session SESSION --output STEP0_OUTPUT_FOLDER [--name N]
     python -m prism import --data X --schema S [--metadata M] --session SESSION
     python -m prism session merge-report --session SESSION
+    python -m prism session merge-decide --session SESSION ITEM_ID DECISION [--unified-id U]
+    python -m prism session merge-mapping --session SESSION MAPPING.csv
     python -m prism audit run --session SESSION [--factor A4] [--dataset D1] [--param key=value]
     python -m prism audit show --session SESSION [--run RUN]
     python -m prism audit report --session SESSION [--run RUN] --format html|json
@@ -33,6 +35,15 @@ def _session_cmds(sub):
     a.add_argument("--name", default=None)
     m = s2.add_parser("merge-report")
     m.add_argument("--session", required=True)
+    md = s2.add_parser("merge-decide", help="decide on a merge item: ms.. confirm|dismiss, mc.. take:D1|keep_both|drop, "
+                                            "mq.. an option or dismiss")
+    md.add_argument("--session", required=True)
+    md.add_argument("item_id")
+    md.add_argument("decision")
+    md.add_argument("--unified-id", default=None)
+    mm = s2.add_parser("merge-mapping", help="upload a mapping CSV (dataset_id, sample_id, unified_id)")
+    mm.add_argument("--session", required=True)
+    mm.add_argument("csv")
 
 
 def _audit_cmds(sub):
@@ -95,6 +106,12 @@ def main(argv=None):
     except store.SessionError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    except Exception as e:
+        from .session.merge import MergeError
+        if isinstance(e, MergeError):
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        raise
 
 
 def _dispatch(args):
@@ -118,6 +135,15 @@ def _dispatch(args):
         elif args.action == "merge-report":
             from .session import merge
             print(json.dumps(merge.report(store.load(args.session)), indent=2))
+        elif args.action == "merge-decide":
+            from .session import merge
+            doc = merge.decide(store.load(args.session), args.item_id, args.decision, "user", args.unified_id)
+            print("ready for audit" if doc["ready_for_audit"] else "\n".join(doc["blocking"]))
+        elif args.action == "merge-mapping":
+            from pathlib import Path
+            from .session import merge
+            doc = merge.set_mapping_csv(store.load(args.session), Path(args.csv).read_bytes(), Path(args.csv).name)
+            print(f"{len(doc['cross_dataset']['id_mapping']['entries'])} mapped sample(s)")
         return 0
     if args.cmd == "import":
         from .io import importer
