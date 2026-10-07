@@ -11,6 +11,8 @@ median_scaling_mad: 0.5            # heuristic: MAD of log2 per-feature medians 
 sentinel_share: 0.01               # heuristic: one value covering this share of cells
 near_duplicate_r: 0.9999           # heuristic
 floor_min_observed: 5              # features need this many observed values for floor ties
+floor_tie_share_indicator: 0.01    # heuristic: floor ties are reported as "present" from this share of features
+narrow_median_spread: 0.05         # heuristic: MAD (log2) of sample medians below this reads as normalized
 abundance_rho_indicator: -0.1      # heuristic: rho at or below this gets the censoring sentence
 time_ordered_max_levels: 12        # time is an ordered factor up to this many values, else numeric
 categorical_max_levels: 20         # categorical covariates with 2 to this many levels

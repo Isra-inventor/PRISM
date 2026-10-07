@@ -26,6 +26,11 @@ TEMPLATES = {
                           "consistent with values set to a floor (for example a detection limit or an imputed minimum).",
     "abundance_dependent_missingness": "Lower-abundance features have more {what} values (Spearman rho {rho} over "
                                        "{n} features), consistent with detection-limit censoring.",
+    "declared_not_imputed_floor_ties": "Declared not imputed, but {pct}% of features have two or more samples at their "
+                                       "minimum: a plausible indicator of imputation with a minimum or a floor value.",
+    "declared_not_normalized_signature": "Declared not normalized, but the values show a {what}: consistent with "
+                                         "normalization or scaling before upload.",
+    "declared_not_logged_log_like": "Declared not log-transformed, but {what}: consistent with log-scale values.",
     "missingness_associated": "The per-sample {what} rate differs with '{variable}' (permutation p {p}, q {q}).",
     # A5
     "few_samples_per_feature": "There are {n} samples for {p} features (n/p = {ratio}).",
@@ -54,6 +59,31 @@ TEMPLATES = {
     "outlier_cells": "{n_cells} cell(s) in {n_features} feature(s) have a within-feature modified z beyond {cut}.",
     "outlier_max_cell": "The largest value of stratum '{stratum}', {value} ({feature}, sample {sample}), is a plausible "
                         "outlier cell (modified z {z}, cut-off {cut}).",
+    # A1
+    "dimension_mismatch": "Block {block} is {file} in the file but {schema} in the schema.",
+    "duplicate_feature_keys": "{n} feature key(s) occur more than once.",
+    "duplicate_sample_ids": "{n} sample ID(s) occur more than once.",
+    "samples_x_vs_m": "{a} sample(s) of the matrix are missing from the sample table and {b} sample(s) of the table "
+                      "are missing from the matrix.",
+    "unparsable_cells": "{n} cell(s) could not be read as numbers and are treated as missing.",
+    "infinite_values": "{n} cell(s) are infinite.",
+    "constant_features": "{n} feature(s) are constant over their observed values.",
+    "sparse_features": "{n} feature(s) have fewer than 3 observed values.",
+    "duplicate_samples": "Samples {samples} have identical values: a plausible indicator of a duplicated column.",
+    "duplicate_features": "{n} group(s) of features have identical values.",
+    "near_duplicate_samples": "Samples '{a}' and '{b}' correlate at r = {r}: a plausible indicator of a near-duplicate.",
+    # A6
+    "roles_needed": "{n} sample(s) are not study samples and have no role (qc, blank, pool): set sample roles to "
+                    "audit QC precision.",
+    "qc_rsd": "Across {n_qc} QC/pool samples the median feature RSD is {median}%; {pct}% of features exceed {hi}%.",
+    "run_order_drift": "The per-sample median changes with '{variable}' (Spearman rho {rho}): consistent with "
+                       "run-order drift.",
+    "suspect_rows": "{n} feature(s) are marked suspect in Step 0 ({cols}); flagged and unflagged features are compared.",
+    # A9
+    "single_source": "'{variable}' has a single level ({level}): homogeneous (single source).",
+    "source_association": "'{variable}' is associated with the data ({what}, q {q}).",
+    # A10
+    "layer_overlap": "{a} and {b} share {n} sample(s) ({only_a} only in {a}, {only_b} only in {b}; Jaccard {j}).",
     # A2
     "scale_class": "The values look like {text}.",
     "out_of_scope_type": "Tier 1 does not audit {what}: the other audits report not_applicable.",

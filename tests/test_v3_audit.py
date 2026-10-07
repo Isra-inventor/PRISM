@@ -210,8 +210,8 @@ def test_contract_determinism_params_and_read_only(st, tmp_path):
     # factor selection
     d = engine.run(st, factors=["missingness"])
     assert {i["audit_id"] for i in d["findings"]} == {"A4"}
-    with pytest.raises(engine.AuditError, match="not built yet"):
-        engine.run(st, factors=["A1"])
+    with pytest.raises(engine.AuditError, match="Unknown audit"):
+        engine.run(st, factors=["A12"])
 
 
 def test_overrides_change_what_is_used(st, tmp_path):
@@ -318,6 +318,13 @@ def test_golden_real_files(client, isolated):
     # reported back (v3 §9, "expected but unverified"): the median-scaling signature
     assert find(man, st, "A2", "D2")["measures"]["median_scaling"]["signature"] is True
     assert find(man, st, "A2", "D1")["measures"]["median_scaling"]["signature"] is False
+    # declared vs observed: metabolomics (imputed: no, normalized: no) emits both; SomaScan no imputation one
+    dvo = {(r["dataset"], r["item"]): r["status"] for r in man["declared_vs_observed"]}
+    assert dvo[("D2", "imputed")] == "mismatch" and dvo[("D2", "normalized")] == "mismatch"
+    assert dvo[("D1", "imputed")] == "consistent"
+    assert "declared_not_imputed_floor_ties" not in [i["code"] for i in find(man, st, "A4", "D1")["indicators"]]
+    a10 = engine.finding(st, man["run_id"], "A10__session.json")["measures"]
+    assert a10["overlap"]["pairs"][0]["n_shared"] == 27 and a10["overlap"]["open_id_suggestions"] == 0
 
 
 # ------------------------------------------------------------------ stage 5: A7, A11, A2, A3
@@ -384,3 +391,136 @@ def test_scale_classes(st, tmp_path):
     assert find(man, st, "A3", "D1")["status"] == "not_applicable"
     assert find(man, st, "A2", "D5")["measures"]["median_scaling"]["signature"] is True
     assert find(man, st, "A3", "D4")["method"]["transform"]["transform"] == "none"
+
+
+# ------------------------------------------------------------------ stage 6: A1, A6, A9, A10, declared vs observed
+
+
+def test_integrity(st, tmp_path):
+    rng = np.random.default_rng(4)
+    X = 2.0 ** rng.normal(8, 1, size=(30, 8))
+    X[:, 7] = X[:, 6]                        # duplicate sample column
+    X[:, 5] = X[:, 4] * 1.0000001            # near-duplicate on log scale
+    X[3] = 5.0                               # constant feature
+    X[4, :6] = np.nan                        # fewer than 3 observed
+    X[5, 0] = np.inf
+    X[10] = X[11]                            # duplicate features
+    samples = [f"S{i}" for i in range(8)]
+    out = af.make_output(tmp_path / "integ", X=X, samples=samples)
+    doc = json.loads((out / "schema.json").read_text())
+    doc["assays"][0]["value_blocks"][0]["n_features"] = 31          # schema disagrees with the file
+    (out / "schema.json").write_text(json.dumps(doc))
+    lines = (out / "sample_metadata.csv").read_text().splitlines()
+    (out / "sample_metadata.csv").write_text("\n".join(lines[:-1]) + "\n")   # S7 missing from the table
+    d = st.add_dataset("integ", "output_folder", "imported_awaiting_confirm")
+    store.publish_output(st, d["dataset_id"], out, {"mode": "output_folder"})
+    man = engine.run(st, factors=["A1"])
+    f = find(man, st, "A1")
+    m = f["measures"]
+    codes = {i["code"] for i in f["indicators"]}
+    assert {"dimension_mismatch", "infinite_values", "constant_features", "sparse_features", "duplicate_samples",
+            "duplicate_features", "near_duplicate_samples", "samples_x_vs_m"} <= codes
+    assert m["dimensions"][0]["schema"] == [31, 8] and m["dimensions"][0]["file"] == [30, 8]
+    assert m["duplicate_samples"] == [["S6", "S7"]] and m["ids"]["in_x_not_in_m"] == ["S7"]
+    assert m["cells"]["infinite"] == 1 and "f3" in m["constant_features"]["examples"]
+    assert m["top_sample_correlations"][0]["r"] >= 0.9999
+
+
+def test_noise_qc_roles_and_drift(st, tmp_path):
+    rng = np.random.default_rng(5)
+    n, p = 16, 200
+    samples = [f"S{i:02d}" for i in range(n)]
+    base = rng.normal(10, 2, size=(p, 1))
+    L = base + rng.normal(0, 1, size=(p, n))
+    qc = [0, 5, 10, 15]
+    L[:, qc] = base + rng.normal(0, 0.1, size=(p, len(qc)))          # QC: ~7% RSD
+    order = np.arange(n)
+    L += 0.08 * order[None, :]                                        # drift with run order
+    is_study = [i not in qc for i in range(n)]
+    suspect = {"Type": {"values": ["ctrl" if i < 10 else "protein" for i in range(p)], "marks_rows_as_suspect": True,
+                        "flagged_values": ["ctrl"]},
+               "QC_CV": {"values": [str(round(float(x), 3)) for x in rng.random(p)]}}
+    af.add(st, tmp_path / "qc", X=2.0 ** L, samples=samples, is_study=is_study,
+           columns={"run": [str(i + 1) for i in order]}, kinds={"run": "run_order"}, annotations=suspect)
+    man = engine.run(st, factors=["A6"])
+    f = find(man, st, "A6")
+    assert f["measures"]["qc_rsd"]["status"] == "insufficient_metadata" and "sample roles" in f["needs"]
+    assert "roles_needed" in [i["code"] for i in f["indicators"]]
+    for i in qc:
+        overrides.add(st, {"kind": "sample_role", "sample": samples[i], "role": "qc"})
+    man = engine.run(st, factors=["A6"])
+    f = find(man, st, "A6")
+    m = f["measures"]
+    assert m["roles"]["counts"] == {"qc": 4, "study": 12}
+    # QC noise alone is ~7% RSD; the planted drift spreads the 4 QC runs over 1.2 log2 units
+    assert 20 < m["qc_rsd"]["summary"]["median"] < 50 and m["qc_rsd"]["share_above"]["20"] > 0.9
+    assert m["run_order"]["spearman_median_y"] > 0.9 and "run_order_drift" in [i["code"] for i in f["indicators"]]
+    assert m["run_order"]["qc_feature_trend"]["summary"]["median"] > 0.5
+    assert m["suspect_rows"]["flagged"]["n_features"] == 10 and m["suspect_rows"]["columns"] == ["Type"]
+    assert [v["column"] for v in m["vendor_qc_columns"]] == ["QC_CV"]
+    assert len(m["per_sample"]) == 12
+
+
+def test_source_heterogeneity(st, tmp_path):
+    rng = np.random.default_rng(6)
+    n = 20
+    tissue = ["plasma" if i % 2 else "serum" for i in range(n)]
+    L = rng.normal(8, 1, size=(100, n)) + np.array([1.5 if t == "serum" else 0 for t in tissue])[None, :] * \
+        (np.arange(100) < 50)[:, None]
+    samples = [f"S{i}" for i in range(n)]
+    af.add(st, tmp_path / "src", X=2.0 ** L, samples=samples, columns={"matrix": tissue, "site": ["A"] * n},
+           kinds={"matrix": "sample_type", "site": "sample_type"})
+    af.add(st, tmp_path / "none", X=2.0 ** L, samples=[f"T{i}" for i in range(n)])
+    man = engine.run(st, factors=["A9"])
+    f = find(man, st, "A9", "D1")
+    v = {x["variable"]: x for x in f["measures"]["variables"]}
+    assert v["site"]["homogeneous"] and not v["matrix"]["homogeneous"]
+    perm = next(r for r in f["measures"]["associations"]["rows"] if r["test"] == "permanova")
+    assert perm["q"] < 0.05 and perm["r2"] > 0.2
+    assert {"single_source", "source_association"} <= {i["code"] for i in f["indicators"]}
+    g = find(man, st, "A9", "D2")
+    assert g["status"] == "insufficient_metadata" and g["needs"] == ["sample source"]
+
+
+def test_multiomics_layers(st, tmp_path):
+    rng = np.random.default_rng(7)
+    n = 12
+    shared = rng.normal(0, 1, size=(1, n))
+    samples = [f"S{i}" for i in range(n)]
+    A = 2.0 ** (8 + shared * rng.normal(1, 0.2, size=(80, 1)) + rng.normal(0, 0.3, size=(80, n)))
+    B = 2.0 ** (5 + shared * rng.normal(1, 0.2, size=(40, 1)) + rng.normal(0, 0.3, size=(40, n)))
+    af.add(st, tmp_path / "prot", X=A, samples=samples)
+    af.add(st, tmp_path / "metab", X=B[:, 2:], samples=samples[2:] + [], family="metabolomics")
+    man = engine.run(st, factors=["A10"])
+    f = engine.finding(st, man["run_id"], "A10__session.json")
+    m = f["measures"]
+    assert m["overlap"]["pairs"][0]["n_shared"] == 10 and m["overlap"]["pairs"][0]["n_only_a"] == 2
+    (r,) = m["rv"]
+    assert r["n_shared"] == 10 and r["rv"] > 0.5 and r["p"] < 0.05
+    assert [x["n_features"] for x in m["layers"]] == [80, 40]
+    st2 = store.create("one")
+    af.add(st2, tmp_path / "x" / "only", X=A, samples=samples)
+    man = engine.run(st2, factors=["A10"])
+    assert engine.finding(st2, man["run_id"], "A10__session.json")["status"] == "not_applicable"
+
+
+def test_declared_vs_observed(st, tmp_path):
+    rng = np.random.default_rng(8)
+    s = [f"S{i}" for i in range(10)]
+    M_ = 2.0 ** rng.normal(10, 1, size=(60, 10))
+    M_[:20, :3] = M_[:20].min(1, keepdims=True)                       # floors
+    scaled = M_ / np.median(M_, axis=1, keepdims=True)
+    no = {"imputed": {"answer": "no"}, "normalized": {"answer": "no"}, "log_transformed": {"answer": "no"}}
+    af.add(st, tmp_path / "a", X=scaled, samples=s, history=no)
+    af.add(st, tmp_path / "b", X=np.log2(M_) - 10, samples=s, history=no)          # signed, log-like
+    yes = {"imputed": {"answer": "yes"}, "normalized": {"answer": "yes"}, "log_transformed": {"answer": "not_sure"}}
+    af.add(st, tmp_path / "c", X=scaled, samples=s, history=yes)
+    man = engine.run(st, factors=["A4"])
+    rows = {(r["dataset"], r["item"]): r["status"] for r in man["declared_vs_observed"]}
+    assert rows[("D1", "imputed")] == "mismatch" and rows[("D1", "normalized")] == "mismatch"
+    assert rows[("D1", "log_transformed")] == "consistent"
+    assert rows[("D2", "log_transformed")] == "mismatch"
+    assert rows[("D3", "imputed")] == "consistent" and rows[("D3", "log_transformed")] == "not_declared"
+    codes = {i["code"] for i in find(man, st, "A4", "D1")["indicators"]}
+    assert {"declared_not_imputed_floor_ties", "declared_not_normalized_signature"} <= codes
+    assert "declared_not_logged_log_like" in {i["code"] for i in find(man, st, "A4", "D2")["indicators"]}

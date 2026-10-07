@@ -9,7 +9,7 @@ from prism import store
 
 
 def make_output(path, X, samples, columns=None, kinds=None, design=None, keys=None, history=None,
-                classes=None, family="proteomics"):
+                classes=None, family="proteomics", is_study=None, annotations=None):
     """X: features x samples (NaN = empty cell). classes: per-feature feature_class (derived)."""
     columns, kinds = columns or {}, kinds or {}
     path.mkdir(parents=True)
@@ -18,18 +18,20 @@ def make_output(path, X, samples, columns=None, kinds=None, design=None, keys=No
         w = csv.writer(f)
         w.writerow(["feature_key"] + list(samples))
         for k, row in zip(keys, X):
-            w.writerow([k] + ["" if not np.isfinite(v) else repr(float(v)) for v in row])
+            w.writerow([k] + ["" if np.isnan(v) else repr(float(v)) for v in row])
     with open(path / "feature_metadata.csv", "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["feature_key", "assay_id"] + (["feature_class"] if classes else []))
+        extra = list(annotations or {})
+        w.writerow(["feature_key", "assay_id"] + (["feature_class"] if classes else []) + extra)
         for i, k in enumerate(keys):
-            w.writerow([k, "A1"] + ([classes[i]] if classes else []))
+            w.writerow([k, "A1"] + ([classes[i]] if classes else []) + [annotations[c]["values"][i] for c in extra])
     names = list(columns)
     with open(path / "sample_metadata.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["sample_id", "sample_label", "is_study_sample"] + names)
         for j, s in enumerate(samples):
-            w.writerow([s, "study sample", "true"] + [columns[c][j] for c in names])
+            st_ = "true" if is_study is None or is_study[j] else "false"
+            w.writerow([s, "study sample" if st_ == "true" else "other", st_] + [columns[c][j] for c in names])
     ann = [{"column": "feature_class", "derived_from": "feature_names", "keep": True, "display_labels": {"": "unclassified"},
             "provenance": "ai_proposed_confirmed"}] if classes else []
     schema = {"schema_version": "0.4.1", "source_file": path.name + ".csv", "file_sha256": "0" * 64,
@@ -37,8 +39,11 @@ def make_output(path, X, samples, columns=None, kinds=None, design=None, keys=No
               "assays": [{"assay_id": "A1", "assay_label": family, "omics_type": family, "n_features": X.shape[0],
                           "n_samples": len(samples),
                           "value_blocks": [{"block_id": "B1", "group_id": "g1", "label": "values",
+                                            "n_features": X.shape[0], "n_samples": len(samples),
                                             "file": "value_matrix_A1_B1.csv"}]}],
-              "feature_annotations": ann,
+              "feature_annotations": ann + [dict({"column": c, "keep": True, "provenance": "user_set"},
+                                                 **{k: v for k, v in a.items() if k != "values"})
+                                            for c, a in (annotations or {}).items()],
               "sample_metadata": [{"column": c, "audit_kind": kinds.get(c, "covariate")} for c in names],
               "design": design or {"subject": {"source": "none"}, "time": {"source": "none"}},
               "processing_history": history or {}}

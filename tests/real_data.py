@@ -86,6 +86,10 @@ def _derive_feature_class(client, f):
     f.answer(q, "Yes")
 
 
+# what the studies' Step 0 sessions declared (v3 §9 golden: declared vs observed)
+DECLARED = {SOMA: {"imputed": "no"}, METAB: {"imputed": "no", "normalized": "no"}}
+
+
 def wizard(client, name):
     """-> the Flow after finalize (the output folder is sessions/<sid>/outputs)."""
     original = mock_llm.MockLLM.respond
@@ -118,8 +122,10 @@ def wizard(client, name):
             f.step(st, {})
     f.step("sample_info", {"metadata": {"skip": True}})
     f.step("design", {"design": DESIGN})
-    f.step("history", {"processing_history": {q: {"answer": "not_sure"} for q in (
-        "normalized", "log_transformed", "imputed", "batch_corrected", "features_or_samples_removed_before_upload")}})
+    hist = {q: {"answer": "not_sure"} for q in (
+        "normalized", "log_transformed", "imputed", "batch_corrected", "features_or_samples_removed_before_upload")}
+    hist.update({k: {"answer": v} for k, v in DECLARED[name].items()})
+    f.step("history", {"processing_history": hist})
     f.finalize()
     return f
 

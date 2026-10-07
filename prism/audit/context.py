@@ -51,7 +51,7 @@ def scale_evidence(X):
     ev["all_non_negative"] = bool((obs >= 0).all())
     ev["all_integer"] = bool(np.all(obs == np.round(obs)))
     ev["all_in_0_1"] = bool(((obs >= 0) & (obs <= 1)).all())
-    sums = np.nansum(X, axis=0)
+    sums = np.nansum(np.where(np.isfinite(X), X, np.nan), axis=0)
     ev["cv_sample_sums"] = float(np.std(sums) / abs(np.mean(sums))) if np.mean(sums) else None
     ev["negative_present"] = bool((obs < 0).any())
     sx = skew_rows(X)
@@ -143,6 +143,8 @@ class Unit:
         self.block_of = [b.block_id for b in blocks for _ in b.feature_keys]
         Xall = np.vstack([b.X for b in blocks]) if len(blocks) > 1 else blocks[0].X
         self.n_unparsable = sum(b.n_unparsable for b in blocks)
+        self.blocks = blocks
+        self.X_all = Xall                       # every sample, study or not (A1)
         keep = [i for i, s in enumerate(samples) if ds.in_audit(s)]
         self.excluded = [s for s in samples if not ds.in_audit(s) and s not in ds.excluded_by_override]
         self.excluded_by_override = [s for s in samples if s in ds.excluded_by_override]
@@ -162,6 +164,14 @@ class Unit:
         if self._Y is None:
             self._Y, self.y_rule = diagnostic_copy(self.X)
         return self._Y
+
+    @staticmethod
+    def diagnostic(X):
+        return diagnostic_copy(X)[0]
+
+    @staticmethod
+    def diagnostic_rule(X):
+        return diagnostic_copy(X)[1]
 
     @property
     def transform(self):

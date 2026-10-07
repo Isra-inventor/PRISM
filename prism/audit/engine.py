@@ -18,22 +18,22 @@ from .. import manifest as manifest_mod
 from ..ledger import Ledger
 from ..session import merge
 from ..util import canonical_json, now_iso, read_json, sha256_bytes, sha256_file, write_json
-from . import (a02_scale, a03_distribution, a04_missingness, a05_dimensionality, a07_batch, a08_repeated,
-               a11_outliers, context, overrides as ov, params as params_mod)
+from . import (a01_integrity, a02_scale, a03_distribution, a04_missingness, a05_dimensionality, a06_noise_qc, a07_batch, a08_repeated,
+               a09_source, a10_multiomics, a11_outliers, context, overrides as ov, params as params_mod)
 
 # id, code, module (None: built in a later stage). Order of execution: A8 before A5 (ICC).
 REGISTRY = [
-    ("A1", "integrity", None),
+    ("A1", "integrity", a01_integrity),
     ("A2", "scale", a02_scale),
     ("A3", "distribution", a03_distribution),
     ("A4", "missingness", a04_missingness),
     ("A8", "repeated_measures", a08_repeated),
     ("A5", "dimensionality", a05_dimensionality),
     ("A7", "batch", a07_batch),
-    ("A6", "noise_qc", None),
-    ("A9", "source_heterogeneity", None),
+    ("A6", "noise_qc", a06_noise_qc),
+    ("A9", "source_heterogeneity", a09_source),
     ("A11", "outliers", a11_outliers),
-    ("A10", "multiomics_overlap", None),
+    ("A10", "multiomics_overlap", a10_multiomics),
 ]
 
 
@@ -119,7 +119,7 @@ def run(st, factors=None, datasets=None, params=None, who="user"):
     mods = {a: m for a, _, m in REGISTRY}
     for c in ctxs:
         for u in c.units:
-            for aid in audit_ids:
+            for aid in [a for a in audit_ids if a != "A10"]:
                 t = time.time()
                 f = mods[aid].run(u, c, P, results).to_json()
                 name = f"{aid}__{c.dataset_id}_{u.unit_id}.json"
@@ -130,6 +130,22 @@ def run(st, factors=None, datasets=None, params=None, who="user"):
                 index.append({"file": name, "audit_id": aid, "audit": f["audit"], "dataset": c.dataset_id,
                               "assay": u.unit_id, "assay_label": u.label, "status": f["status"],
                               "indicators": [i["code"] for i in f["indicators"]], "needs": f["needs"]})
+    if "A10" in audit_ids:
+        t = time.time()
+        f = a10_multiomics.run_session(merged, ctxs, P).to_json()
+        name = "A10__session.json"
+        write_json(rdir / "findings" / name, f)
+        timings["A10:session"] = round(time.time() - t, 3)
+        ledger.record("audit.A10", {"scope": "session"}, who, f)
+        index.append({"file": name, "audit_id": "A10", "audit": f["audit"], "dataset": "session", "assay": "session",
+                      "assay_label": "all datasets", "status": f["status"],
+                      "indicators": [i["code"] for i in f["indicators"]], "needs": f["needs"]})
+    dvo = []
+    for i in index:
+        if i["audit_id"] == "A4":
+            fj = read_json(rdir / "findings" / i["file"])
+            for r in (fj["measures"].get("declared_vs_observed") or {}).get("rows", []):
+                dvo.append(dict(r, dataset=i["dataset"], assay=i["assay"]))
     timings["total"] = round(time.time() - t0, 3)
     scope = {"audits": audit_ids, "datasets": [c.dataset_id for c in ctxs],
              "units": [{"dataset": c.dataset_id, "unit": u.unit_id, "label": u.label, "n_samples": u.n,
@@ -139,6 +155,7 @@ def run(st, factors=None, datasets=None, params=None, who="user"):
     man = manifest_mod.build(run_id, st.sid, P, _inputs(st, ctxs), ov.sha(st), timings, scope)
     man["who"] = who
     man["findings"] = index
+    man["declared_vs_observed"] = dvo
     man["findings_sha256"] = sha256_bytes(canonical_json(
         [read_json(rdir / "findings" / i["file"]) for i in index]).encode("utf-8"))
     write_json(rdir / "manifest.json", man)

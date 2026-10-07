@@ -7,7 +7,7 @@ from pathlib import Path
 
 DEFAULTS_PATH = Path(__file__).resolve().parent / "audit_params.yaml"
 HEURISTIC = ("modified_z_cutoff", "rsd_levels", "median_scaling_mad", "sentinel_share", "near_duplicate_r",
-             "abundance_rho_indicator", "icc_indicator")
+             "abundance_rho_indicator", "icc_indicator", "floor_tie_share_indicator", "narrow_median_spread")
 
 
 class ParamError(Exception):

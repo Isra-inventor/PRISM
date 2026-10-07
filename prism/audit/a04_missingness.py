@@ -91,7 +91,7 @@ def run(unit, ctx, params, results):
         e["floor_tied_share"] = e["n_floor_tied"] / e["n_features"]
         e["missing_rate"] = e["n_missing"] / e["n_cells"]
     M["by_stratum"] = {"source": unit.strata_source, "strata": [strata[k] for k in strata]}
-    if n_tied:
+    if n_tied and n_tied / n_feat >= params["floor_tie_share_indicator"]:
         f.indicate("floor_ties_present", {"n_features": n_tied, "of": n_feat},
                    pct=round(100 * n_tied / n_feat, 2), n_features=n_tied, of=n_feat)
 
@@ -148,6 +148,9 @@ def run(unit, ctx, params, results):
         batch_tables.append({"variable": v.name, "levels": tbl})
     M["per_batch"] = batch_tables
 
+    # 6. declared vs observed: comparison only, nothing is overridden
+    M["declared_vs_observed"] = declared_vs_observed(f, unit, ctx, params, n_tied / n_feat)
+
     f.plot.update(feature_missing_rate=stats.histogram(feat_rate, 20), feature_floor_rate=stats.histogram(floor_rate, 20),
                   sample_rates=[{"sample": s, "missing": float(samp_rate[j]), "floor": float(S[:, j].mean())}
                                 for j, s in enumerate(unit.samples)])
@@ -156,3 +159,52 @@ def run(unit, ctx, params, results):
              sentinel_share=params["sentinel_share"], permutations=params["permutations"], seed=params["seed"])
     results.setdefault(unit.dataset_id, {}).setdefault(unit.unit_id, {})["floor"] = {"tied": tied, "S": S}
     return f
+
+
+def _answer(hist, key):
+    v = (hist or {}).get(key)
+    if isinstance(v, dict):
+        return v.get("answer")
+    return v if v in ("yes", "no", "not_sure") else None
+
+
+def declared_vs_observed(f, unit, ctx, params, floor_share):
+    """processing_history (declared in Step 0) against what the values show (v3 §6.3 A4 item 6)."""
+    from .a02_scale import median_scaling
+    hist = ctx.schema.get("processing_history") or {}
+    ms = median_scaling(unit.X, params["median_scaling_mad"])
+    Y = unit.Y
+    with np.errstate(invalid="ignore"):
+        resid = Y - np.nanmedian(Y, axis=1, keepdims=True)
+        smed = np.nanmedian(resid, axis=0)
+    smed = smed[np.isfinite(smed)]
+    spread = float(np.median(np.abs(smed - np.median(smed)))) if smed.size else None
+    obs = {"floor_tied_share": floor_share, "median_scaling_signature": bool(ms and ms["signature"]),
+           "mad_log2_feature_medians": ms["mad_log2_feature_medians"] if ms else None,
+           "sample_median_spread": spread, "narrow_sample_median_spread": spread is not None and spread < params["narrow_median_spread"],
+           "scale_class": unit.scale, "negative_values": bool(unit.scale_evidence.get("negative_present"))}
+    rows = []
+
+    def row(key, declared, observed, mismatch, code, **vals):
+        status = "not_declared" if declared not in ("yes", "no") else ("mismatch" if mismatch else "consistent")
+        rows.append({"item": key, "declared": declared, "observed": observed, "status": status})
+        if status == "mismatch":
+            f.indicate(code, {"declared": declared, "observed": observed}, **vals)
+
+    imp = _answer(hist, "imputed")
+    row("imputed", imp, {"floor_tied_share": floor_share},
+        imp == "no" and floor_share >= params["floor_tie_share_indicator"], "declared_not_imputed_floor_ties",
+        pct=round(100 * floor_share, 1))
+    nrm = _answer(hist, "normalized")
+    why = [w for w, on in (("median-scaling signature", obs["median_scaling_signature"]),
+                           ("narrow spread of sample medians", obs["narrow_sample_median_spread"])) if on]
+    row("normalized", nrm, {k: obs[k] for k in ("median_scaling_signature", "mad_log2_feature_medians",
+                                                 "sample_median_spread")},
+        nrm == "no" and bool(why), "declared_not_normalized_signature", what=" and ".join(why) or "-")
+    lg = _answer(hist, "log_transformed")
+    why = [w for w, on in (("the scale class is continuous_symmetric_or_log_like",
+                            unit.scale == "continuous_symmetric_or_log_like"),
+                           ("negative values are present", obs["negative_values"])) if on]
+    row("log_transformed", lg, {k: obs[k] for k in ("scale_class", "negative_values")},
+        lg == "no" and bool(why), "declared_not_logged_log_like", what=" and ".join(why) or "-")
+    return {"observed": obs, "rows": rows}
