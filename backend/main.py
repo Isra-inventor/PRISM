@@ -188,7 +188,11 @@ def _do_upload(filename, raw, pid, study_session_id=None):
         s.save()
     s.log("facts", {"layout_hints": s.hints, "shared_name_parts": [
         {"column": c, **a} for c, a in zip(s.cols.labels, s.affixes)]})
-    return session_payload(s)
+    out = session_payload(s)
+    if study_session_id:   # v3 §4.8: a schema saved for this exact file is suggested, never applied
+        from prism.io import library
+        out["library_matches"] = library.matches(s.sha)
+    return out
 
 
 @app.post("/api/upload")

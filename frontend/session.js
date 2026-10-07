@@ -156,6 +156,14 @@
         rep.differences?.length ? el("table", { class: "ledger" }, el("thead", {}, el("tr", {}, ["path", "stored", "recomputed"].map((h) => el("th", { text: h })))),
           el("tbody", {}, rep.differences.slice(0, 200).map((x) => el("tr", {}, el("td", {}, el("code", { text: x.path })), el("td", { text: fmt(x.stored) }), el("td", { text: fmt(x.recomputed) })))))
           : el("p", { class: "item-sub", text: "None: everything computed from the values matches the schema." }),
+        (rep.differences?.length || rep.binding?.main?.missing_in_file?.length || rep.binding?.main?.extra_in_file?.length) ?
+          el("div", { id: "explain-box" }, el("button", { class: "linkbtn", type: "button", text: "Explain differences", onclick: async () => {
+            try {
+              const r = await api(`/api/sessions/${ST.session_id}/datasets/${did}/explain-differences`, undefined, "GET");
+              $("explain-box").replaceChildren(el("div", { class: "section-label", text: "What the differences mean" }),
+                el("ul", { class: "np" }, r.explanations.map((x) => el("li", { text: x.text }))),
+                el("p", { class: "item-sub", text: "Written by fixed rules from the differences above (no AI in import)." }));
+            } catch (e) { alert(e.message); } } })) : null,
         (rep.warnings || []).length ? el("ul", { class: "warns" }, rep.warnings.map((w) => el("li", { text: w }))) : null,
         el("div", { class: "section-label", text: "Summary" }),
         el("ul", { class: "review-list" },
@@ -253,7 +261,7 @@
           el("button", { class: "btn btn-light btn-sm", type: "button", text: "Close", onclick: () => { show(box, false); showStart(); } }))));
   }
 
-  window.PRISM_SESSION = { ensure, refresh, showStart, showMerge, current: () => ST };
+  window.PRISM_SESSION = { ensure, refresh, showStart, showMerge, showReview, current: () => ST };
   const saved = store.get();
   if (saved) load(saved); else renderBar();
 })();

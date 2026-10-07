@@ -304,3 +304,42 @@ def audit_chat(sid: str, req: AuditChat):
     if not req.message.strip():
         raise HTTPException(422, "Write a message.")
     return _audit(sid, lambda st, e: operator.chat(st, req.message.strip()[:4000], req.run_id))
+
+
+# ---------------------------------------------------------------- saved-schemas library (v3 §4.8)
+
+
+@router.get("/api/library/{file_sha}")
+def library_matches(file_sha: str):
+    from prism.io import library
+    return library.matches(file_sha)
+
+
+class UseSaved(BaseModel):
+    schema_id: str
+
+
+@router.post("/api/sessions/{sid}/datasets/{did}/use-saved-schema")
+def use_saved_schema(sid: str, did: str, req: UseSaved):
+    from prism import store
+    from prism.io import importer, library
+    st = _load(sid)
+    try:
+        rep = library.use(st, did, req.schema_id)
+    except importer.ImportRejected as e:
+        _rejected(e)
+    except store.SessionError as e:
+        raise HTTPException(422, str(e))
+    return {"report": rep, "session": session_view(store.load(sid))}
+
+
+@router.get("/api/sessions/{sid}/datasets/{did}/explain-differences")
+def explain_differences(sid: str, did: str):
+    """Deterministic sentences for the import report's differences (no AI in import)."""
+    import json
+    from prism.io import importer
+    st = _load(sid)
+    p = st.dataset_dir(did) / "import_report.json"
+    if not p.exists():
+        raise HTTPException(404, "No import report for this dataset.")
+    return {"explanations": importer.explain(json.loads(p.read_text(encoding="utf-8")))}

@@ -4,9 +4,12 @@
 
 PRISM helps you preprocess omics data (proteomics and metabolomics for now). It doesn't push every
 dataset through one fixed pipeline. It first works out what the data is, then reasons about what to do with it.
-This build is **Step 0 only**: you upload a quantified table, PRISM recognizes its structure, you confirm it
-step by step, and the result is written out as a schema plus canonical tables. Audits (missingness,
-PCA, batch, distributions), normalization, imputation, filtering and recommendations are later phases.
+Step 0: you upload a quantified table, PRISM recognizes its structure, you confirm it step by step, and the
+result is written out as a schema plus canonical tables. On top of Step 0 (v3, package `prism/`): **sessions** of
+one or more datasets, **schema import** (skip the wizard with a `schema.json` you confirmed before), a
+**multi-dataset merge** of sample IDs, sample tables and design, and the **Tier 1 audit**: eleven deterministic
+audits that report numbers and templated indicator sentences, never verdicts. Normalization, imputation, filtering
+and recommendations (Tier 2) are later phases.
 
 ## Run it
 
@@ -240,6 +243,68 @@ kept for a future Tier 2 feature.
 Every upload, parse report, AI request (digest), raw AI response, validation result, confirmed step and
 finalization is logged to `backend/logs/<session_id>.jsonl`, with timestamps, the provider, the model, `prompt_version` and temperature 0.
 
+## v3: sessions, schema import, merge and the Tier 1 audit (`prism/`)
+
+Principles: import, merge and audit are deterministic (no LLM; same inputs, parameters and seed give byte-identical
+findings); the audit reads only the Step 0 output folders plus `overrides.json`; nothing is changed, filtered,
+imputed or removed; nothing is imported or merged without an explicit confirmation.
+
+```
+sessions/<session_id>/
+  session.json  session_schema.json  session_sample_table.csv  overrides.json
+  datasets/<D1>/ upload/  schema.json  import_report.json  output/      (output/ = the audit's only input)
+  audit/<run_id>/ manifest.json  findings/<audit>__<D>_<unit>.json  ledger.jsonl  report.html
+  audit/ledger.jsonl (AI operator calls)   requests/NNN.md   logs/session.jsonl
+```
+
+- **Schema import** (`prism/io/`): `schema.json` is validated against the 0.4 contract (Pydantic models; the
+  published JSON Schema is `schema/prism_schema_0.4.json`), then bound to the file: `exact` (same sha256: accepted
+  as stored, every value-dependent number recomputed and diffed), `template` (same columns, new values: structure
+  reused, statistics, processing history and the time unit asked again) or `seeded_wizard` (columns differ: the
+  wizard opens with what matches). Review screen: Accept / Open in wizard / Reject, plus "Explain differences"
+  (fixed sentences, no AI). Exact round trip: wizard → schema → import → byte-identical output folder.
+  Confirmed schemas go to a saved-schemas library keyed by the file's sha256; uploading the same file again
+  offers it ("use it?"), never applies it.
+- **Merge** (`prism/session/merge.py`): exact sample-ID matching; near misses (case, whitespace, `-`/`_`/space,
+  leading zeros) are suggestions only; unified IDs from confirmed suggestions or a mapping CSV (injective per
+  dataset); overlap with Jaccard and a presence matrix; the unified sample table, where disagreeing values become
+  conflicts (take / keep both / drop) and differing `audit_kind`s become questions; subject and time agreement on
+  shared samples, time units, possible ID reuse; "ready for audit" when nothing is open. Original IDs are never
+  rewritten.
+- **Tier 1 audit** (`prism/audit/`): A1 integrity, A2 scale, A3 distribution and variance-mean, A4 missingness and
+  floor values (with declared vs observed processing history), A5 dimensionality and effective n, A6 technical
+  noise and QC, A7 batch structure (codes, PCA associations, PERMANOVA), A8 repeated measures (ICC(1), time grid,
+  nesting), A9 sample source, A10 multi-omics overlap (session level, RV coefficient), A11 outlier flags.
+  numpy only. Conventions: diagnostic copy Y = log2(X [+ c]) never written out; permutations restricted by
+  design (whole subjects / within subject / free), 999 or exhaustive up to 10,000, `p_min_attainable` reported;
+  guards give `insufficient_data`; BH q within each table; count, proportion and compositional data are
+  `not_applicable`. Parameters in `prism/audit/audit_params.yaml` (heuristics labelled); every run writes a
+  manifest (version, git hash, parameters and their hash, input sha256s, overrides hash, timings) and a ledger.
+- **Report**: the "Run audit" panel (run history, parameter drawer with re-run and diff, overrides) and a
+  self-contained HTML export with the same renderer (`frontend/audit_report.js`): header with what was used,
+  Declared vs observed first, a tab per dataset, a card per audit with plots from `plot_data`.
+- **AI operator** (thin): "Ask the AI" in the audit panel. It sees the schemas and finding JSON only (never data
+  rows) and calls a fixed set of tools that run the same engine: `run_audit`, `rerun`, `show_finding`,
+  `set_override` (a proposal you apply), `plot`, `request_addition` (writes `requests/NNN.md`, nothing runs).
+  A parameter it was not given in your message is refused; numbers in its reply that are not in the findings
+  are flagged; every call is in the ledger.
+
+CLI (the same engine as the page):
+```bash
+python -m prism session new --name study
+python -m prism import --data X.csv --schema schema.json [--metadata M.csv] --session SID [--accept]
+python -m prism session add --session SID --output backend/sessions/<step0 id>/outputs
+python -m prism session merge-report --session SID
+python -m prism session merge-decide --session SID ITEM_ID confirm|dismiss|take:D1|keep_both|drop|<option>
+python -m prism session merge-mapping --session SID mapping.csv
+python -m prism audit override --session SID --kind sample_role --sample S1 --role qc --reason "pooled QC"
+python -m prism audit run --session SID [--factor A4] [--dataset D1] [--param permutations=199]
+python -m prism audit show --session SID [--run RUN]
+python -m prism audit report --session SID [--run RUN] --format html|json [--out FILE]
+python -m prism audit compare --session SID RUN_A RUN_B
+```
+Python 3.7 or later; numpy, FastAPI and Pydantic 2 (no pandas, scipy or scikit-learn).
+
 ## API
 
 | Method | Path | |
@@ -289,7 +354,19 @@ The LLM is always mocked in the tests, including deliberately wrong proposals, a
   are not a collision; deliberately mismatched sample counts block finishing;
 - instructions (`test_command.py`): one instruction excludes many columns, the preview changes nothing, invalid
   actions are checked and refused, samples, discard, AI off;
-- the literature module only (kept for later): Step 0 has no literature anywhere, quote verification, the HTTP client.
+- the literature module only (kept for later): Step 0 has no literature anywhere, quote verification, the HTTP client;
+- v3 (`test_v3_*.py`): sessions and the loader; schema import (byte-identical round trip, template and seeded
+  modes, hand-edited profile, rejections); merge (near misses never applied, non-injective mapping rejected,
+  conflicts, audit-kind questions, possible ID reuse, time-unit questions); the audit on planted ground truth
+  (floors, batch shift, nesting, ICC, outlier sample and cell, QC drift, source effect, layer RV, declared vs
+  observed), statuses, the contract (uploads deleted, identical findings for the same seed, parameter hash,
+  `output/` untouched), the API and the self-contained export, the AI operator (mock), the saved-schemas library.
+
+Golden tests run when the real files are in `tests/data/` (git-ignored; skipped otherwise): SomaScan floor ties
+20 of 11,083, metabolomics 397 of 1,174 with every class count, the design (8 subjects, cluster sizes, samples per
+time, within-subject gaps), 27 of 27 shared samples, the 12,301.6 outlier cell, declared vs observed, and the
+median-scaling signature (present for metabolomics, absent for SomaScan). The whole audit of both files takes a
+few seconds.
 
 
 A manual acceptance test runs against the real AI with tables outside the current scope (fixtures H: 16S OTU
@@ -310,6 +387,10 @@ backend/   main.py (API) · schema.py (vocabulary) · config.py (scope) · brief
            workflow.py (draft, steps) · outputs.py
            session_log.py · envfile.py · check_ai.py
 frontend/  index.html (home + 3D prism) · tool.html + app.js (wizard) · style.css · home.js · fonts/
+prism/     store.py (sessions) · io/ (loader, schema_model, importer, rebuild, library) · session/merge.py
+           audit/ (engine, context, stats, finding, params + audit_params.yaml, overrides, a01..a11, report, operator)
+           cli.py · ledger.py · manifest.py
+frontend/  session.js (session bar, import review, merge) · audit.js + audit_report.js/.css (audit panel, export)
 tests/     fixtures/ (A–F, H 16S, I methylation, J subject-code blocks, messy file) · fake_europepmc.py · test_deterministic.py · test_grouping.py
            test_flow.py · test_consistency.py · test_command.py · test_literature.py · test_real_api.py
 ```

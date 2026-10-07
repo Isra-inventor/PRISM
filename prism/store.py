@@ -170,6 +170,11 @@ def publish_output(study, did, src_output, origin_manifest):
     study.set_status(did, "confirmed")
     study.log("dataset_confirmed", {"dataset_id": did, "schema_sha256": manifest["schema_sha256"],
                                     "mode": origin_manifest.get("mode")})
+    try:   # the saved-schemas library (v3 §4.8): suggested on a later upload of the same file, never applied
+        from .io import library
+        library.save(schema, {"session_id": study.sid, "dataset_id": did, "mode": origin_manifest.get("mode")})
+    except Exception as e:
+        study.log("library_not_saved", {"error": str(e)})
     try:   # keep session_schema.json / session_sample_table.csv current; the merge report rewrites them anyway
         from .session import merge
         merge.write(study)

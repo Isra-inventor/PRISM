@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import shutil
 from pathlib import Path
 
@@ -333,3 +334,65 @@ def open_in_wizard(st, did):
     st.set_status(did, "wizard_in_progress")
     st.log("schema_import_opened_in_wizard", {"dataset_id": did})
     return s.sid
+
+
+# ---------------------------------------------------------------- "explain differences" (v3 §10 could-have)
+
+_STAT = {"median": "median value", "p99": "99th percentile", "p1": "1st percentile", "max": "largest value",
+         "min": "smallest value", "mean": "mean value", "log10_span": "log10 range", "sample_sum_cv": "CV of the sample sums",
+         "n_missing": "number of empty cells", "frac_missing": "share of empty cells", "n_zero": "number of zeros",
+         "frac_zero": "share of zeros", "share_integer_valued": "share of integer values", "n_unique": "number of distinct values"}
+_BLOCK = re.compile(r"^\$\.assays\[(\d+)\]\.value_blocks\[(\d+)\]\.profile\.(\w+)$")
+
+
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def explain(rep):
+    """Plain sentences for an import report's binding and its recomputed-vs-stored differences.
+    Deterministic (no AI in import): one template per kind of path."""
+    out = []
+    b = (rep.get("binding") or {}).get("main") or {}
+    if rep.get("edited_or_corrupt"):
+        out.append({"kind": "edited", "text": "The data file is byte-identical to the one the schema was made from, so "
+                    "every difference below means the schema file itself was edited or is corrupt."})
+    if b.get("missing_in_file"):
+        out.append({"kind": "columns", "text": f"Column(s) named in the schema but absent from the file: "
+                    f"{', '.join(b['missing_in_file'])}. They cannot be bound, so the wizard asks about them."})
+    if b.get("extra_in_file"):
+        out.append({"kind": "columns", "text": f"Column(s) in the file the schema does not know: "
+                    f"{', '.join(b['extra_in_file'])}. They start unresolved."})
+    n_val = 0
+    for d in rep.get("differences") or []:
+        p, a, c = d["path"], d.get("stored"), d.get("recomputed")
+        m = _BLOCK.match(p)
+        if p.endswith(".sha256") or p == "$.file_sha256":
+            out.append({"kind": "file", "path": p, "text": "The file is not the one the schema was made from (its sha256 "
+                        "differs), so everything computed from the values was recomputed."})
+        elif re.match(r"^\$\.files\[\d+\]\.name$", p) or p == "$.source_file":
+            out.append({"kind": "file", "path": p, "text": f"The file name differs: the schema was made from '{a}', "
+                        f"this upload is '{c}'. Names are not used for binding; the columns are."})
+        elif m:
+            n_val += 1
+            what = _STAT.get(m.group(3), m.group(3).replace("_", " "))
+            change = ""
+            if _num(a) and _num(c) and a:
+                change = f" ({(c - a) / abs(a) * 100:+.3g}%)"
+            out.append({"kind": "values", "path": p, "text": f"Assay {int(m.group(1)) + 1}, block {int(m.group(2)) + 1}: "
+                        f"the {what} was {a}, it is now {c}{change}. This follows from the values, not the structure."})
+        elif re.search(r"\.(n_features|n_samples|n_rows|n_columns|n_value_columns)$", p):
+            out.append({"kind": "counts", "path": p, "text": f"{p.rsplit('.', 1)[1].replace('_', ' ')} changed from {a} to {c}: "
+                        "the file has a different number of rows or columns than the schema describes."})
+        elif "flag" in p or "feature_facts" in p:
+            out.append({"kind": "annotations", "path": p, "text": f"An annotation count changed ({p}: {a} → {c}): "
+                        "rows marked by an annotation value differ in the new file."})
+        else:
+            out.append({"kind": "other", "path": p, "text": f"{p}: stored {a}, recomputed {c}."})
+    if n_val:
+        out.insert(0, {"kind": "summary", "text": f"{n_val} of {len(rep.get('differences') or [])} difference(s) are value "
+                       "statistics. In template mode these are expected: the schema is reused as a template and the "
+                       "statistics are recomputed from the new values."})
+    if not out:
+        out.append({"kind": "none", "text": "No difference: the schema matches the file as stored."})
+    return out

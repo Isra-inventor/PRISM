@@ -186,6 +186,7 @@
       if (status < 200 || status >= 300) throw new Error(body.detail || `Upload failed (HTTP ${status}).`);
       S.session = body;
       prog.stop();
+      if (body.library_matches && body.library_matches.length && await offerSavedSchema(body)) return;
       show($("panel-upload"), false); show($("workspace")); show($("restart"));
       $("ws-file").replaceChildren(el("b", { text: body.filename }), ` · ${body.n_rows.toLocaleString()} rows × ${body.n_columns.toLocaleString()} columns`);
       renderParseNotes();
@@ -195,6 +196,33 @@
       $("upload-error").textContent = err.message || String(err);
       show($("upload-error"));
     } finally { dz.style.pointerEvents = ""; input.value = ""; }
+  }
+
+  // v3 §4.8: this exact file was confirmed before; offer its saved schema (never applied silently)
+  function offerSavedSchema(body) {
+    return new Promise((resolve) => {
+      const slot = $("upload-progress-slot");
+      const m = body.library_matches;
+      const pick = (x) => el("button", { class: "btn btn-light btn-sm", type: "button", text: `Use the saved schema${m.length > 1 ? ` (${x.saved_at.slice(0, 10)})` : ""}`,
+        onclick: async () => {
+          try {
+            const r = await api(`/api/sessions/${body.study.session_id}/datasets/${body.study.dataset_id}/use-saved-schema`, { schema_id: x.schema_id });
+            slot.replaceChildren();
+            await window.PRISM_SESSION.refresh();
+            await window.PRISM_SESSION.showReview(r.report.dataset_id);
+            resolve(true);
+          } catch (err) {
+            slot.replaceChildren(el("div", { class: "alert alert-error", text: `${err.message} Continuing with the wizard.` }));
+            setTimeout(() => resolve(false), 50);
+          }
+        } });
+      slot.replaceChildren(el("div", { class: "question", id: "saved-schema-offer" },
+        el("b", { text: "This exact file was confirmed before. Use its saved schema?" }),
+        el("ul", { class: "np" }, m.map((x) => el("li", { text: `${x.source_file} · ${x.assays.join(", ")} · saved ${x.saved_at.slice(0, 16).replace("T", " ")}${x.metadata_file ? ` · needs the metadata file ${x.metadata_file.name}` : ""}` }))),
+        el("p", { class: "item-sub", text: "Using it goes through the import review; nothing is applied until you accept." }),
+        el("div", { class: "question-opts" }, m.map(pick),
+          el("button", { class: "btn btn-sm", type: "button", text: "No, use the wizard", onclick: () => { slot.replaceChildren(); resolve(false); } }))));
+    });
   }
 
   async function propose() {
