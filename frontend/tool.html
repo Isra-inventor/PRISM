@@ -7,6 +7,7 @@
   <meta name="description" content="PRISM Step 0 — upload a quantified omics table and confirm its structure step by step.">
   <link rel="preload" href="fonts/quicksand-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="audit_report.css">
 </head>
 <body>
   <header class="nav">
@@ -37,6 +38,9 @@
 
       <!-- v3: the session (one or more datasets) -->
       <section class="session-bar" id="session-bar"></section>
+
+      <!-- Tier 1 audit (v3 §6, §7) -->
+      <section class="panel hidden" id="panel-audit"></section>
 
       <!-- Import review (v3 §4.5) -->
       <section class="panel hidden" id="panel-import"></section>
@@ -122,5 +126,7 @@
 
   <script src="app.js"></script>
   <script src="session.js"></script>
+  <script src="audit_report.js"></script>
+  <script src="audit.js"></script>
 </body>
 </html>

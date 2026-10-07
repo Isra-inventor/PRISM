@@ -587,3 +587,15 @@ tr.chips th { cursor: default; }
 .pill.mode-exact { border-color: #6c6; }
 .pill.mode-template, .pill.mode-seeded_wizard { border-color: #b58a2a; }
 @media (max-width: 700px) { .start-tabs { grid-template-columns: 1fr; } }
+
+/* v3: the audit panel */
+.audit-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-bottom: 14px; }
+.audit-bar .spacer { flex: 1; }
+.audit-bar select { background: #111; color: var(--text); border: 1px solid var(--line-strong); border-radius: 3px; font-size: 12px; padding: 2px 4px; max-width: 220px; }
+.audit-drawer { border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 14px; background: var(--bg-raised); }
+.audit-params { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px 16px; }
+.audit-param label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; margin-bottom: 3px; }
+.audit-param .input, .audit-ov-form .input { width: 100%; background: #111; color: var(--text); border: 1px solid var(--line-strong); border-radius: 3px; padding: 4px 6px; font-size: 12.5px; }
+.audit-ov-form { display: grid; grid-template-columns: 160px 1fr 1fr 1fr auto; gap: 8px; margin-top: 8px; }
+@media (max-width: 760px) { .audit-ov-form { grid-template-columns: 1fr; } }
+#panel-audit .ar { font-size: 13.5px; }

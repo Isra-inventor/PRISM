@@ -103,6 +103,7 @@ def run(unit, ctx, params, results):
             drift.update(spearman_median_y=rho, ols_slope=stats.ols_slope(x[ok], med_y[ok]),
                          lowess_range=float(fit.max() - fit.min()),
                          lowess=[[float(a), float(b)] for a, b in zip(x[ok][order], fit)])
+            f.plot["run_order_points"] = [[float(x[j]), float(med_y[j]), unit.samples[j]] for j in np.where(ok)[0]]
             Yc = stats.complete_features(Y)
             if Yc.shape[0] >= 2:
                 sc, _ = stats.pca(Yc, 1)

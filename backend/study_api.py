@@ -199,3 +199,94 @@ async def merge_mapping_csv(sid: str, file: UploadFile = File(...)):
 @router.delete("/api/sessions/{sid}/merge/mapping-csv")
 def merge_clear_mapping_csv(sid: str):
     return _merge(sid, lambda st, m: m.clear_mapping_csv(st))
+
+
+# ---------------------------------------------------------------- audit (v3 §6, §7)
+
+
+def _audit(sid, fn):
+    from prism.audit import engine, overrides
+    st = _load(sid)
+    try:
+        return fn(st, engine)
+    except (engine.AuditError, overrides.OverrideError) as e:
+        raise HTTPException(422, str(e))
+
+
+class AuditRun(BaseModel):
+    factors: Optional[list] = None
+    datasets: Optional[list] = None
+    params: Optional[dict] = None
+
+
+@router.post("/api/sessions/{sid}/audit/run")
+def audit_run(sid: str, req: AuditRun):
+    return _audit(sid, lambda st, e: e.run(st, req.factors, req.datasets, req.params or {}, who="user"))
+
+
+@router.get("/api/sessions/{sid}/audit")
+def audit_runs(sid: str):
+    def fn(st, e):
+        out = []
+        for r in e.list_runs(st):
+            m = e.show(st, r)
+            out.append({"run_id": r, "created_at": m["created_at"], "params_sha256": m["params_sha256"],
+                        "audits": m["scope"]["audits"], "n_findings": len(m["findings"])})
+        return out
+    return _audit(sid, fn)
+
+
+@router.get("/api/sessions/{sid}/audit/{run_id}")
+def audit_show(sid: str, run_id: str):
+    """The run's manifest and every finding (what the report page renders)."""
+    from prism.audit import report
+    return _audit(sid, lambda st, e: report.bundle(st, run_id))
+
+
+@router.get("/api/sessions/{sid}/audit/{run_id}/compare/{other}")
+def audit_compare(sid: str, run_id: str, other: str):
+    return _audit(sid, lambda st, e: e.compare(st, other, run_id))
+
+
+@router.get("/api/sessions/{sid}/audit/{run_id}/report.html")
+def audit_report_html(sid: str, run_id: str):
+    from fastapi.responses import HTMLResponse
+    from prism.audit import report
+    html = _audit(sid, lambda st, e: report.html(st, run_id))
+    return HTMLResponse(html, headers={"Content-Disposition": f'attachment; filename="prism_audit_{run_id}.html"'})
+
+
+@router.get("/api/audit/params")
+def audit_params():
+    from prism.audit import params
+    return {"defaults": params.defaults(), "heuristic": list(params.HEURISTIC)}
+
+
+@router.get("/api/sessions/{sid}/overrides")
+def get_overrides(sid: str):
+    from prism.audit import overrides
+    return {"overrides": overrides.load(_load(sid)), "kinds": list(overrides.KINDS), "roles": list(overrides.ROLES)}
+
+
+class OverrideIn(BaseModel):
+    kind: str
+    sample: Optional[str] = None
+    role: Optional[str] = None
+    column: Optional[str] = None
+    dataset: Optional[str] = None
+    key: Optional[str] = None
+    value: Optional[object] = None
+    reason: Optional[str] = ""
+
+
+@router.post("/api/sessions/{sid}/overrides")
+def add_override(sid: str, req: OverrideIn):
+    from prism.audit import overrides
+    return _audit(sid, lambda st, e: {"override": overrides.add(st, req.model_dump(), who="user"),
+                                      "overrides": overrides.load(st)})
+
+
+@router.delete("/api/sessions/{sid}/overrides/{oid}")
+def delete_override(sid: str, oid: str):
+    from prism.audit import overrides
+    return _audit(sid, lambda st, e: (overrides.remove(st, oid, who="user"), {"overrides": overrides.load(st)})[1])
