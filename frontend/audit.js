@@ -6,7 +6,8 @@
   "use strict";
   const $ = (id) => document.getElementById(id);
   const R = () => window.PRISM_REPORT;
-  let SID = null, CUR = null, DEFAULTS = null;
+  let SID = null, CUR = null, DEFAULTS = null, CTRL = null;
+  const CHAT = [];        // this page's conversation with the operator (not stored)
 
   function el(tag, attrs = {}, ...children) {
     const n = document.createElement(tag);
@@ -63,8 +64,9 @@
     box().replaceChildren(
       el("div", { class: "panel-head" }, el("h2", { text: "Tier 1 audit" }), el("span", { class: "meta", text: "deterministic · no AI" })),
       el("div", { class: "panel-body" }, toolbar(b), el("div", { id: "audit-error", class: "alert alert-error hidden" }),
-        paramsDrawer(b), overridesDrawer(), diff || null, content));
+        paramsDrawer(b), overridesDrawer(), chatBox(), diff || null, content));
     loadOverrides();
+    renderChat();
   }
   function error(msg) { const n = $("audit-error"); if (n) { n.textContent = msg; n.classList.remove("hidden"); } }
 
@@ -74,7 +76,73 @@
     CUR = b;
     const root = el("div", { id: "audit-report" });
     frame(root, b, diff);
-    R().render(root, b, { live: true });
+    CTRL = R().render(root, b, { live: true });
+    return CTRL;
+  }
+
+  // ---------------------------------------------------------------- the AI operator (v3 §8)
+  function chatBox() {
+    const input = el("textarea", { class: "input", rows: "2", id: "audit-chat-input",
+      placeholder: "Ask the AI: explain A4, run A7 with permutations = 199, colour the PCA by plate, mark S12 as qc…" });
+    const send = async () => {
+      const message = input.value.trim();
+      if (!message) return;
+      input.value = "";
+      CHAT.push({ who: "you", text: message });
+      renderChat();
+      try {
+        const r = await api(`/api/sessions/${SID}/audit/chat`, { message, run_id: CUR ? CUR.manifest.run_id : null });
+        CHAT.push({ who: "ai", r });
+        await applyTools(r);
+      } catch (e) { CHAT.push({ who: "ai", r: { reply: null, error: e.message, tool_results: [] } }); }
+      renderChat();
+    };
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+    return el("div", { class: "audit-chat" },
+      el("div", { id: "audit-chat-log" }),
+      el("div", { class: "audit-chat-row" }, input, el("button", { class: "btn btn-sm", type: "button", id: "audit-chat-send", text: "Ask", onclick: send })),
+      el("p", { class: "item-sub", text: "The AI sees the schemas and these findings only, never your data rows. Its tools run the same deterministic audit; every call is in the ledger. Parameters change only when your message names them." }));
+  }
+  async function applyTools(r) {
+    for (const t of r.tool_results || []) {
+      if (!t.ok) continue;
+      if (t.tool === "run_audit" || t.tool === "rerun") {
+        const prev = CUR ? CUR.manifest.run_id : null;
+        let diff = null;
+        if (prev) { const cmp = await api(`/api/sessions/${SID}/audit/${t.result.run_id}/compare/${prev}`).catch(() => null); if (cmp) diff = R().diffPanel(cmp); }
+        await show(t.result.run_id, diff);
+      }
+    }
+    for (const t of r.tool_results || []) {
+      if (!t.ok || !CTRL) continue;
+      if (t.tool === "show_finding") CTRL.focus(t.result.finding);
+      if (t.tool === "plot") CTRL.setView(t.result.view);
+    }
+  }
+  function renderChat() {
+    const log = $("audit-chat-log");
+    if (!log) return;
+    log.replaceChildren(...CHAT.map((m) => m.who === "you" ? el("div", { class: "audit-msg you", text: m.text }) : aiMsg(m.r)));
+    log.scrollTop = log.scrollHeight;
+  }
+  function aiMsg(r) {
+    const tools = (r.tool_results || []).map((t) => {
+      if (!t.ok) return el("li", { class: "warn-text", text: `${t.tool}: not done — ${t.error}` });
+      const x = t.result;
+      if (t.tool === "set_override") return el("li", {}, `Proposed override: ${x.proposal.kind} · ${x.proposal.sample || x.proposal.column || x.proposal.key}${x.proposal.role ? ` → ${x.proposal.role}` : ""}${x.proposal.value != null ? ` = ${JSON.stringify(x.proposal.value)}` : ""} `,
+        el("button", { class: "btn btn-sm", type: "button", text: "Apply", onclick: async (e) => {
+          try { await api(`/api/sessions/${SID}/overrides`, x.proposal); e.target.replaceWith(el("span", { class: "item-sub", text: "applied: used by the next run" })); loadOverrides(); }
+          catch (err) { error(err.message); } } }));
+      if (t.tool === "run_audit" || t.tool === "rerun") return el("li", { text: `${t.tool}: run ${x.run_id}` });
+      if (t.tool === "show_finding") return el("li", { text: `Showing ${x.finding}` });
+      if (t.tool === "plot") return el("li", { text: `PCA coloured by ${x.view.color_by || "—"}, PC${x.view.pcs[0]} vs PC${x.view.pcs[1]}` });
+      if (t.tool === "request_addition") return el("li", { text: `Written as a request: ${x.request} (nothing ran)` });
+      return el("li", { text: t.tool });
+    });
+    return el("div", { class: "audit-msg ai" },
+      r.reply ? el("div", { text: r.reply }) : el("div", { class: "warn-text", text: r.error || "No answer." }),
+      (r.unverified_numbers || []).length ? el("div", { class: "warn-text", text: `Numbers not found in the findings: ${r.unverified_numbers.join(", ")} — check them before relying on them.` }) : null,
+      tools.length ? el("ul", { class: "np" }, tools) : null);
   }
 
   async function run(params) {

@@ -392,6 +392,40 @@ def chat_schema():
         "questions": questions_schema()}, "required": ["reply"]}
 
 
+AUDIT_OPERATOR_PROMPT = """
+You are the operator of the PRISM Tier 1 audit. The audit is deterministic code; you never compute
+numbers yourself and you never write code that runs. You receive the user's message and, as context,
+each dataset's schema and the finding JSON of the audit run being viewed (never raw data rows).
+
+Answer in "reply", and call tools in "tool_calls" (each: tool + args_json, a JSON object as a string):
+  run_audit        {"factors": ["A4", ...] or [] for all, "datasets": ["D1"] or [], "params": {...}}
+  rerun            {}                       re-run the run being viewed with its own parameters
+  show_finding     {"finding": "A4__D1_A1.json"}
+  set_override     {"kind": ..., "sample" | "column" | "key": ..., "role" | "value": ..., "reason": ...}
+                   (a proposal: the user applies it)
+  plot             {"finding": "A7__D1_A1.json", "color_by": "<variable>", "pcs": [1, 2]}
+  request_addition {"title", "inputs", "outputs", "algorithm", "tests", "citations"}
+                   (anything the audit registry cannot do: a written request, nothing runs)
+Rules:
+- Parameters come from the user's message or the defaults. Never change a parameter the user did not
+  name with its value.
+- Explanations use only numbers that appear in the findings. Use the indicator sentences; you may
+  rephrase them, never invent new ones. Say "consistent with" or "plausible indicator", never
+  "diagnosed" or "confirmed".
+- You cannot answer processing-history questions: those are the user's.
+"""
+
+
+def audit_chat_schema():
+    return {"type": "OBJECT", "properties": {
+        "reply": {"type": "STRING"},
+        "tool_calls": {"type": "ARRAY", "items": {"type": "OBJECT", "properties": {
+            "tool": {"type": "STRING", "enum": ["run_audit", "rerun", "show_finding", "set_override", "plot",
+                                                 "request_addition"]},
+            "args_json": {"type": "STRING"}}, "required": ["tool", "args_json"]}}},
+        "required": ["reply"]}
+
+
 def metadata_schema():
     s = lambda **k: dict(type="STRING", **k)
     col = {"type": "OBJECT", "properties": {
@@ -550,6 +584,16 @@ class ChatResponse(BaseModel):
     questions: List[AIQuestion] = []
 
 
+class AuditToolCall(BaseModel):
+    tool: str
+    args_json: str = "{}"
+
+
+class AuditChatResponse(BaseModel):
+    reply: str = ""
+    tool_calls: List[AuditToolCall] = []
+
+
 class ConsolidationResponse(BaseModel):
     groups: List[FinalGroup] = []
     assays: List[Assay] = []
@@ -596,6 +640,7 @@ def _call(digest, sha, log=None, mock_fn=None, kind="digest"):
         "chat": ("Chat (JSON):", BRIEFING + CHAT_PROMPT, chat_schema(), ChatResponse),
         "metadata": ("Metadata (JSON):", BRIEFING + METADATA_PROMPT, metadata_schema(), MetadataResponse),
         "relabel": ("Relabel (JSON):", BRIEFING + RELABEL_PROMPT, relabel_schema(), RelabelResponse),
+        "audit_chat": ("AuditChat (JSON):", AUDIT_OPERATOR_PROMPT, audit_chat_schema(), AuditChatResponse),
     }[kind]
     ok, why = llm.available()
     meta = {"provider": llm.provider_name(), "model": llm.model_list()[0] if ok else None,
@@ -1036,6 +1081,12 @@ def chat(payload, sha, log=None, mock_fn=None):
     Nothing is applied here."""
     resp, meta = _call(payload, sha, log, mock_fn, kind="chat")
     return resp, meta.get("error")
+
+
+def audit_chat(payload, sha, log=None, mock_fn=None):
+    """The audit operator: reply + tool calls (AuditChatResponse) or (None, error). Nothing runs here."""
+    resp, meta = _call(payload, sha, log, mock_fn, kind="audit_chat")
+    return resp, meta
 
 
 def _ctx_set(on_progress, n, total):

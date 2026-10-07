@@ -599,3 +599,11 @@ tr.chips th { cursor: default; }
 .audit-ov-form { display: grid; grid-template-columns: 160px 1fr 1fr 1fr auto; gap: 8px; margin-top: 8px; }
 @media (max-width: 760px) { .audit-ov-form { grid-template-columns: 1fr; } }
 #panel-audit .ar { font-size: 13.5px; }
+.audit-chat { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; margin-bottom: 14px; }
+#audit-chat-log { max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+#audit-chat-log:empty { display: none; }
+.audit-msg { padding: 6px 10px; border-radius: 6px; font-size: 13px; max-width: 92%; }
+.audit-msg.you { align-self: flex-end; background: #1a1a1a; }
+.audit-msg.ai { align-self: flex-start; border: 1px solid var(--line-strong); }
+.audit-chat-row { display: flex; gap: 8px; align-items: flex-end; }
+.audit-chat-row textarea { flex: 1; background: #111; color: var(--text); border: 1px solid var(--line-strong); border-radius: 3px; padding: 6px 8px; font: inherit; font-size: 13px; resize: vertical; }

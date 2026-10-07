@@ -105,7 +105,8 @@
     }
     return { node: g, box: plotBox(title, g, opts.extra) };
   }
-  function pcaPlot(pca) {
+  const VIEWS = {};
+  function pcaPlot(pca, key) {
     if (!pca || !pca.samples || !pca.samples.length) return null;
     const vars = Object.keys(pca.samples[0].values || {});
     const k = pca.variance_explained.length;
@@ -126,6 +127,7 @@
       legend.replaceChildren(...(state.color ? levels.slice(0, 20).map((l) => el("span", {}, el("i", { style: `background:${col(l)}` }), l || "(empty)")) : []));
     };
     draw();
+    if (key) VIEWS[key] = (v) => { if (v.color_by != null) state.color = v.color_by; if (v.pcs) { state.x = v.pcs[0] - 1; state.y = v.pcs[1] - 1; } draw(); return wrap; };
     return wrap;
   }
   function timeline(rows, unit) {
@@ -204,7 +206,7 @@
     const r = (rows || []).map((x) => [x.pc ? `PC${x.pc}` : (x.response || x.test), x.variable, x.test, x.status === "computed" ? x.value : x.reason, x.p, x.q, x.p_min_attainable, x.n_used, x.scheme]);
     return table(["on", "variable", "test", "statistic", "p", "q (BH)", "p min", "n", "permutations"], r, { empty: "No association tested." });
   }
-  function details(f) {
+  function details(f, file) {
     const m = f.measures || {}, p = f.plot_data || {}, plots = [], extra = [];
     switch (f.audit_id) {
       case "A1": extra.push(el("h3", { text: "Most correlated sample pairs" }), table(["a", "b", "r"], (m.top_sample_correlations || []).map((x) => [x.a, x.b, x.r])));
@@ -230,7 +232,7 @@
         extra.push(el("h3", { text: "Per-sample quality" }), table(["sample", "median Y", "detected", "r with median profile"], (m.per_sample || []).map((x) => [x.sample, x.median_y, x.n_detected, x.r_median_profile])));
         if (m.suspect_rows) extra.push(el("h3", { text: "Rows marked suspect in Step 0" }), table(["group", "features", "median Y", "missing", "floor"], [["flagged", m.suspect_rows.flagged], ["unflagged", m.suspect_rows.unflagged]].filter(([, g]) => g).map(([k, g]) => [k, g.n_features, g.median_y, pct(g.missing_rate), pct(g.floor_rate)])));
         break;
-      case "A7": plots.push(pcaPlot(p.pca)); (p.crosstabs || []).forEach((c) => plots.push(crosstab(c)));
+      case "A7": plots.push(pcaPlot(p.pca, file)); (p.crosstabs || []).forEach((c) => plots.push(crosstab(c)));
         extra.push(el("h3", { text: "Structure (each batch candidate against each design variable)" }), table(["batch", "design", "code", "Cramér's V", "n"], (m.structure || []).map((s) => [s.batch, s.design, s.code || s.reason, s.cramers_v, s.n_used])));
         extra.push(el("h3", { text: "PC and PERMANOVA associations" }), associationTable(get(m, "associations.rows")));
         break;
@@ -258,8 +260,8 @@
     else out.push([path, o]);
     return out;
   }
-  function card(f) {
-    const { plots, extra } = details(f);
+  function card(f, file) {
+    const { plots, extra } = details(f, file);
     return el("section", { class: "ar-card", id: `card-${f.audit_id}-${f.dataset}-${f.assay}` },
       el("div", { class: "ar-card-head" }, el("h2", { text: `${f.audit_id} · ${NAMES[f.audit_id] || f.audit}` }),
         el("span", { class: `ar-pill ${f.status}`, text: f.status.replace(/_/g, " ") }),
@@ -320,6 +322,8 @@
       const f = byUnit[k][0], d = b.datasets.find((x) => x.dataset_id === f.dataset);
       return `${f.dataset} · ${d ? d.name : ""} · ${f.assay_label || f.assay}`;
     };
+    const fileOf = new Map(b.findings.map((f, i) => [f, (b.manifest.findings[i] || {}).file]));
+    const keyOf = (f) => (f.dataset === "session" ? "session" : `${f.dataset}/${f.assay}`);
     let cur = keys[0];
     const tabs = el("nav", { class: "ar-tabs", role: "tablist" });
     const body = el("div", { class: "ar-cards" });
@@ -327,11 +331,24 @@
       cur = k;
       tabs.replaceChildren(...keys.map((x) => el("button", { class: `ar-tab${x === cur ? " sel" : ""}`, type: "button", role: "tab", "aria-selected": String(x === cur), text: label(x), onclick: () => show(x) })));
       const fs = byUnit[k].slice().sort((a, c) => ORDER.indexOf(a.audit_id) - ORDER.indexOf(c.audit_id));
-      body.replaceChildren(...fs.map(card));
+      body.replaceChildren(...fs.map((f) => card(f, fileOf.get(f))));
     };
     root.replaceChildren(opts.top || "", header(b), dvoPanel(b), tabs, body);
     if (keys.length) show(cur);
     else body.append(el("p", { class: "ar-empty", text: "No findings." }));
+    const byFile = (file) => b.findings.find((f) => fileOf.get(f) === file);
+    const focus = (file) => {
+      const f = byFile(file);
+      if (!f) return null;
+      if (keyOf(f) !== cur) show(keyOf(f));
+      const n = document.getElementById(`card-${f.audit_id}-${f.dataset}-${f.assay}`);
+      if (n) n.scrollIntoView({ behavior: "smooth", block: "start" });
+      return n;
+    };
+    return {
+      showTab: show, focus,
+      setView(v) { focus(v.finding); const fn = VIEWS[v.finding]; return fn ? fn(v) : null; },
+    };
   }
   function diffPanel(cmp) {
     const f = cmp.findings || [];

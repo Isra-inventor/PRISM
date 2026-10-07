@@ -290,3 +290,17 @@ def add_override(sid: str, req: OverrideIn):
 def delete_override(sid: str, oid: str):
     from prism.audit import overrides
     return _audit(sid, lambda st, e: (overrides.remove(st, oid, who="user"), {"overrides": overrides.load(st)})[1])
+
+
+class AuditChat(BaseModel):
+    message: str
+    run_id: Optional[str] = None
+
+
+@router.post("/api/sessions/{sid}/audit/chat")
+def audit_chat(sid: str, req: AuditChat):
+    """The thin AI operator (v3 §8): a reply and the results of its tool calls."""
+    from prism.audit import operator
+    if not req.message.strip():
+        raise HTTPException(422, "Write a message.")
+    return _audit(sid, lambda st, e: operator.chat(st, req.message.strip()[:4000], req.run_id))

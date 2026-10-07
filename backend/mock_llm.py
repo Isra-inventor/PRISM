@@ -172,11 +172,64 @@ def _pseudo_group(gid, key, cs):
             "sample_names": [x.strip(" _.-") for x in samples], "entries": cs}
 
 
+def _audit_chat(payload):
+    """Deterministic stand-in for the audit operator: keyword rules over the message."""
+    msg = payload["message"]
+    low = msg.lower()
+    ctx = payload.get("context") or {}
+    findings = ctx.get("findings") or []
+    calls, reply = [], "I can run audits, show findings, colour plots and propose overrides."
+
+    def call(tool, **args):
+        calls.append({"tool": tool, "args_json": json.dumps(args)})
+    params = {k: json.loads(v) for k, v in re.findall(r"\b([a-z_]+)\s*=\s*(-?[0-9.]+)", msg)}
+    if "invent" in low:          # a test hook: a parameter the user never named
+        params["seed"] = 7
+    factors = re.findall(r"\bA(?:1[01]|[1-9])\b", msg)
+    if re.search(r"\bre-?run\b", low):
+        call("rerun")
+        reply = "Re-running the audit with the same parameters."
+    elif re.search(r"\brun\b", low):
+        call("run_audit", factors=factors, datasets=re.findall(r"\bD\d+\b", msg), params=params)
+        reply = "Running the audit" + (f" ({', '.join(factors)})" if factors else "") + "."
+    if "explain" in low or "show" in low:
+        want = factors[0] if factors else "A4"
+        f = next((x for x in findings if x["audit_id"] == want), None)
+        if f:
+            call("show_finding", finding=f["file"])
+            sent = [i["text"] for i in f["indicators"]]
+            reply = f"{f['audit_id']} ({f['status']}): " + (" ".join(sent) if sent else "no indicator sentence.")
+            if "made-up" in low:
+                reply += " About 87.123% of samples are affected."
+    m = re.search(r"colou?r (?:the pca )?by ([\w@.-]+)", low)
+    if m:
+        f = next((x for x in findings if x["audit_id"] == "A7"), None)
+        if f:
+            call("plot", finding=f["file"], color_by=m.group(1), pcs=[1, 2])
+            reply = f"Colouring the PCA by {m.group(1)}."
+    m = re.search(r"mark (\S+) as (qc|blank|pool|study)", low)
+    if m:
+        sample = next((w for w in msg.split() if w.lower() == m.group(1)), m.group(1))
+        call("set_override", kind="sample_role", sample=sample, role=m.group(2), reason="named in chat")
+        reply = f"Proposed: {sample} as {m.group(2)}. Apply it to use it in the next run."
+    if "request" in low or "can you add" in low:
+        call("request_addition", title="Requested analysis", inputs="Y and M of each unit", outputs="a finding",
+             algorithm=msg, tests="planted ground truth", citations="")
+        reply = "That is not in the audit registry: I wrote it up as a request."
+    return json.dumps({"reply": reply, "tool_calls": calls})
+
+
 class MockLLM:
+    @staticmethod
+    def audit_chat(payload):
+        return _audit_chat(payload)
+
     @staticmethod
     def respond(system, prompt):
         if prompt.startswith("Literature"):
             return MockLLM.literature(json.loads(prompt.split("\n", 1)[1]))
+        if prompt.startswith("AuditChat"):
+            return MockLLM.audit_chat(json.loads(prompt.split("\n", 1)[1]))
         if prompt.startswith("Consolidation"):
             return MockLLM.consolidate(json.loads(prompt.split("\n", 1)[1]))
         if prompt.startswith("Chat"):
