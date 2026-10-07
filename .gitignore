@@ -6,3 +6,4 @@ __pycache__/
 backend/logs/*.jsonl
 backend/sessions/
 backend/cache/
+tests/data/

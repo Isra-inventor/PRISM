@@ -84,6 +84,7 @@ class Session:
         self.digests = []
         self.metadata_table = None
         self.lock = threading.RLock()
+        self.study = None       # {"session_id", "dataset_id"} when this dataset belongs to a v3 session
         self.undo = []          # the edit layer's undo stack (edits.py), saved to undo.json
         self.undo_dirty = False
         self._tx = None
@@ -92,7 +93,7 @@ class Session:
         self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / "state.json").write_text(json.dumps({
             "sid": self.sid, "filename": self.filename, "groups": group_structure(self), "draft": self.draft,
-            "digests": self.digests}, ensure_ascii=False), encoding="utf-8")
+            "digests": self.digests, "study": self.study}, ensure_ascii=False), encoding="utf-8")
         if self.undo_dirty:
             (self.dir / "undo.json").write_text(json.dumps(self.undo, ensure_ascii=False), encoding="utf-8")
             self.undo_dirty = False
@@ -143,6 +144,7 @@ def get_session(sid):
     s.groups = [make_group(s.cols, g["group_id"], g["indices"], g.get("origin", "restored"),
                            **{k: g.get(k) for k in ("split_from", "merged_from")}) for g in st.get("groups", [])]
     s.draft, s.digests = st.get("draft"), st.get("digests", [])
+    s.study = st.get("study")
     if s.draft:   # drafts saved before v2.4 stage 6
         s.draft["steps"].setdefault("design", "pending")
         s.draft.setdefault("design", _snap_design(design.blank(), "none"))

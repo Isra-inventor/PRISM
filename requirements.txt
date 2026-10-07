@@ -10,4 +10,6 @@ python-multipart>=0.0.9; python_version >= "3.8"
 pydantic>=2.4,<2.6; python_version < "3.8"
 pydantic>=2.6; python_version >= "3.8"
 typing_extensions>=4.7
+numpy>=1.21,<1.22; python_version < "3.8"   # the Tier 1 audit (prism/)
+numpy>=1.21; python_version >= "3.8"
 pytest>=7   # tests only

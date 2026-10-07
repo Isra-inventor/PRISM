@@ -149,7 +149,7 @@ def _group_public(g):
 
 def session_payload(s):
     return {
-        "session_id": s.sid, "filename": s.filename, "sha256": s.sha,
+        "session_id": s.sid, "filename": s.filename, "sha256": s.sha, "study": s.study,
         "header": s.table["header"], "labels": s.cols.labels,
         "preview_rows": s.table["rows"][:PREVIEW_ROWS],
         "n_rows": len(s.table["rows"]), "n_columns": len(s.table["header"]),
@@ -158,7 +158,7 @@ def session_payload(s):
     }
 
 
-def _do_upload(filename, raw, pid):
+def _do_upload(filename, raw, pid, study_session_id=None):
     if len(raw) > MAX_BYTES:
         raise HTTPException(413, f"File is larger than {MAX_BYTES // (1024 * 1024)} MB.")
     set_progress(pid, stage="reading", percent=4, message="Parsing the table")
@@ -171,16 +171,32 @@ def _do_upload(filename, raw, pid):
                      "n_rows": len(s.table["rows"]), "n_columns": len(s.table["header"]),
                      "header": s.table["header"]})
     s.log("parse_report", s.table["parse_report"])
+    if study_session_id:   # v3: the wizard dataset joins a session
+        from prism import store
+        try:
+            st = store.load(study_session_id)
+        except store.SessionError as e:
+            raise HTTPException(404, str(e))
+        ds = st.add_dataset(s.filename, "wizard", "wizard_in_progress")
+        ds["step0_session_id"] = s.sid
+        up = st.dataset_dir(ds["dataset_id"]) / "upload"
+        up.mkdir(parents=True, exist_ok=True)
+        (up / s.filename).write_bytes(raw)
+        ds["files"]["data"] = {"name": s.filename, "sha256": s.sha}
+        st.save()
+        s.study = {"session_id": st.sid, "dataset_id": ds["dataset_id"]}
+        s.save()
     s.log("facts", {"layout_hints": s.hints, "shared_name_parts": [
         {"column": c, **a} for c, a in zip(s.cols.labels, s.affixes)]})
     return session_payload(s)
 
 
 @app.post("/api/upload")
-async def upload(file: UploadFile = File(...), progress_id: Optional[str] = Form(None)):
+async def upload(file: UploadFile = File(...), progress_id: Optional[str] = Form(None),
+                 study_session_id: Optional[str] = Form(None)):
     set_progress(progress_id, stage="reading", percent=2, message="File received by the server")
     raw = await file.read(MAX_BYTES + 1)
-    return await run(progress_id, _do_upload, file.filename or "upload", raw, progress_id)
+    return await run(progress_id, _do_upload, file.filename or "upload", raw, progress_id, study_session_id)
 
 
 # ---------------------------------------------------------------- propose / steps
@@ -450,8 +466,16 @@ def _do_finalize(req):
         s.draft["steps"]["review"] = "confirmed"
         s.draft["finalized"] = True
         s.save()
-        names = ["schema.json"] + list(artifacts)
+        from prism.util import now_iso, schema_sha256, write_json
+        write_json(out / "import_manifest.json", {"mode": "wizard", "step0_session_id": s.sid, "made_at": now_iso(),
+                                                  "source_file": s.filename, "file_sha256": s.sha,
+                                                  "schema_sha256": schema_sha256(schema)})
+        names = ["schema.json"] + list(artifacts) + ["import_manifest.json"]
         s.log("finalize", {"artifacts": names, "integrity_flags": flags, "schema": schema})
+        if s.study:   # v3 §4.6: the one output contract, copied into the session's dataset
+            from prism import store
+            st = store.load(s.study["session_id"])
+            store.publish_output(st, s.study["dataset_id"], out, {"mode": "wizard", "step0_session_id": s.sid})
         return {"schema": schema, "artifacts": names, "integrity_flags": flags}
 
 
@@ -471,6 +495,10 @@ def export(sid: str, artifact: str):
     ext = os.path.splitext(artifact)[1]
     return Response(path.read_bytes(), media_type=ARTIFACT_TYPES.get(ext, "application/octet-stream"),
                     headers={"Content-Disposition": f'attachment; filename="{s.sid}_{artifact}"'})
+
+
+from .study_api import router as study_router  # noqa: E402
+app.include_router(study_router)
 
 
 @app.get("/tool")
