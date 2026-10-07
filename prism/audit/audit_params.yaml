@@ -1,0 +1,18 @@
+# Tier 1 audit parameters (v3 §6.4). Every value used is recorded in the run manifest;
+# a changed value changes params_sha256. Values marked "heuristic" are rules of thumb, and the
+# report labels them as such.
+seed: 0
+permutations: 999                  # Monte Carlo permutations when more than exhaustive_max exist
+exhaustive_max: 10000              # enumerate every distinct permutation up to this many
+modified_z_cutoff: 3.5             # heuristic (Iglewicz and Hoaglin)
+max_pcs: 5                         # k = min(max_pcs, n - 1)
+rsd_levels: [20, 30]               # heuristic, percent
+median_scaling_mad: 0.5            # heuristic: MAD of log2 per-feature medians below this
+sentinel_share: 0.01               # heuristic: one value covering this share of cells
+near_duplicate_r: 0.9999           # heuristic
+floor_min_observed: 5              # features need this many observed values for floor ties
+abundance_rho_indicator: -0.1      # heuristic: rho at or below this gets the censoring sentence
+time_ordered_max_levels: 12        # time is an ordered factor up to this many values, else numeric
+categorical_max_levels: 20         # categorical covariates with 2 to this many levels
+icc_indicator: 0.5                 # share of features with ICC above this is reported
+bootstrap: 999                     # A3 bootstrap resamples

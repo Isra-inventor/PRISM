@@ -11,6 +11,7 @@
     python -m prism audit run --session SESSION [--factor A4] [--dataset D1] [--param key=value]
     python -m prism audit show --session SESSION [--run RUN]
     python -m prism audit report --session SESSION [--run RUN] --format html|json
+    python -m prism audit override --session SESSION --kind sample_role --sample S --role qc [--reason R]
     python -m prism audit compare --session SESSION RUN_A RUN_B
 """
 
@@ -62,6 +63,17 @@ def _audit_cmds(sub):
     rp.add_argument("--run", default=None)
     rp.add_argument("--format", choices=["html", "json"], default="html")
     rp.add_argument("--out", default=None)
+    o = s2.add_parser("override", help="add an entry to overrides.json (input to the next run)")
+    o.add_argument("--session", required=True)
+    o.add_argument("--kind", required=True, choices=["sample_role", "exclude_from_audit", "batch_variable",
+                                                      "design_variable", "source_variable", "param"])
+    o.add_argument("--sample", default=None)
+    o.add_argument("--role", default=None)
+    o.add_argument("--column", default=None)
+    o.add_argument("--dataset", default=None)
+    o.add_argument("--key", default=None)
+    o.add_argument("--value", default=None)
+    o.add_argument("--reason", default="")
     c = s2.add_parser("compare")
     c.add_argument("--session", required=True)
     c.add_argument("run_a")
@@ -108,7 +120,9 @@ def main(argv=None):
         return 2
     except Exception as e:
         from .session.merge import MergeError
-        if isinstance(e, MergeError):
+        from .audit.engine import AuditError
+        from .audit.overrides import OverrideError
+        if isinstance(e, (MergeError, AuditError, OverrideError)):
             print(f"error: {e}", file=sys.stderr)
             return 2
         raise
@@ -160,12 +174,20 @@ def _dispatch(args):
         if args.action == "run":
             run = engine.run(st, factors=args.factor, datasets=args.dataset, params=parse_params(args.param), who="user")
             print(run["run_id"])
+            for i in run["findings"]:
+                print(f"  {i['audit_id']:<4} {i['dataset']}/{i['assay']:<8} {i['status']:<22} {', '.join(i['indicators'])}")
         elif args.action == "show":
             print(json.dumps(engine.show(st, args.run), indent=2))
         elif args.action == "report":
             from .audit import report
             path = report.write(st, args.run, args.format, args.out)
             print(path)
+        elif args.action == "override":
+            from .audit import overrides
+            val = parse_params([f"v={args.value}"])["v"] if args.value is not None else None
+            e = overrides.add(st, {"kind": args.kind, "sample": args.sample, "role": args.role, "column": args.column,
+                                   "dataset": args.dataset, "key": args.key, "value": val, "reason": args.reason})
+            print(e["override_id"])
         elif args.action == "compare":
             print(json.dumps(engine.compare(st, args.run_a, args.run_b), indent=2))
         return 0

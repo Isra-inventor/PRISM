@@ -525,7 +525,7 @@ def unified_table(r, only=None):
     """(header, rows) of the unified sample table; only=did keeps that dataset's samples (the M of
     a one-dataset audit)."""
     views = r["views"]
-    header = ["unified_id", "datasets"] + [f"sample_id@{v.did}" for v in views] + [f"in_{v.did}" for v in views]
+    header = ["unified_id", "present_in"] + [f"sample_id@{v.did}" for v in views] + [f"in_{v.did}" for v in views]
     plan = []
     for c in r["columns"]:
         if c["status"] in ("single", "merged"):

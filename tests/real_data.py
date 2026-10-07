@@ -57,6 +57,35 @@ DESIGN = {"derivation": {"delimiter": "_", "occurrence": "last", "left": "subjec
           "time": {"source": "derived_from_sample_names", "unit": "weeks"}}
 
 
+def _metab_respond(original):
+    def respond(system, prompt):
+        if prompt.startswith("Chat"):
+            return json.dumps({"reply": "Prepared.", "questions": [], "patches": [
+                {"patch_id": "d", "op": "derive_feature_annotation", "reason": "class and compound ID are in the names",
+                 "args": {"source": "column_headers", "rule": {"delimiter": "_", "occurrence": "last", "parts": [
+                     {"name": "feature_class", "label": "metabolite class"},
+                     {"name": "feature_numeric_id", "label": "compound ID"}]}}}]})
+        return original(system, prompt)
+    return staticmethod(respond)
+
+
+def _derive_feature_class(client, f):
+    """Metabolomics: feature_class from '<class>_<number>' names (empty class shown as 'unclassified')."""
+    original = mock_llm.MockLLM.respond
+    mock_llm.MockLLM.respond = _metab_respond(original)
+    try:
+        r = client.post("/api/chat", json={"session_id": f.sid, "message": "split the feature names"})
+        assert r.status_code == 200, r.text
+    finally:
+        mock_llm.MockLLM.respond = original
+    p = next(p for p in r.json()["draft"]["patches"] if p["op"] == "derive_feature_annotation")
+    r = client.post("/api/patch/apply", json={"session_id": f.sid, "patch_ids": [p["patch_id"]]})
+    assert r.status_code == 200, r.text
+    f.draft = r.json()["draft"]
+    q = next(q for q in f.draft["questions"] if q["kind"] == "unclassified_part" and q["status"] == "open")
+    f.answer(q, "Yes")
+
+
 def wizard(client, name):
     """-> the Flow after finalize (the output folder is sessions/<sid>/outputs)."""
     original = mock_llm.MockLLM.respond
@@ -69,6 +98,8 @@ def wizard(client, name):
     for q in [q for q in f.draft["questions"] if q["status"] == "open"]:
         if q["kind"] == "fragmentation":
             f.answer(q, "One measurement")
+    if name == METAB:
+        _derive_feature_class(client, f)
     for q in [q for q in f.draft["questions"] if q["status"] == "open" and q["text"].startswith("Which values of")]:
         r = client.post("/api/question/dismiss", json={"session_id": f.sid, "question_id": q["question_id"]})
         assert r.status_code == 200, r.text

@@ -82,7 +82,7 @@ def test_exact_ids_overlap_and_outputs(st, tmp_path):
     assert json.loads((st.dir / "session_schema.json").read_text())["datasets"][1]["omics_family"] == "metabolomics"
     rows = list(csv.DictReader(io.StringIO((st.dir / "session_sample_table.csv").read_text())))
     assert [r["unified_id"] for r in rows] == ["P1_0", "P1_4", "P2_0", "P3_0", "P4_8"]
-    assert rows[0]["datasets"] == "D1;D2" and rows[3]["in_D2"] == "0" and rows[4]["sample_id@D1"] == ""
+    assert rows[0]["present_in"] == "D1;D2" and rows[3]["in_D2"] == "0" and rows[4]["sample_id@D1"] == ""
     assert "sex" in rows[0] and "sex@D1" not in rows[0]
     # one-dataset view: the unified table restricted to that dataset's samples
     _, only = merge.sample_table(st, only="D2")
