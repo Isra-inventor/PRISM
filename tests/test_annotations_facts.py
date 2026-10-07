@@ -89,7 +89,7 @@ def test_omics_family_is_closed_and_history_is_yours(flow):
     f.step("layout", {"layout": "samples_in_columns", "assays": [dict(a, omics_family="proteinomics")]}, expect=422)
     f.confirm_all_as_proposed()
     out = f.finalize()["schema"]
-    assert out["schema_version"] == "0.4.0" and out["omics_family"]["value"] == "proteomics"
+    assert out["schema_version"] == "0.4.1" and out["omics_family"]["value"] == "proteomics"
     assert out["assays"][0]["omics_family"] == {"value": "proteomics", "provenance": "ai_proposed_confirmed"}
     ph = out["processing_history"]["normalized"]
     assert ph["answer"] == "not_sure" and ph["provenance"] == "user_set" and ph["answered_at"]

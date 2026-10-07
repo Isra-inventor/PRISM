@@ -113,7 +113,7 @@ def excluded_columns(s, d):
                                        else "left out of the outputs")
         for c in s.groups_by_id[gid]["columns"]:
             out.append({"column": c, "file": "main", "reason": reason, "by": rec.get("by") or "user",
-                        "at": rec.get("at"), "role": it["role"], "label": it.get("label") or ""})
+                        "at": rec.get("at"), "role": it["role"], "label": it.get("label") or "", "group_id": gid})
     meta = d.get("metadata")
     if meta and not meta.get("skipped"):
         for c in meta.get("columns", []):
@@ -127,7 +127,8 @@ def excluded_columns(s, d):
 
 def files_entries(s, d):
     out = [{"file_role": "main", "name": s.filename, "sha256": s.sha, "n_rows": len(s.table["rows"]),
-            "n_columns": len(s.table["header"]), "source_columns_sha256": columns_sha256(s.table["header"]),
+            "n_columns": len(s.table["header"]), "source_columns": list(s.table["header"]),
+            "source_columns_sha256": columns_sha256(s.table["header"]),
             "parse_report": s.table["parse_report"]}]
     meta = d.get("metadata")
     if meta and not meta.get("skipped") and meta.get("columns"):
@@ -135,7 +136,9 @@ def files_entries(s, d):
         header = [c["column"] for c in meta["columns"]]
         out.append({"file_role": "metadata", "name": meta["filename"], "sha256": meta.get("sha256"),
                     "n_rows": meta.get("n_rows"), "n_columns": meta.get("n_columns") or len(header),
-                    "source_columns_sha256": columns_sha256(header), "parse_report": meta.get("parse_report") or {},
+                    "source_columns": meta.get("source_columns") or header,
+                    "source_columns_sha256": columns_sha256(meta.get("source_columns") or header),
+                    "parse_report": meta.get("parse_report") or {},
                     "join": {"key_column": meta.get("id_column"), "sample_source": meta.get("sample_source") or (
                         "value column headers" if d["layout"]["value"] == "samples_in_columns" else "sample ID column"),
                              "matched": rep.get("n_matched", 0), "only_in_data": rep.get("only_in_data", []),

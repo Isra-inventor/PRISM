@@ -1997,6 +1997,7 @@ def _upload_metadata(s, filename, t):
     meta = {"filename": sanitize_filename(filename), "id_column": key, "join_key_source": key_src,
             "join_key_evidence": key_ev, "join_key_confidence": key_conf, "columns": columns,
             "accepted_near_misses": [], "skipped": False, "sha256": t["sha256"], "n_rows": len(t["rows"]),
+            "source_columns": list(t["header"]),
             "n_columns": len(t["header"]), "parse_report": t["parse_report"], "ai": ai_info,
             "join_facts_top": [facts[i] for i in ranked[:5]],
             "sample_source": "value column headers" if layout_of(d) == "samples_in_columns" else "sample ID column",

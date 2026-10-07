@@ -60,10 +60,12 @@ def feature_key_indices(s, d):
     return [i for gid in d["feature_identity"]["group_ids"] for i in s.groups_by_id[gid]["indices"]]
 
 
-def build(s):
+def build(s, check=True):
+    """(schema, artifacts, flags). check=False skips the 'resolve these first' guard (used by
+    the schema import to recompute values while questions are still open)."""
     d = s.draft
     unresolved = [u for u in unresolved_items(s, d) if u["step"] != "review" or u["what"].startswith("Column accounting")]
-    if unresolved:
+    if unresolved and check:
         raise OutputError("Resolve these first: " + "; ".join(u["what"] for u in unresolved[:6]))
     lay = layout_of(d)
     if lay == "long":
@@ -339,8 +341,8 @@ def build(s):
                       if d["sample_id_group"]["value"] else {"from": "value column headers"}),
         "samples": [{"sample": sid, "label": v.get("label") or "", "is_study_sample": bool(v.get("is_study_sample", True)),
                      "provenance": provenance(v, SAMPLE_FIELDS)} for sid, v in st.items()],
-        "excluded_columns": [{k: x[k] for k in ("column", "file", "reason", "by", "at")}
-                             for x in accounting.excluded_columns(s, d)],
+        "excluded_columns": [{k: x[k] for k in ("column", "file", "reason", "by", "at", "role", "label", "group_id")
+                              if k in x} for x in accounting.excluded_columns(s, d)],
         "files": accounting.files_entries(s, d),
         "column_ledger": {f: {k: v for k, v in x.items() if k != "problems"}
                           for f, x in accounting.column_ledger(s, d).items()},
@@ -352,13 +354,45 @@ def build(s):
                "models_used": d["ai"].get("models_used", []), "prompt_version": d["ai"]["prompt_version"],
                "temperature": d["ai"]["temperature"], "enabled": d["ai"]["enabled"]},
         "signature_hint": d.get("signature_hint"),
-        "questions": [{"question_id": q["question_id"], "source": q["source"], "type": q["type"], "text": q["text"],
+        "questions": [{"question_id": q["question_id"], "source": q["source"], "kind": q.get("kind"), "key": q.get("key"),
+                       "type": q["type"], "text": q["text"], "step": q.get("step"),
                        "applies_to": q["applies_to"], "status": q["status"],
+                       "options": [{"option_id": o["option_id"], "label": o["label"]} for o in q.get("options", [])],
                        "answer": {k: (q["answer"] or {}).get(k) for k in ("labels", "text", "by", "at")}
                        if q["answer"] else None} for q in questions.public(d)],
-        "log_ref": f"{s.sid}.jsonl",
+        "log_ref": d.get("log_ref") or f"{s.sid}.jsonl",
     }
     return schema, artifacts, flags
+
+
+def finalize(s):
+    """Build and write the Step 0 output folder (one code path for the wizard and the schema
+    import, v3 §4.6): the tables, schema.json and import_manifest.json; publish it into the v3
+    session when the dataset belongs to one. Raises OutputError."""
+    import json
+    from prism.util import now_iso, schema_sha256, write_json
+    schema, artifacts, flags = build(s)
+    out = s.dir / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    for name, text in artifacts.items():
+        (out / name).write_bytes(text.encode("utf-8"))  # exact bytes; no newline translation
+    (out / "schema.json").write_text(json.dumps(schema, indent=2, ensure_ascii=False), encoding="utf-8")
+    s.draft["steps"]["review"] = "confirmed"
+    s.draft["finalized"] = True
+    s.save()
+    imp = s.draft.get("import") or {}
+    man = {"mode": imp.get("mode", "wizard"), "step0_session_id": s.sid, "made_at": now_iso(),
+           "source_file": s.filename, "file_sha256": s.sha, "schema_sha256": schema_sha256(schema)}
+    if imp:
+        man["import"] = imp
+    write_json(out / "import_manifest.json", man)
+    names = ["schema.json"] + list(artifacts) + ["import_manifest.json"]
+    s.log("finalize", {"artifacts": names, "integrity_flags": flags, "schema": schema})
+    if s.study:   # v3 §4.6: the one output contract, copied into the session's dataset
+        from prism import store
+        st = store.load(s.study["session_id"])
+        store.publish_output(st, s.study["dataset_id"], out, man)
+    return schema, names, flags
 
 
 def _check_counts(assays, lay, ledger):
@@ -406,7 +440,7 @@ def _sample_metadata_entries(s, d, meta, derived_cols, rep_):
         if it["role"] != "sample_metadata":
             continue
         for c in s.groups_by_id[gid]["columns"]:
-            out.append({"column": c, "audit_kind": it.get("audit_kind"), "label": it.get("label") or "",
+            out.append({"column": c, "group_id": gid, "audit_kind": it.get("audit_kind"), "label": it.get("label") or "",
                         **({"detail": it["detail"]} if it.get("detail") else {}),
                         **({"family": it["family"]} if it.get("family") else {}),
                         "varies_within_subject": _varies(rep_, "main", c), "confidence": it.get("confidence"),
@@ -504,7 +538,7 @@ def _reconcile_samples(a_label, gs, block_ids, d, lay):
 
 
 def _annotation(s, gid, it, column, i):
-    out = {"column": column, "label": it.get("label") or "", "is_feature_id": it["role"] == "feature_id",
+    out = {"column": column, "group_id": gid, "label": it.get("label") or "", "is_feature_id": it["role"] == "feature_id",
            "marks_rows_as_suspect": bool(it.get("marks_rows_as_suspect")), "keep": it.get("keep", True),
            "provenance": provenance(it, GROUP_FIELDS)}
     if it.get("family"):

@@ -573,3 +573,17 @@ tr.chips th { cursor: default; }
 .bar-n { text-align: right; color: var(--text-dim); }
 .tl-track { position: relative; display: block; height: 12px; border-bottom: 1px solid var(--line); }
 .tl-dot { position: absolute; top: 2px; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: #d9c7a3; }
+
+/* v3: session bar, start paths, import review */
+.session-bar { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 16px; font-size: 13px; }
+.sb-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.sb-head .spacer { flex: 1; }
+.sb-datasets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.ds-chip { border: 1px solid var(--line); border-radius: 14px; padding: 4px 10px; background: transparent; color: var(--text-dim); cursor: pointer; font-size: 12px; }
+.ds-chip.st-confirmed { border-color: #6c6; color: var(--text); }
+.ds-chip.st-imported_awaiting_confirm { border-color: #b58a2a; }
+.start-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 16px 22px 0; }
+.start-tabs .opt-card { text-align: left; }
+.pill.mode-exact { border-color: #6c6; }
+.pill.mode-template, .pill.mode-seeded_wizard { border-color: #b58a2a; }
+@media (max-width: 700px) { .start-tabs { grid-template-columns: 1fr; } }

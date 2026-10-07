@@ -8,7 +8,7 @@ written by the AI (or the user) and are never enumerated here.
 
 from .config import SCOPE_DESCRIPTION
 
-SCHEMA_VERSION = "0.4.0"
+SCHEMA_VERSION = "0.4.1"
 PROMPT_VERSION = "step0-v4.0"
 UNRESOLVED = "unresolved"
 

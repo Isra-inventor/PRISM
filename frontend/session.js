@@ -1,0 +1,189 @@
+// PRISM v3: sessions of one or more datasets, schema import and its review (v3 §3, §4.5).
+// The wizard itself lives in app.js; this file adds the session bar, the start paths and the
+// "Imported schema" review. Nothing is imported or merged without an explicit click.
+
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const KEY = "prism.session";
+  const STATUS = { wizard_in_progress: "wizard in progress", imported_awaiting_confirm: "imported, awaiting confirm", confirmed: "confirmed" };
+  const MODE = {
+    exact: ["Exact", "The data file is the one this schema was made from (same sha256). The schema is accepted as stored; every value-dependent number was recomputed and compared."],
+    template: ["Template", "Same column names, different values. Roles, blocks, annotations, exclusions and rules are reused; everything computed from values is recomputed. Processing history, the time unit and answered value-dependent questions are NOT imported: you answer them again."],
+    seeded_wizard: ["Seeded wizard", "The columns differ. What matches carries over; the rest is unresolved and the wizard opens with the schema as its starting proposal."],
+  };
+  let ST = null;
+
+  function el(tag, attrs = {}, ...children) {
+    const n = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v == null || v === false) continue;
+      if (k === "class") n.className = v;
+      else if (k === "text") n.textContent = v;
+      else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+      else if (k === "disabled") n.disabled = !!v;
+      else n.setAttribute(k, v);
+    }
+    for (const c of children.flat(Infinity)) if (c != null && c !== false) n.append(c.nodeType ? c : document.createTextNode(String(c)));
+    return n;
+  }
+  const show = (n, on = true) => n.classList.toggle("hidden", !on);
+  async function api(path, body, method = "POST") {
+    const opts = { method, headers: {} };
+    if (body instanceof FormData) opts.body = body;
+    else if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
+    const r = await fetch(path, opts);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const d = j.detail;
+      const e = new Error(typeof d === "string" ? d : d?.message || JSON.stringify(d || j));
+      e.errors = d?.errors || [];
+      throw e;
+    }
+    return j;
+  }
+  const store = { get: () => { try { return localStorage.getItem(KEY); } catch (_) { return null; } },
+                  set: (v) => { try { v ? localStorage.setItem(KEY, v) : localStorage.removeItem(KEY); } catch (_) {} } };
+
+  async function load(sid) {
+    try { ST = await api(`/api/sessions/${sid}`, undefined, "GET"); store.set(sid); }
+    catch (_) { ST = null; store.set(null); }
+    renderBar();
+  }
+  async function ensure() {
+    if (ST) return ST.session_id;
+    ST = await api("/api/sessions", { name: "" });
+    store.set(ST.session_id);
+    renderBar();
+    return ST.session_id;
+  }
+  async function refresh() { if (ST) await load(ST.session_id); }
+
+  function ready() {
+    return ST && ST.datasets.length && ST.datasets.every((d) => d.status === "confirmed");
+  }
+  function renderBar() {
+    const bar = $("session-bar");
+    if (!ST) {
+      bar.replaceChildren(el("span", { class: "item-sub", text: "No session yet: adding a dataset starts one. A session can hold several datasets (e.g. proteomics and metabolomics of the same samples)." }));
+      return;
+    }
+    bar.replaceChildren(
+      el("div", { class: "sb-head" }, el("b", { text: "Session " }), el("code", { text: ST.session_id }),
+        el("span", { class: "spacer" }),
+        el("button", { class: "linkbtn", type: "button", text: "Add another dataset", onclick: showStart }),
+        el("button", { class: "linkbtn", type: "button", text: "New session", onclick: async () => { ST = null; store.set(null); await ensure(); showStart(); } }),
+        el("button", { class: "btn btn-sm", type: "button", id: "run-audit", disabled: !ready(), title: ready() ? "Run the Tier 1 audit" : "Every dataset must be confirmed first",
+          text: "Run audit", onclick: () => window.PRISM_AUDIT && window.PRISM_AUDIT.open(ST) })),
+      el("div", { class: "sb-datasets" }, ST.datasets.length ? ST.datasets.map((d) => el("button", {
+        class: `ds-chip st-${d.status}`, type: "button", title: `${d.origin} · ${STATUS[d.status] || d.status}`,
+        onclick: () => openDataset(d) }, el("b", { text: d.dataset_id }), ` ${d.name} · ${STATUS[d.status] || d.status}`)) :
+        el("span", { class: "item-sub", text: "No dataset yet." })));
+  }
+
+  async function openDataset(d) {
+    if (d.status === "imported_awaiting_confirm") return showReview(d.dataset_id);
+    if (d.status === "wizard_in_progress" && d.step0_session_id) {
+      show($("panel-import"), false);
+      try { await window.PRISM_APP.loadStep0(d.step0_session_id); } catch (e) { alert(e.message); }
+      return;
+    }
+    if (d.status === "confirmed" && d.step0_session_id) {
+      show($("panel-import"), false);
+      try { await window.PRISM_APP.loadStep0(d.step0_session_id); } catch (e) { alert(e.message); }
+    }
+  }
+
+  function showStart() {
+    show($("panel-import"), false);
+    window.PRISM_APP?.reset();
+    show($("panel-upload"));
+  }
+
+  // ---------------------------------------------------------------- start paths
+  document.querySelectorAll("#start-tabs .opt-card").forEach((b) => b.addEventListener("click", () => {
+    document.querySelectorAll("#start-tabs .opt-card").forEach((x) => x.classList.toggle("sel", x === b));
+    show($("import-form"), b.dataset.path === "import");
+    show($("wizard-form"), b.dataset.path === "wizard");
+  }));
+  $("imp-go").addEventListener("click", async () => {
+    const data = $("imp-data").files[0], schema = $("imp-schema").files[0], meta = $("imp-meta").files[0];
+    show($("imp-error"), false);
+    if (!data || !schema) { $("imp-error").textContent = "Choose the data file and its schema.json."; show($("imp-error")); return; }
+    const sid = await ensure();
+    const fd = new FormData();
+    fd.append("data", data); fd.append("schema", schema);
+    if (meta) fd.append("metadata", meta);
+    $("imp-go").disabled = true;
+    try {
+      const rep = await api(`/api/sessions/${sid}/datasets`, fd);
+      await load(sid);
+      if (rep.mode === "seeded_wizard") { show($("panel-upload"), false); await window.PRISM_APP.loadStep0(rep.step0_session_id); }
+      else await showReview(rep.dataset_id);
+    } catch (e) {
+      $("imp-error").replaceChildren(el("div", { text: e.message }),
+        e.errors?.length ? el("ul", {}, e.errors.slice(0, 20).map((x) => el("li", {}, el("code", { text: x.path }), " ", x.message))) : null);
+      show($("imp-error"));
+    } finally { $("imp-go").disabled = false; }
+  });
+
+  // ---------------------------------------------------------------- import review
+  const fmt = (v) => typeof v === "number" ? String(+v.toPrecision(6)) : typeof v === "string" ? v : JSON.stringify(v);
+  async function showReview(did) {
+    const box = $("panel-import");
+    let rep;
+    try { rep = await api(`/api/sessions/${ST.session_id}/datasets/${did}/import-report`, undefined, "GET"); }
+    catch (e) { alert(e.message); return; }
+    show($("panel-upload"), false); show($("workspace"), false); show(box);
+    const [mt, md] = MODE[rep.mode] || [rep.mode, ""];
+    const openQ = (rep.questions || []).filter((q) => q.status === "open");
+    const act = async (path, label) => {
+      try { const r = await api(`/api/sessions/${ST.session_id}/datasets/${did}/${path}`, {}); ST = r.session; renderBar(); return r; }
+      catch (e) { alert(e.message); return null; }
+    };
+    const s = rep.summary || {};
+    box.replaceChildren(
+      el("div", { class: "panel-head" }, el("h2", { text: `Imported schema · ${rep.dataset?.name || did}` }),
+        el("span", { class: `pill mode-${rep.mode}`, text: `Mode: ${mt}` })),
+      el("div", { class: "panel-body" },
+        el("p", { class: "q", text: md }),
+        rep.edited_or_corrupt ? el("div", { class: "alert alert-error", text: `The data file is identical, but ${rep.n_differences} number(s) stored in the schema differ from what PRISM recomputes: the schema file was edited or is corrupt. Check the list below before accepting.` }) : null,
+        el("div", { class: "section-label", text: "Checks (re-run from the data)" }),
+        el("ul", { class: "np" }, (rep.checks || []).map((c) => el("li", { class: c.ok ? "" : "warn-text" }, c.ok ? "✓ " : "✗ ", c.check, c.detail ? ` — ${c.detail}` : ""))),
+        el("div", { class: "section-label", text: `Recomputed vs stored (${rep.n_differences || 0} difference${rep.n_differences === 1 ? "" : "s"})` }),
+        rep.differences?.length ? el("table", { class: "ledger" }, el("thead", {}, el("tr", {}, ["path", "stored", "recomputed"].map((h) => el("th", { text: h })))),
+          el("tbody", {}, rep.differences.slice(0, 200).map((x) => el("tr", {}, el("td", {}, el("code", { text: x.path })), el("td", { text: fmt(x.stored) }), el("td", { text: fmt(x.recomputed) })))))
+          : el("p", { class: "item-sub", text: "None: everything computed from the values matches the schema." }),
+        (rep.warnings || []).length ? el("ul", { class: "warns" }, rep.warnings.map((w) => el("li", { text: w }))) : null,
+        el("div", { class: "section-label", text: "Summary" }),
+        el("ul", { class: "review-list" },
+          el("li", {}, el("span", { text: "Layout" }), el("span", { text: (s.layout || "").replace(/_/g, " ") })),
+          ...(s.assays || []).map((a) => el("li", {}, el("span", { text: `Assay ${a.assay_id}` }), el("span", { text: `${a.assay_label} · ${a.n_blocks} block(s), ${a.n_value_columns} value columns` }))),
+          el("li", {}, el("span", { text: "Annotation columns" }), el("span", { text: `${s.annotations_kept} kept, ${s.annotations_excluded} excluded` })),
+          el("li", {}, el("span", { text: "Excluded columns" }), el("span", { text: String(s.excluded_columns ?? 0) })),
+          el("li", {}, el("span", { text: "Design" }), el("span", { text: s.design || "—" })),
+          el("li", {}, el("span", { text: "Samples" }), el("span", { text: String(s.n_samples ?? "—") })),
+          el("li", {}, el("span", { text: "Processing history" }), el("span", { text: Object.entries(s.processing_history || {}).map(([k, v]) => `${k.replace(/_/g, " ")}: ${v ?? "unanswered"}`).join(" · ") }))),
+        openQ.length ? el("div", {}, el("div", { class: "section-label", text: `${openQ.length} open question(s): answer or dismiss before accepting` }),
+          openQ.map((q) => el("div", { class: "question" }, el("b", { text: q.text }), el("div", { class: "question-opts" },
+            (q.options || []).map((o) => el("button", { class: "btn btn-sm", type: "button", text: o.label, onclick: async () => {
+              await api("/api/question/answer", { session_id: rep.step0_session_id, question_id: q.question_id, option_ids: [o.option_id] }).catch((e) => alert(e.message));
+              showReview(did); } })),
+            el("button", { class: "linkbtn", type: "button", text: "Dismiss", onclick: async () => {
+              await api("/api/question/dismiss", { session_id: rep.step0_session_id, question_id: q.question_id }).catch((e) => alert(e.message));
+              showReview(did); } }))))) : null,
+        el("div", { class: "guide-actions" },
+          el("button", { class: "btn btn-light btn-sm", type: "button", text: "Accept", disabled: rep.dataset?.status !== "imported_awaiting_confirm",
+            title: "A logged human confirmation: the output folder is regenerated through the wizard's own finalize",
+            onclick: async () => { if (await act("accept-import")) { show(box, false); showStart(); } } }),
+          el("button", { class: "btn btn-sm", type: "button", text: "Open in the wizard", onclick: async () => {
+            const r = await act("open-wizard"); if (r) { show(box, false); await window.PRISM_APP.loadStep0(r.result); } } }),
+          el("button", { class: "btn btn-sm", type: "button", text: "Reject", onclick: async () => {
+            if (!confirm("Reject this import? Nothing of it is kept.")) return;
+            if (await act("reject")) { show(box, false); showStart(); } } }))));
+  }
+
+  window.PRISM_SESSION = { ensure, refresh, showStart, current: () => ST };
+  const saved = store.get();
+  if (saved) load(saved); else renderBar();
+})();

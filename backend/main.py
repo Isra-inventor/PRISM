@@ -455,27 +455,9 @@ def _do_finalize(req):
     s = session_or_404(req.session_id)
     with s.lock:
         try:
-            schema, artifacts, flags = outputs.build(s)
+            schema, names, flags = outputs.finalize(s)
         except outputs.OutputError as e:
             raise HTTPException(422, str(e))
-        out = s.dir / "outputs"
-        out.mkdir(parents=True, exist_ok=True)
-        for name, text in artifacts.items():
-            (out / name).write_bytes(text.encode("utf-8"))  # exact bytes; no newline translation
-        (out / "schema.json").write_text(json.dumps(schema, indent=2, ensure_ascii=False), encoding="utf-8")
-        s.draft["steps"]["review"] = "confirmed"
-        s.draft["finalized"] = True
-        s.save()
-        from prism.util import now_iso, schema_sha256, write_json
-        write_json(out / "import_manifest.json", {"mode": "wizard", "step0_session_id": s.sid, "made_at": now_iso(),
-                                                  "source_file": s.filename, "file_sha256": s.sha,
-                                                  "schema_sha256": schema_sha256(schema)})
-        names = ["schema.json"] + list(artifacts) + ["import_manifest.json"]
-        s.log("finalize", {"artifacts": names, "integrity_flags": flags, "schema": schema})
-        if s.study:   # v3 §4.6: the one output contract, copied into the session's dataset
-            from prism import store
-            st = store.load(s.study["session_id"])
-            store.publish_output(st, s.study["dataset_id"], out, {"mode": "wizard", "step0_session_id": s.sid})
         return {"schema": schema, "artifacts": names, "integrity_flags": flags}
 
 

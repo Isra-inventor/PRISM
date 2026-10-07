@@ -180,6 +180,8 @@
     try {
       const fd = new FormData();
       fd.append("file", file); fd.append("progress_id", prog.id);
+      const study = window.PRISM_SESSION && await window.PRISM_SESSION.ensure();
+      if (study) fd.append("study_session_id", study);
       const { status, body } = await postWithUpload(`${API}/api/upload`, fd, prog.onUpload);
       if (status < 200 || status >= 300) throw new Error(body.detail || `Upload failed (HTTP ${status}).`);
       S.session = body;
@@ -1469,9 +1471,10 @@
       confirmLabel: S.finalized ? "Add another dataset" : "Confirm & finish",
       confirmDisabled: !S.finalized && unres.length > 0,
       custom: async () => {
-        if (S.finalized) { reset(); return; }
+        if (S.finalized) { reset(); if (window.PRISM_SESSION) window.PRISM_SESSION.showStart(); return; }
         try {
           S.finalized = await api("/api/finalize", { session_id: S.session.session_id });
+          if (window.PRISM_SESSION) window.PRISM_SESSION.refresh();
           S.draft.steps.review = "confirmed";
         } catch (e) { S.local.error = e.message; }
         renderAll();
@@ -1548,4 +1551,15 @@
       if (current?.custom) { if (!current.confirmDisabled) current.custom(); } else submit();
     }
   });
+  // hooks for the v3 session panel (session.js)
+  window.PRISM_APP = {
+    async loadStep0(sid) {
+      const r = await api(`/api/step0/${sid}`, undefined, "GET");
+      Object.assign(S, { session: r.session, draft: r.draft, digests: r.digests, step: "layout", local: {}, finalized: null });
+      show($("panel-upload"), false); show($("workspace")); show($("restart"));
+      $("ws-file").replaceChildren(el("b", { text: r.session.filename }), ` · ${r.session.n_rows.toLocaleString()} rows × ${r.session.n_columns.toLocaleString()} columns`);
+      renderParseNotes(); renderAll(true);
+    },
+    reset,
+  };
 })();

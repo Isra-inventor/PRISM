@@ -35,10 +35,29 @@
         </div>
       </div>
 
+      <!-- v3: the session (one or more datasets) -->
+      <section class="session-bar" id="session-bar"></section>
+
+      <!-- Import review (v3 §4.5) -->
+      <section class="panel hidden" id="panel-import"></section>
+
       <!-- Upload -->
       <section class="panel" id="panel-upload">
-        <div class="panel-head"><h2>Upload a quantified table</h2><span class="meta">.csv · .tsv · .txt</span></div>
-        <div class="panel-body">
+        <div class="panel-head"><h2>Add a dataset</h2><span class="meta">.csv · .tsv · .txt</span></div>
+        <div class="start-tabs" id="start-tabs">
+          <button type="button" class="opt-card sel" data-path="wizard"><strong>Upload data</strong>then confirm its structure step by step (Step 0 wizard)</button>
+          <button type="button" class="opt-card" data-path="import"><strong>Upload data + schema.json</strong>reuse a schema you confirmed before and skip the wizard (you review the import)</button>
+        </div>
+        <div class="panel-body hidden" id="import-form">
+          <div class="item-controls">
+            <label class="field"><span class="field-k">Data file</span><input type="file" class="input" id="imp-data" accept=".csv,.tsv,.txt,.tab"></label>
+            <label class="field"><span class="field-k">schema.json (0.4.x)</span><input type="file" class="input" id="imp-schema" accept=".json"></label>
+            <label class="field full"><span class="field-k">Sample metadata file (if the schema uses one)</span><input type="file" class="input" id="imp-meta" accept=".csv,.tsv,.txt"></label>
+          </div>
+          <button type="button" class="btn btn-light btn-sm" id="imp-go">Import and check</button>
+          <div class="alert alert-error hidden" id="imp-error" role="alert"></div>
+        </div>
+        <div class="panel-body" id="wizard-form">
           <label class="dropzone" id="dropzone" for="file-input">
             <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><path d="M12 16V4M7 9l5-5 5 5M4 16v3a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-3"/></svg>
             <span class="big">Drop a CSV / TSV file, or click to choose</span>
@@ -102,5 +121,6 @@
   </template>
 
   <script src="app.js"></script>
+  <script src="session.js"></script>
 </body>
 </html>

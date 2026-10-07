@@ -1,0 +1,1418 @@
+{
+  "$defs": {
+    "Assay": {
+      "additionalProperties": true,
+      "properties": {
+        "assay_id": {
+          "title": "Assay Id",
+          "type": "string"
+        },
+        "assay_label": {
+          "title": "Assay Label",
+          "type": "string"
+        },
+        "feature_identity": {
+          "$ref": "#/$defs/FeatureIdentity"
+        },
+        "in_supported_scope": {
+          "default": "unsure",
+          "enum": [
+            "yes",
+            "no",
+            "unsure"
+          ],
+          "title": "In Supported Scope",
+          "type": "string"
+        },
+        "n_features": {
+          "title": "N Features",
+          "type": "integer"
+        },
+        "n_samples": {
+          "title": "N Samples",
+          "type": "integer"
+        },
+        "n_value_columns": {
+          "title": "N Value Columns",
+          "type": "integer"
+        },
+        "omics_family": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OmicsFamily"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "omics_type": {
+          "default": "unknown",
+          "title": "Omics Type",
+          "type": "string"
+        },
+        "provenance": {
+          "enum": [
+            "computed",
+            "ai_proposed_confirmed",
+            "ai_proposed_corrected",
+            "user_set",
+            "unanswered"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "scope_reason": {
+          "default": "",
+          "title": "Scope Reason",
+          "type": "string"
+        },
+        "source_software": {
+          "default": "unknown",
+          "title": "Source Software",
+          "type": "string"
+        },
+        "value_blocks": {
+          "items": {
+            "$ref": "#/$defs/ValueBlock"
+          },
+          "minItems": 1,
+          "title": "Value Blocks",
+          "type": "array"
+        }
+      },
+      "required": [
+        "assay_id",
+        "assay_label",
+        "provenance",
+        "feature_identity",
+        "value_blocks",
+        "n_features",
+        "n_samples",
+        "n_value_columns"
+      ],
+      "title": "Assay",
+      "type": "object"
+    },
+    "Design": {
+      "additionalProperties": true,
+      "properties": {
+        "cross_checks": {
+          "default": [],
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Cross Checks",
+          "type": "array"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "repeated_measures": {
+          "additionalProperties": true,
+          "default": {},
+          "title": "Repeated Measures",
+          "type": "object"
+        },
+        "subject": {
+          "$ref": "#/$defs/DesignSide"
+        },
+        "time": {
+          "$ref": "#/$defs/DesignSide"
+        }
+      },
+      "required": [
+        "subject",
+        "time"
+      ],
+      "title": "Design",
+      "type": "object"
+    },
+    "DesignSide": {
+      "additionalProperties": true,
+      "properties": {
+        "column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Column"
+        },
+        "derivation": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Derivation"
+        },
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "n_distinct": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "N Distinct"
+        },
+        "n_subjects": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "N Subjects"
+        },
+        "provenance": {
+          "title": "Provenance",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "metadata_column",
+            "derived_from_sample_names",
+            "none"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        }
+      },
+      "required": [
+        "source",
+        "provenance"
+      ],
+      "title": "DesignSide",
+      "type": "object"
+    },
+    "Excluded": {
+      "additionalProperties": true,
+      "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "At"
+        },
+        "by": {
+          "title": "By",
+          "type": "string"
+        },
+        "column": {
+          "title": "Column",
+          "type": "string"
+        },
+        "file": {
+          "default": "main",
+          "title": "File",
+          "type": "string"
+        },
+        "group_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Id"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
+        }
+      },
+      "required": [
+        "column",
+        "reason",
+        "by"
+      ],
+      "title": "Excluded",
+      "type": "object"
+    },
+    "Fact": {
+      "additionalProperties": true,
+      "properties": {
+        "provenance": {
+          "enum": [
+            "computed",
+            "ai_proposed_confirmed",
+            "ai_proposed_corrected",
+            "user_set",
+            "unanswered"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "value": {
+          "enum": [
+            "samples_in_columns",
+            "samples_in_rows",
+            "long"
+          ],
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "title": "Fact",
+      "type": "object"
+    },
+    "FeatureAnnotation": {
+      "additionalProperties": true,
+      "properties": {
+        "column": {
+          "title": "Column",
+          "type": "string"
+        },
+        "coverage": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Coverage"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Derived From"
+        },
+        "display_labels": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Display Labels"
+        },
+        "family": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Family"
+        },
+        "flag_counts": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Flag Counts"
+        },
+        "flag_values": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Flag Values"
+        },
+        "flagged_values": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Flagged Values"
+        },
+        "from_column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "From Column"
+        },
+        "group_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Id"
+        },
+        "is_feature_id": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Feature Id"
+        },
+        "keep": {
+          "default": true,
+          "title": "Keep",
+          "type": "boolean"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "marks_rows_as_suspect": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Marks Rows As Suspect"
+        },
+        "n_flagged": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "N Flagged"
+        },
+        "provenance": {
+          "title": "Provenance",
+          "type": "string"
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        }
+      },
+      "required": [
+        "column",
+        "provenance"
+      ],
+      "title": "FeatureAnnotation",
+      "type": "object"
+    },
+    "FeatureIdentity": {
+      "additionalProperties": true,
+      "properties": {
+        "columns": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Columns",
+          "type": "array"
+        },
+        "composite": {
+          "default": false,
+          "title": "Composite",
+          "type": "boolean"
+        },
+        "from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "From"
+        },
+        "provenance": {
+          "default": "computed",
+          "title": "Provenance",
+          "type": "string"
+        }
+      },
+      "title": "FeatureIdentity",
+      "type": "object"
+    },
+    "FileEntry": {
+      "additionalProperties": true,
+      "properties": {
+        "file_role": {
+          "enum": [
+            "main",
+            "metadata"
+          ],
+          "title": "File Role",
+          "type": "string"
+        },
+        "join": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Join"
+        },
+        "n_columns": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "N Columns"
+        },
+        "n_rows": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "N Rows"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "parse_report": {
+          "additionalProperties": true,
+          "default": {},
+          "title": "Parse Report",
+          "type": "object"
+        },
+        "sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sha256"
+        },
+        "source_columns": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Columns"
+        },
+        "source_columns_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Columns Sha256"
+        }
+      },
+      "required": [
+        "file_role",
+        "name"
+      ],
+      "title": "FileEntry",
+      "type": "object"
+    },
+    "HistoryItem": {
+      "additionalProperties": true,
+      "properties": {
+        "answer": {
+          "anyOf": [
+            {
+              "enum": [
+                "yes",
+                "no",
+                "not_sure"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Answer"
+        },
+        "answered_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Answered At"
+        },
+        "note": {
+          "default": "",
+          "title": "Note",
+          "type": "string"
+        },
+        "provenance": {
+          "default": "unanswered",
+          "enum": [
+            "computed",
+            "ai_proposed_confirmed",
+            "ai_proposed_corrected",
+            "user_set",
+            "unanswered"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        }
+      },
+      "title": "HistoryItem",
+      "type": "object"
+    },
+    "OmicsFamily": {
+      "additionalProperties": true,
+      "properties": {
+        "provenance": {
+          "title": "Provenance",
+          "type": "string"
+        },
+        "value": {
+          "enum": [
+            "proteomics",
+            "metabolomics",
+            "lipidomics",
+            "transcriptomics",
+            "epigenomics",
+            "genomics",
+            "microbiome",
+            "other",
+            "unknown"
+          ],
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "provenance"
+      ],
+      "title": "OmicsFamily",
+      "type": "object"
+    },
+    "Question": {
+      "additionalProperties": true,
+      "properties": {
+        "answer": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Answer"
+        },
+        "applies_to": {
+          "additionalProperties": true,
+          "default": {},
+          "title": "Applies To",
+          "type": "object"
+        },
+        "key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Key"
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Kind"
+        },
+        "options": {
+          "default": [],
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Options",
+          "type": "array"
+        },
+        "question_id": {
+          "title": "Question Id",
+          "type": "string"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "open",
+            "answered",
+            "dismissed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "step": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Step"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_id",
+        "source",
+        "type",
+        "text",
+        "status"
+      ],
+      "title": "Question",
+      "type": "object"
+    },
+    "Sample": {
+      "additionalProperties": true,
+      "properties": {
+        "is_study_sample": {
+          "default": true,
+          "title": "Is Study Sample",
+          "type": "boolean"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "provenance": {
+          "title": "Provenance",
+          "type": "string"
+        },
+        "sample": {
+          "title": "Sample",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sample",
+        "provenance"
+      ],
+      "title": "Sample",
+      "type": "object"
+    },
+    "SampleIdRule": {
+      "additionalProperties": true,
+      "properties": {
+        "add_prefix": {
+          "default": "",
+          "title": "Add Prefix",
+          "type": "string"
+        },
+        "strip_prefix": {
+          "default": "",
+          "title": "Strip Prefix",
+          "type": "string"
+        },
+        "strip_suffix": {
+          "default": "",
+          "title": "Strip Suffix",
+          "type": "string"
+        }
+      },
+      "title": "SampleIdRule",
+      "type": "object"
+    },
+    "SampleMetadataColumn": {
+      "additionalProperties": true,
+      "properties": {
+        "audit_kind": {
+          "anyOf": [
+            {
+              "enum": [
+                "subject_id",
+                "timepoint",
+                "batch",
+                "run_order",
+                "technical_replicate",
+                "sample_type",
+                "group",
+                "covariate",
+                "other"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Audit Kind"
+        },
+        "column": {
+          "title": "Column",
+          "type": "string"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "derived_from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Derived From"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "evidence": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Evidence"
+        },
+        "family": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Family"
+        },
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File"
+        },
+        "group_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group Id"
+        },
+        "keep": {
+          "default": true,
+          "title": "Keep",
+          "type": "boolean"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "provenance": {
+          "title": "Provenance",
+          "type": "string"
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "varies_within_subject": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Varies Within Subject"
+        }
+      },
+      "required": [
+        "column",
+        "provenance"
+      ],
+      "title": "SampleMetadataColumn",
+      "type": "object"
+    },
+    "ValueBlock": {
+      "additionalProperties": true,
+      "properties": {
+        "block_id": {
+          "title": "Block Id",
+          "type": "string"
+        },
+        "columns": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Columns",
+          "type": "array"
+        },
+        "confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confidence"
+        },
+        "feature_facts": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Feature Facts"
+        },
+        "file": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "File"
+        },
+        "group_id": {
+          "title": "Group Id",
+          "type": "string"
+        },
+        "keep": {
+          "default": true,
+          "title": "Keep",
+          "type": "boolean"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "n_features": {
+          "title": "N Features",
+          "type": "integer"
+        },
+        "n_samples": {
+          "title": "N Samples",
+          "type": "integer"
+        },
+        "profile": {
+          "additionalProperties": true,
+          "default": {},
+          "title": "Profile",
+          "type": "object"
+        },
+        "provenance": {
+          "enum": [
+            "computed",
+            "ai_proposed_confirmed",
+            "ai_proposed_corrected",
+            "user_set",
+            "unanswered"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "sample_id_rule": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SampleIdRule"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "block_id",
+        "group_id",
+        "columns",
+        "provenance",
+        "n_features",
+        "n_samples"
+      ],
+      "title": "ValueBlock",
+      "type": "object"
+    }
+  },
+  "$id": "https://prism/schema/prism_schema_0.4.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "ai": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Ai"
+    },
+    "assays": {
+      "items": {
+        "$ref": "#/$defs/Assay"
+      },
+      "minItems": 1,
+      "title": "Assays",
+      "type": "array"
+    },
+    "column_ledger": {
+      "additionalProperties": true,
+      "default": {},
+      "title": "Column Ledger",
+      "type": "object"
+    },
+    "design": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Design"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "excluded_columns": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Excluded"
+      },
+      "title": "Excluded Columns",
+      "type": "array"
+    },
+    "feature_annotations": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/FeatureAnnotation"
+      },
+      "title": "Feature Annotations",
+      "type": "array"
+    },
+    "file_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "File Sha256",
+      "type": "string"
+    },
+    "files": {
+      "items": {
+        "$ref": "#/$defs/FileEntry"
+      },
+      "minItems": 1,
+      "title": "Files",
+      "type": "array"
+    },
+    "integrity_flags": {
+      "default": [],
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Integrity Flags",
+      "type": "array"
+    },
+    "layout": {
+      "$ref": "#/$defs/Fact"
+    },
+    "log_ref": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Log Ref"
+    },
+    "omics_family": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Omics Family"
+    },
+    "parse_report": {
+      "additionalProperties": true,
+      "default": {},
+      "title": "Parse Report",
+      "type": "object"
+    },
+    "processing_history": {
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/HistoryItem"
+          },
+          {
+            "type": "string"
+          }
+        ]
+      },
+      "default": {},
+      "title": "Processing History",
+      "type": "object"
+    },
+    "questions": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Question"
+      },
+      "title": "Questions",
+      "type": "array"
+    },
+    "sample_id": {
+      "additionalProperties": true,
+      "title": "Sample Id",
+      "type": "object"
+    },
+    "sample_metadata": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SampleMetadataColumn"
+      },
+      "title": "Sample Metadata",
+      "type": "array"
+    },
+    "samples": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Sample"
+      },
+      "title": "Samples",
+      "type": "array"
+    },
+    "schema_version": {
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "signature_hint": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Signature Hint"
+    },
+    "source_file": {
+      "title": "Source File",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "source_file",
+    "file_sha256",
+    "layout",
+    "assays",
+    "sample_id",
+    "files"
+  ],
+  "title": "PRISM Step 0 schema.json (0.4.x)",
+  "type": "object"
+}
