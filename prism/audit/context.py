@@ -52,7 +52,7 @@ def scale_evidence(X):
     ev["all_integer"] = bool(np.all(obs == np.round(obs)))
     ev["all_in_0_1"] = bool(((obs >= 0) & (obs <= 1)).all())
     sums = np.nansum(X, axis=0)
-    ev["cv_sample_sums"] = float(np.std(sums) / np.mean(sums)) if np.mean(sums) else None
+    ev["cv_sample_sums"] = float(np.std(sums) / abs(np.mean(sums))) if np.mean(sums) else None
     ev["negative_present"] = bool((obs < 0).any())
     sx = skew_rows(X)
     ev["median_skew_x"] = float(np.nanmedian(sx)) if np.isfinite(sx).any() else None
@@ -66,7 +66,7 @@ def scale_evidence(X):
         cls = "count_like"
     elif ev["all_in_0_1"]:
         cls = "proportion_like"
-    elif ev["cv_sample_sums"] is not None and ev["cv_sample_sums"] <= 0.001:
+    elif ev["all_non_negative"] and ev["cv_sample_sums"] is not None and ev["cv_sample_sums"] <= 0.001:
         cls = "compositional_like"
     elif ev["negative_present"]:
         cls = "continuous_signed"

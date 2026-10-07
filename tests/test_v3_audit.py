@@ -211,7 +211,7 @@ def test_contract_determinism_params_and_read_only(st, tmp_path):
     d = engine.run(st, factors=["missingness"])
     assert {i["audit_id"] for i in d["findings"]} == {"A4"}
     with pytest.raises(engine.AuditError, match="not built yet"):
-        engine.run(st, factors=["A7"])
+        engine.run(st, factors=["A1"])
 
 
 def test_overrides_change_what_is_used(st, tmp_path):
@@ -312,3 +312,75 @@ def test_golden_real_files(client, isolated):
         assert m8["time_grid"]["within_subject_gaps"] == [4, 4, 4, 4, 4, 8, 8, 8, 56, 56, 64, 64, 64, 64, 88, 120,
                                                           120, 120, 128]
         assert find(man, st, "A5", did)["measures"]["n_subjects"] == 8
+    a11 = find(man, st, "A11", "D2")["measures"]
+    cof = next(s for s in a11["by_stratum"]["strata"] if s["stratum"] == "Cofactors and Vitamins")
+    assert cof["flagged"] and round(cof["max"], 1) == 12301.6
+    # reported back (v3 §9, "expected but unverified"): the median-scaling signature
+    assert find(man, st, "A2", "D2")["measures"]["median_scaling"]["signature"] is True
+    assert find(man, st, "A2", "D1")["measures"]["median_scaling"]["signature"] is False
+
+
+# ------------------------------------------------------------------ stage 5: A7, A11, A2, A3
+
+
+def test_planted_batch_outliers_scale_distribution(st, tmp_path):
+    X, samples, cols = planted_session(st, tmp_path, shift=True, outliers=True)
+    man = engine.run(st, factors=["A2", "A3", "A7", "A11"])
+    a7 = find(man, st, "A7")
+    m7 = a7["measures"]
+    s = {(x["batch"], x["design"]): x for x in m7["structure"]}
+    assert s[("plate", "subject")]["code"] == "nested" and "'subject' is constant within 'plate'" in s[("plate", "subject")]["nesting"]
+    assert s[("run_day", "time")]["code"] == "crossed_balanced"
+    assert s[("plate", "time")]["code"] == "crossed_balanced"
+    rows = m7["associations"]["rows"]
+    perm_day = next(r for r in rows if r["test"] == "permanova" and r["variable"] == "run_day")
+    assert perm_day["q"] < 0.05 and perm_day["r2"] > 0.1 and perm_day["scheme"] == "permuted within subject"
+    pc_day = [r for r in rows if r["test"] == "eta_squared" and r["variable"] == "run_day" and r.get("q") is not None]
+    assert min(r["q"] for r in pc_day) < 0.05
+    perm_plate = next(r for r in rows if r["test"] == "permanova" and r["variable"] == "plate")
+    assert perm_plate["scheme"] == "whole subjects permuted"
+    codes = [i["code"] for i in a7["indicators"]]
+    assert "batch_nested" in codes and "permanova_association" in codes
+    assert len(m7["associations"]["rows"]) >= m7["associations"]["n_tests"] > 0
+    assert len(a7["plot_data"]["pca"]["samples"]) == 36
+
+    a11 = find(man, st, "A11")
+    m11 = a11["measures"]
+    # the outlier sample, and the sample holding the planted outlier cell (one huge cell moves it away
+    # from the median profile)
+    assert set(m11["samples"]["flagged"]) == {"A05_8", samples[5]}
+    assert next(r for r in m11["samples"]["per_sample"] if r["sample"] == "A05_8")["flags"] == ["distance", "pc1"]
+    top = m11["cells"]["top"][0]
+    assert (top["feature"], top["sample"]) == ("f100", samples[5])
+    (stratum,) = m11["by_stratum"]["strata"]
+    assert stratum["feature"] == "f100" and stratum["flagged"] and stratum["max"] == pytest.approx(X[100, 5])
+
+    a2 = find(man, st, "A2")
+    assert a2["measures"]["classification"] == "continuous_linear" and not a2["measures"]["median_scaling"]["signature"]
+    a3 = find(man, st, "A3")
+    assert 0.8 < a3["measures"]["mean_sd_x"]["slope"] < 1.3                      # lognormal: SD grows with the mean
+    lo, hi = a3["measures"]["mean_sd_x"]["ci95"]
+    assert lo < a3["measures"]["mean_sd_x"]["slope"] < hi
+    assert a3["measures"]["skewness"]["x"]["median"] > a3["measures"]["skewness"]["y"]["median"]
+
+
+def test_scale_classes(st, tmp_path):
+    rng = np.random.default_rng(2)
+    s = [f"S{i}" for i in range(10)]
+    af.add(st, tmp_path / "counts", X=rng.poisson(20, size=(40, 10)).astype(float), samples=s)
+    P = rng.random((40, 10))
+    af.add(st, tmp_path / "props", X=P, samples=s)
+    C = rng.random((40, 10))
+    af.add(st, tmp_path / "comp", X=C / C.sum(0) * 1e6, samples=s)
+    L = rng.normal(0, 1, size=(40, 10))
+    af.add(st, tmp_path / "signed", X=L, samples=s)
+    M = 2.0 ** rng.normal(10, 1, size=(40, 10))
+    af.add(st, tmp_path / "scaled", X=M / np.median(M, axis=1, keepdims=True), samples=s)
+    man = engine.run(st, factors=["A2", "A3"])
+    got = {d: find(man, st, "A2", d)["measures"]["classification"] for d in ("D1", "D2", "D3", "D4", "D5")}
+    assert got == {"D1": "count_like", "D2": "proportion_like", "D3": "compositional_like", "D4": "continuous_signed",
+                   "D5": "continuous_linear"}
+    assert "out_of_scope_type" in [i["code"] for i in find(man, st, "A2", "D1")["indicators"]]
+    assert find(man, st, "A3", "D1")["status"] == "not_applicable"
+    assert find(man, st, "A2", "D5")["measures"]["median_scaling"]["signature"] is True
+    assert find(man, st, "A3", "D4")["method"]["transform"]["transform"] == "none"

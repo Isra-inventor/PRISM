@@ -57,7 +57,7 @@ SUBJ_DESIGN = {"subject": {"source": "metadata_column", "column": "animal"},
                "time": {"source": "metadata_column", "column": "week", "unit": {"value": "weeks"}}}
 
 
-def planted(seed=1, n_subj=12, per=3, p=400, icc=0.8):
+def planted(seed=1, n_subj=12, per=3, p=400, icc=0.8, shift=False, outliers=False):
     """12 subjects x 3 weeks. Planted: subject effects giving a known ICC on log2 scale; plate
     constant within subject (4 plates x 3 animals); a batch (run day) that doubles the missing
     rate of low-abundance features; floors in features 0..19; one outlier cell."""
@@ -75,7 +75,14 @@ def planted(seed=1, n_subj=12, per=3, p=400, icc=0.8):
     base = rng.normal(10, 2, size=(p, 1))
     subj_eff = rng.normal(0, sb, size=(p, n_subj))
     L = base + subj_eff[:, [int(a[1:]) for a in animal]] + rng.normal(0, sw, size=(p, n))
+    if shift:      # batch: run day 2 shifts half of the features up by 1.5 (log2)
+        d2 = np.array([x == "d2" for x in day])
+        L[200:, :] += 1.5 * d2[None, :]
+    if outliers:   # one outlier sample (A05_8) and one outlier cell (feature 100, sample 5)
+        L[:, samples.index("A05_8")] += rng.normal(0, 3, size=p)
     X = 2.0 ** L
+    if outliers:
+        X[100, 5] = 10 * X.max()
     # floors: features 0..19 have 4 samples at the feature's minimum
     for i in range(20):
         fl = X[i].min() * 0.5

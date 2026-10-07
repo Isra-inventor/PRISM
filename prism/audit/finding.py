@@ -43,6 +43,26 @@ TEMPLATES = {
                                   "subjects (mean r {diff}).",
     "variable_constant_within_subject": "'{variable}' is constant within every subject: subjects are nested in "
                                         "'{variable}'.",
+    # A7
+    "batch_confounded": "'{batch}' and '{design}' are confounded in this design: their effects cannot be separated.",
+    "batch_nested": "{text}: the two effects cannot be fully separated.",
+    "pc_association": "PC{pc} ({pct}% of variance) is associated with '{variable}' ({stat} {value}, q {q}).",
+    "permanova_association": "'{variable}' accounts for {r2}% of the between-sample distance (PERMANOVA pseudo-F {F}, "
+                             "q {q}; marginal).",
+    # A11
+    "outlier_sample": "Sample '{sample}' is a plausible outlier by {by} (modified z {z}, cut-off {cut}).",
+    "outlier_cells": "{n_cells} cell(s) in {n_features} feature(s) have a within-feature modified z beyond {cut}.",
+    "outlier_max_cell": "The largest value of stratum '{stratum}', {value} ({feature}, sample {sample}), is a plausible "
+                        "outlier cell (modified z {z}, cut-off {cut}).",
+    # A2
+    "scale_class": "The values look like {text}.",
+    "out_of_scope_type": "Tier 1 does not audit {what}: the other audits report not_applicable.",
+    "median_scaling_signature": "Per-feature medians are nearly equal (MAD of log2 medians {mad} below {cut}; median of "
+                                "medians {median}), consistent with per-feature (median) scaling.",
+    # A3
+    "sd_grows_with_mean": "On the original scale SD grows with the mean (log-log slope {b}, 95% CI {lo} to {hi}); a "
+                          "slope near 1 is consistent with multiplicative noise.",
+    "mean_sd_after_transform": "After {transform}, feature mean and SD are still related (Spearman rho {rho}).",
 }
 
 
@@ -103,8 +123,10 @@ class Finding:
                 self.d["needs"].append(n)
         return self
 
-    def method(self, name, n_used=None, **params):
+    def method(self, name, n_used=None, transform=None, **params):
         self.d["method"].update(name=name, params=params)
+        if transform is not None:
+            self.d["method"]["transform"] = transform
         if n_used is not None:
             self.d["method"]["n_used"] = n_used
         return self
@@ -129,13 +151,22 @@ class Finding:
 # ------------------------------------------------------------------ association tables
 
 
-def association(response, var, subject, params, key, guard_subjects=True):
+def _prepare(var, subject, ok):
+    subj = None
+    if subject is not None:
+        subj = np.array([subject[i] for i in range(len(subject))])[ok]
+        if any(s == "" for s in subj):
+            subj = np.array([s if s else f"_sample{i}" for i, s in enumerate(subj)])
+    return subj
+
+
+def association(response, var, subject, params, key, guard_subjects=True, categorical="kruskal_wallis"):
     """One row of an association table: a per-sample response against a variable, Kruskal-Wallis
     (categorical) or |Spearman| (numeric), with restricted permutation p (v3 §6.1)."""
     response = np.asarray(response, float)
     vals = var.values
     ok = np.array([str(v).strip() != "" for v in vals]) & np.isfinite(response)
-    row = {"variable": var.name, "role": var.role, "test": "kruskal_wallis" if not var.numeric else "spearman",
+    row = {"variable": var.name, "role": var.role, "test": categorical if not var.numeric else "spearman",
            "n_used": int(ok.sum())}
     subj = None
     if subject is not None:
@@ -169,15 +200,71 @@ def association(response, var, subject, params, key, guard_subjects=True):
         return dict(row, status="insufficient_data", reason="fewer than 2 levels")
     if counts.min() < 2:
         return dict(row, status="insufficient_data", reason="smallest cell below 2")
-    ry = stats.rankdata(y)
-    obs = stats.kruskal_h(ry, codes, len(levels))
     perm = stats.Permuter(codes, subj, params["permutations"], params["exhaustive_max"], params["seed"], key)
     if perm.n_distinct < 2:
         return dict(row, status="insufficient_data", reason="no permutation is possible under the design")
     P = perm.matrix()
-    H = stats.kruskal_h_rows(ry, P, len(levels))
+    if categorical == "eta_squared":
+        obs = float(stats.eta_sq_rows(y, codes[None, :], len(levels))[0])
+        H = stats.eta_sq_rows(y, P, len(levels))
+        name = "eta_squared"
+    else:
+        ry = stats.rankdata(y)
+        obs = stats.kruskal_h(ry, codes, len(levels))
+        H = stats.kruskal_h_rows(ry, P, len(levels))
+        name = "H"
     p, pmin = perm.p_value(H, obs)
-    return dict(row, status="computed", statistic="H", value=obs, p=p, p_min_attainable=pmin, **perm.describe())
+    return dict(row, status="computed", statistic=name, value=obs, p=p, p_min_attainable=pmin, **perm.describe())
+
+
+def guard(var, subject, ok):
+    """None, or why the variable cannot be tested (v3 §6.1 guards)."""
+    if subject is not None and len({subject[i] for i in np.where(ok)[0] if subject[i]}) < 3:
+        return "fewer than 3 subjects"
+    vals = [var.values[i] for i in np.where(ok)[0]]
+    if var.numeric:
+        return "fewer than 4 samples or one value" if len(vals) < 4 or len(set(vals)) < 2 else None
+    levels = {}
+    for v in vals:
+        levels[v] = levels.get(v, 0) + 1
+    if len(levels) < 2:
+        return "fewer than 2 levels"
+    if min(levels.values()) < 2:
+        return "smallest cell below 2"
+    return None
+
+
+def permanova(K_full, var, subject, params, key):
+    """PERMANOVA of one variable on Euclidean distances of Y (marginal), restricted permutations."""
+    ok = np.array([str(v).strip() != "" for v in var.values])
+    row = {"variable": var.name, "role": var.role, "test": "permanova", "n_used": int(ok.sum())}
+    why = guard(var, subject, ok)
+    if why:
+        return dict(row, status="insufficient_data", reason=why)
+    idx = np.where(ok)[0]
+    K = K_full[np.ix_(idx, idx)]
+    K = K - K.mean(0) - K.mean(1)[:, None] + K.mean()          # re-centre on the samples used
+    subj = _prepare(var, subject, ok)
+    if var.numeric:
+        x = var.as_float()[ok]
+        perm = stats.Permuter(x, subj, params["permutations"], params["exhaustive_max"], params["seed"], key)
+        P = perm.matrix().astype(float)
+        r2o, fo = stats.permanova_numeric_rows(K, x[None, :])
+        r2, F = stats.permanova_numeric_rows(K, P)
+    else:
+        vals = [var.values[i] for i in idx]
+        levels = sorted(set(vals), key=str)
+        codes = np.array([levels.index(v) for v in vals])
+        perm = stats.Permuter(codes, subj, params["permutations"], params["exhaustive_max"], params["seed"], key)
+        if perm.n_distinct < 2:
+            return dict(row, status="insufficient_data", reason="no permutation is possible under the design")
+        P = perm.matrix()
+        r2o, fo = stats.permanova_rows(K, codes[None, :], len(levels))
+        r2, F = stats.permanova_rows(K, P, len(levels))
+    p, pmin = perm.p_value(np.nan_to_num(F, nan=-1.0), float(fo[0]))
+    return dict(row, status="computed", statistic="pseudo_F", value=float(fo[0]), r2=float(r2o[0]), p=p,
+                p_min_attainable=pmin, **perm.describe())
+
 
 
 def _isnum(v):

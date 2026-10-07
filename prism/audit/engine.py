@@ -18,20 +18,21 @@ from .. import manifest as manifest_mod
 from ..ledger import Ledger
 from ..session import merge
 from ..util import canonical_json, now_iso, read_json, sha256_bytes, sha256_file, write_json
-from . import a04_missingness, a05_dimensionality, a08_repeated, context, overrides as ov, params as params_mod
+from . import (a02_scale, a03_distribution, a04_missingness, a05_dimensionality, a07_batch, a08_repeated,
+               a11_outliers, context, overrides as ov, params as params_mod)
 
 # id, code, module (None: built in a later stage). Order of execution: A8 before A5 (ICC).
 REGISTRY = [
     ("A1", "integrity", None),
-    ("A2", "scale", None),
-    ("A3", "distribution", None),
+    ("A2", "scale", a02_scale),
+    ("A3", "distribution", a03_distribution),
     ("A4", "missingness", a04_missingness),
     ("A8", "repeated_measures", a08_repeated),
     ("A5", "dimensionality", a05_dimensionality),
-    ("A7", "batch", None),
+    ("A7", "batch", a07_batch),
     ("A6", "noise_qc", None),
     ("A9", "source_heterogeneity", None),
-    ("A11", "outliers", None),
+    ("A11", "outliers", a11_outliers),
     ("A10", "multiomics_overlap", None),
 ]
 
