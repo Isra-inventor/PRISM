@@ -385,8 +385,10 @@ def build_draft(s, ai_on=True, fixed_layout=None, on_progress=None):
         questions.from_ai(s, d, dict(q, group_id=to_gid(q.get("group_id"))), "proposal")
     after_edit(s)
     s.log("proposal", {"ai": d["ai"], "signature_hint": hint, "layout": d["layout"], "assays": d["assays"],
-                       "groups": {gid: {k: it.get(k) for k in GROUP_FIELDS + ("confidence", "source", "validation")}
+                       "groups": {gid: dict({k: it.get(k) for k in GROUP_FIELDS + ("confidence", "source", "validation")},
+                                            columns=s.groups_by_id[gid]["columns"])
                                   for gid, it in d["groups"].items()},
+                       "questions": [q["text"] for q in d.get("questions", []) if q["source"] == "ai"],
                        "feature_identity": d["feature_identity"]})
     s.save()
     return d
