@@ -45,9 +45,16 @@
   const store = { get: () => { try { return localStorage.getItem(KEY); } catch (_) { return null; } },
                   set: (v) => { try { v ? localStorage.setItem(KEY, v) : localStorage.removeItem(KEY); } catch (_) {} } };
 
+  let J = { merge: null, runs: [] };        // journey state: merge readiness, audit runs
   async function load(sid) {
     try { ST = await api(`/api/sessions/${sid}`, undefined, "GET"); store.set(sid); }
     catch (_) { ST = null; store.set(null); }
+    J = { merge: null, runs: [] };
+    if (ST && ST.datasets.some((d) => d.status === "confirmed")) {
+      [J.merge, J.runs] = await Promise.all([
+        api(`/api/sessions/${sid}/merge-report`, undefined, "GET").catch(() => null),
+        api(`/api/sessions/${sid}/audit`, undefined, "GET").catch(() => [])]);
+    }
     renderBar();
   }
   async function ensure() {
@@ -62,26 +69,60 @@
   function ready() {
     return ST && ST.datasets.length && ST.datasets.every((d) => d.status === "confirmed");
   }
+  const ICON = {
+    data: '<path d="M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3Zm0 0v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+    merge: '<path d="M6 4v5a5 5 0 0 0 5 5h7M6 20v-5M15 11l3 3-3 3"/>',
+    audit: '<path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/>',
+    report: '<path d="M7 3h7l5 5v13H7zM14 3v5h5M10 13h6M10 17h6"/>',
+  };
+  const icon = (k) => { const s2 = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    s2.setAttribute("viewBox", "0 0 24 24"); s2.setAttribute("aria-hidden", "true"); s2.innerHTML = ICON[k]; return s2; };
+
+  function step(n, key, title, state, detail, onclick, extra, id) {
+    return el("li", { class: `j-step j-${state}` },
+      el("button", { type: "button", class: "j-main", id, disabled: state === "locked", onclick,
+        "aria-label": `Step ${n}: ${title} — ${detail}` },
+        el("span", { class: "j-icon" }, icon(key), el("i", { text: state === "done" ? "✓" : String(n) })),
+        el("span", { class: "j-text" }, el("b", { text: title }), el("span", { text: detail }))),
+      extra || null);
+  }
   function renderBar() {
     const bar = $("session-bar");
     if (!ST) {
-      bar.replaceChildren(el("span", { class: "item-sub", text: "No session yet: adding a dataset starts one. A session can hold several datasets (e.g. proteomics and metabolomics of the same samples)." }));
+      bar.replaceChildren(el("ol", { class: "journey" },
+        step(1, "data", "Data", "current", "Add your first dataset", showStart),
+        step(2, "merge", "Merge", "locked", "Line up datasets"),
+        step(3, "audit", "Audit", "locked", "Check the data"),
+        step(4, "report", "Report", "locked", "Export the summary")));
       return;
     }
-    bar.replaceChildren(
-      el("div", { class: "sb-head" }, el("b", { text: "Session " }), el("code", { text: ST.session_id }),
-        el("span", { class: "spacer" }),
-        el("button", { class: "linkbtn", type: "button", text: "Add another dataset", onclick: showStart }),
-        ST.datasets.filter((d) => d.status === "confirmed").length > 1 ?
-          el("button", { class: "linkbtn", type: "button", id: "open-merge", text: "Merge", onclick: () => showMerge() }) : null,
-        el("button", { class: "linkbtn", type: "button", text: "New session", onclick: async () => { ST = null; store.set(null); await ensure(); showStart(); } }),
-        el("button", { class: "btn btn-sm", type: "button", id: "run-audit", disabled: !ready(), title: ready() ? "Run the Tier 1 audit" : "Every dataset must be confirmed first",
-          text: "Run audit", onclick: () => window.PRISM_AUDIT && window.PRISM_AUDIT.open(ST) })),
-      el("div", { class: "sb-datasets" }, ST.datasets.length ? ST.datasets.map((d) => el("button", {
+    const ds = ST.datasets, conf = ds.filter((d) => d.status === "confirmed");
+    const pending = ds.length - conf.length;
+    const m = J.merge, runs = J.runs || [];
+    const mergeOpen = m ? (m.blocking || []).length : 0;
+    const dataState = !ds.length ? "current" : pending ? "current" : "done";
+    const mergeState = conf.length < 2 ? (conf.length && !pending ? "skip" : "locked") : mergeOpen ? "current" : "done";
+    const auditOk = ready() && (!m || m.ready_for_audit);
+    const auditState = !auditOk ? "locked" : runs.length ? "done" : "current";
+    const reportState = runs.length ? "current" : "locked";
+    const chips = el("div", { class: "j-chips" }, ds.map((d) => el("button", {
         class: `ds-chip st-${d.status}`, type: "button", title: `${d.origin} · ${STATUS[d.status] || d.status}`,
-        onclick: () => openDataset(d) }, el("b", { text: d.dataset_id }), ` ${d.name} · ${STATUS[d.status] || d.status}`)) :
-        el("span", { class: "item-sub", text: "No dataset yet." })));
+        onclick: () => openDataset(d) }, el("b", { text: d.dataset_id }), ` ${d.name}`)),
+      el("button", { class: "ds-chip add", type: "button", text: "+ Add", onclick: showStart }));
+    bar.replaceChildren(
+      el("div", { class: "sb-head" }, el("span", { class: "item-sub" }, "Session ", el("code", { text: ST.session_id })),
+        el("span", { class: "spacer" }),
+        el("button", { class: "linkbtn", type: "button", text: "New session", onclick: async () => { ST = null; J = { merge: null, runs: [] }; store.set(null); await ensure(); showStart(); } })),
+      el("ol", { class: "journey" },
+        step(1, "data", "Data", dataState, !ds.length ? "Add your first dataset" : `${conf.length} confirmed${pending ? ` · ${pending} in progress` : ""}`, showStart, chips),
+        step(2, "merge", "Merge", mergeState, conf.length < 2 ? (mergeState === "skip" ? "One dataset: nothing to merge" : "Needs two datasets") :
+          mergeOpen ? `${mergeOpen} item(s) to decide` : `${get(m, "cross_dataset.sample_overlap.n_in_all")} shared samples`, () => showMerge(), null, "open-merge"),
+        step(3, "audit", "Audit", auditState, !ready() ? "Confirm every dataset first" : !auditOk ? "Finish the merge first" :
+          runs.length ? `${runs.length} run(s) · open the latest` : "Run the 11 checks", () => window.PRISM_AUDIT && window.PRISM_AUDIT.open(ST), null, "run-audit"),
+        step(4, "report", "Report", reportState, runs.length ? "Preview and export" : "Run the audit first",
+          () => window.PRISM_FINAL && window.PRISM_FINAL.open(ST), null, "open-report")));
   }
+  const get = (o, path) => path.split(".").reduce((x, k) => (x == null ? x : x[k]), o);
 
   async function openDataset(d) {
     if (d.status === "imported_awaiting_confirm") return showReview(d.dataset_id);
@@ -204,7 +245,7 @@
     try { doc = await api(`${base}/merge-report`, undefined, "GET"); } catch (e) { alert(e.message); return; }
     show($("panel-upload"), false); show($("workspace"), false); show(box);
     const x = doc.cross_dataset;
-    const decide = async (path, body) => { try { await api(`${base}/merge/${path}`, body); } catch (e) { alert(e.message); } showMerge(); };
+    const decide = async (path, body) => { try { await api(`${base}/merge/${path}`, body); } catch (e) { alert(e.message); } await refresh(); showMerge(); };
     const csvIn = el("input", { type: "file", accept: ".csv,text/csv" });
     const sug = x.id_mapping.suggestions || [];
     box.replaceChildren(

@@ -13,6 +13,7 @@
     python -m prism audit report --session SESSION [--run RUN] --format html|json
     python -m prism audit override --session SESSION --kind sample_role --sample S --role qc [--reason R]
     python -m prism audit compare --session SESSION RUN_A RUN_B
+    python -m prism report --session SESSION [--run RUN] [--format html|json] [--out FILE]
 """
 
 from __future__ import annotations
@@ -92,6 +93,11 @@ def build_parser():
     i.add_argument("--session", required=True)
     i.add_argument("--accept", action="store_true", help="accept the import if every check passes")
     _audit_cmds(sub)
+    fr = sub.add_parser("report", help="the final session report (datasets, merge, audit) as one file")
+    fr.add_argument("--session", required=True)
+    fr.add_argument("--run", default=None)
+    fr.add_argument("--format", choices=["html", "json"], default="html")
+    fr.add_argument("--out", default=None)
     return ap
 
 
@@ -167,6 +173,10 @@ def _dispatch(args):
         if args.accept:
             importer.accept(st, rep["dataset_id"])
             print(f"accepted {rep['dataset_id']}")
+        return 0
+    if args.cmd == "report":
+        from .audit import report
+        print(report.write_final(store.load(args.session), args.run, args.format, args.out))
         return 0
     if args.cmd == "audit":
         from .audit import engine

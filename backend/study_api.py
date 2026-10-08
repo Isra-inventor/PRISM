@@ -343,3 +343,21 @@ def explain_differences(sid: str, did: str):
     if not p.exists():
         raise HTTPException(404, "No import report for this dataset.")
     return {"explanations": importer.explain(json.loads(p.read_text(encoding="utf-8")))}
+
+
+# ---------------------------------------------------------------- the final report
+
+
+@router.get("/api/sessions/{sid}/final-report")
+def final_report(sid: str, run_id: Optional[str] = None):
+    from prism.audit import report
+    return _audit(sid, lambda st, e: report.final_bundle(st, run_id))
+
+
+@router.get("/api/sessions/{sid}/final-report.html")
+def final_report_html(sid: str, run_id: Optional[str] = None, download: int = 1):
+    from fastapi.responses import HTMLResponse
+    from prism.audit import report
+    html = _audit(sid, lambda st, e: report.final_html(st, run_id))
+    headers = {"Content-Disposition": f'attachment; filename="prism_report_{sid}.html"'} if download else {}
+    return HTMLResponse(html, headers=headers)

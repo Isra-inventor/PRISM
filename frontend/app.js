@@ -337,9 +337,9 @@
 
   function renderLegend() {
     const items = [["feature ID", "var(--c-fid)"], ["annotation", "var(--c-ann)"], ["value", "var(--c-val)"],
-      ["value (excluded)", "transparent;border:1px solid #333"], ["sample ID", "var(--c-sid)"], ["sample info", "var(--c-smd)"],
-      ["ignored", "transparent;border:1px solid #333"], ["unresolved", "transparent;border:1px solid var(--c-unres)"],
-      ["pending", "transparent;border:1px dashed #555"]];
+      ["value (excluded)", "transparent;border:1px solid var(--line-strong)"], ["sample ID", "var(--c-sid)"], ["sample info", "var(--c-smd)"],
+      ["ignored", "transparent;border:1px solid var(--line-strong)"], ["unresolved", "transparent;border:1px solid var(--c-unres)"],
+      ["pending", "transparent;border:1px dashed var(--line-hover)"]];
     $("legend").replaceChildren(...items.map(([t, c]) => el("span", {}, el("i", { style: `background:${c}` }), t)));
   }
 
@@ -578,7 +578,7 @@
       el("div", { class: "item-foot" }, reconsiderOne(gid), structureTools(gid)));
   }
   function hoverGroup(gid, on) {
-    $("pv").querySelectorAll(`th[data-gid="${gid}"] .chip`).forEach((c) => c.style.outline = on ? "1px solid #fff" : "");
+    $("pv").querySelectorAll(`th[data-gid="${gid}"] .chip`).forEach((c) => c.style.outline = on ? "1px solid var(--ink)" : "");
   }
   const ITEM_FIELDS = ["role", "label", "assay_label", "audit_kind", "marks_rows_as_suspect", "flagged_values", "detail", "keep", "family"];
   function itemDecisions(gids) {
@@ -946,10 +946,10 @@
   function layoutIcon(kind) {
     const ns = "http://www.w3.org/2000/svg", svg = document.createElementNS(ns, "svg");
     svg.setAttribute("width", "44"); svg.setAttribute("height", "30"); svg.setAttribute("viewBox", "0 0 44 30");
-    const rect = (x, y, w, h, f) => { const r = document.createElementNS(ns, "rect"); Object.entries({ x, y, width: w, height: h, fill: f, rx: 1 }).forEach(([k, v]) => r.setAttribute(k, v)); svg.append(r); };
-    if (kind === "samples_in_columns") { rect(0, 0, 12, 30, "#fff"); for (let c = 0; c < 4; c++) rect(15 + c * 7.5, 0, 6, 30, "#ff8a2a"); }
-    else if (kind === "samples_in_rows") { for (let r = 0; r < 5; r++) { rect(0, r * 6.2, 10, 5, "#d9c7a3"); rect(13, r * 6.2, 31, 5, "#ff8a2a"); } }
-    else { for (let r = 0; r < 5; r++) { rect(0, r * 6.2, 14, 5, "#fff"); rect(16, r * 6.2, 14, 5, "#d9c7a3"); rect(32, r * 6.2, 12, 5, "#ff8a2a"); } }
+    const rect = (x, y, w, h, f) => { const r = document.createElementNS(ns, "rect"); Object.entries({ x, y, width: w, height: h, rx: 1 }).forEach(([k, v]) => r.setAttribute(k, v)); r.style.fill = f; svg.append(r); };
+    if (kind === "samples_in_columns") { rect(0, 0, 12, 30, "var(--c-fid)"); for (let c = 0; c < 4; c++) rect(15 + c * 7.5, 0, 6, 30, "var(--c-val)"); }
+    else if (kind === "samples_in_rows") { for (let r = 0; r < 5; r++) { rect(0, r * 6.2, 10, 5, "var(--c-sid)"); rect(13, r * 6.2, 31, 5, "var(--c-val)"); } }
+    else { for (let r = 0; r < 5; r++) { rect(0, r * 6.2, 14, 5, "var(--c-fid)"); rect(16, r * 6.2, 14, 5, "var(--c-sid)"); rect(32, r * 6.2, 12, 5, "var(--c-val)"); } }
     return svg;
   }
   function scopeNotice(a) {
@@ -1101,9 +1101,10 @@
     ctx.clearRect(0, 0, w, hh);
     if (!h || !h.bins || !h.bins.length) return;
     const max = Math.max(...h.bins, 1), bw = w / h.bins.length;
-    ctx.fillStyle = "#ff8a2a";
+    const css = getComputedStyle(document.documentElement);
+    ctx.fillStyle = css.getPropertyValue("--c-val").trim() || "#ff8a2a";
     h.bins.forEach((c, k) => { const bh = (c / max) * (hh - 14 * devicePixelRatio); ctx.fillRect(k * bw + 1, hh - 12 * devicePixelRatio - bh, bw - 2, bh); });
-    ctx.fillStyle = "#777"; ctx.font = `${10 * devicePixelRatio}px monospace`;
+    ctx.fillStyle = css.getPropertyValue("--text-faint").trim() || "#777"; ctx.font = `${10 * devicePixelRatio}px monospace`;
     ctx.fillText(`1e${h.lo.toFixed(1)}`, 2, hh - 2);
     const t = `1e${h.hi.toFixed(1)}`; ctx.fillText(t, w - ctx.measureText(t).width - 2, hh - 2);
     if (h.n_zero) { const z = `${h.n_zero} zeros`; ctx.fillText(z, (w - ctx.measureText(z).width) / 2, hh - 2); }

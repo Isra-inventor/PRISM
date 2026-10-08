@@ -80,3 +80,28 @@ def test_static_html_export_is_self_contained(client, st, tmp_path):
 def test_script_json_is_safe():
     s = report._script_json({"x": "</script><!--"})
     assert "</script>" not in s and "<!--" not in s and json.loads(s) == {"x": "</script><!--"}
+
+
+def test_final_report(client, st, tmp_path):
+    from prism.audit import engine
+    base = f"/api/sessions/{st.sid}"
+    fb = client.get(f"{base}/final-report").json()               # before any audit: datasets only
+    assert fb["audit"] is None and fb["datasets"][0]["n_samples"] == 36
+    engine.run(st)
+    fb = client.get(f"{base}/final-report").json()
+    d = fb["datasets"][0]
+    assert d["omics_family"] == "proteomics" and d["n_features"] == 400 and d["design"]["subject"] == "column 'animal'"
+    assert d["design"]["time_unit"] == "weeks" and d["processing_history"]["imputed"] == "no"
+    assert fb["audit"]["manifest"]["run_id"] and fb["merge"]["ready_for_audit"]
+    r = client.get(f"{base}/final-report.html")
+    assert r.status_code == 200 and "attachment" in r.headers["content-disposition"]
+    html = r.text
+    assert "window.PRISM_REPORT.renderFinal" in html and "prefers-color-scheme" in html and "@media print" in html
+    assert not re.search(r"<script[^>]+src=|<link[^>]+href=|@import|url\(http", html)
+    assert "content-disposition" not in {k.lower() for k in client.get(f"{base}/final-report.html?download=0").headers}
+    from prism import cli
+    out = tmp_path / "final.html"
+    assert cli.main(["report", "--session", st.sid, "--out", str(out)]) == 0
+    assert out.read_text().startswith("<!doctype html>")
+    assert cli.main(["report", "--session", st.sid, "--format", "json"]) == 0
+    assert json.loads((st.dir / "final_report.json").read_text())["session"]["session_id"] == st.sid

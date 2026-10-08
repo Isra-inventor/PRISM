@@ -280,6 +280,13 @@ sessions/<session_id>/
   guards give `insufficient_data`; BH q within each table; count, proportion and compositional data are
   `not_applicable`. Parameters in `prism/audit/audit_params.yaml` (heuristics labelled); every run writes a
   manifest (version, git hash, parameters and their hash, input sha256s, overrides hash, timings) and a ledger.
+- **Workspace and theme**: the tool page is a 4-step journey (Data → Merge → Audit → Report) that shows
+  where you are and what is still open. Every page has a light / night toggle (remembered per browser; the
+  OS setting is used until you choose).
+- **Final report**: step 4, or `python -m prism report --session SID`. One document for the whole session:
+  a plain-language summary, key findings per dataset, what needs your input, declared vs observed, how each
+  dataset was read, key figures, every check, and the methods. It downloads as a single self-contained
+  HTML file (interactive, light / night) and prints cleanly to PDF.
 - **Report**: the "Run audit" panel (run history, parameter drawer with re-run and diff, overrides) and a
   self-contained HTML export with the same renderer (`frontend/audit_report.js`): header with what was used,
   Declared vs observed first, a tab per dataset, a card per audit with plots from `plot_data`.
@@ -302,6 +309,7 @@ python -m prism audit run --session SID [--factor A4] [--dataset D1] [--param pe
 python -m prism audit show --session SID [--run RUN]
 python -m prism audit report --session SID [--run RUN] --format html|json [--out FILE]
 python -m prism audit compare --session SID RUN_A RUN_B
+python -m prism report --session SID [--format html|json] [--out FILE]
 ```
 Python 3.7 or later; numpy, FastAPI and Pydantic 2 (no pandas, scipy or scikit-learn).
 
@@ -390,7 +398,8 @@ frontend/  index.html (home + 3D prism) · tool.html + app.js (wizard) · style.
 prism/     store.py (sessions) · io/ (loader, schema_model, importer, rebuild, library) · session/merge.py
            audit/ (engine, context, stats, finding, params + audit_params.yaml, overrides, a01..a11, report, operator)
            cli.py · ledger.py · manifest.py
-frontend/  session.js (session bar, import review, merge) · audit.js + audit_report.js/.css (audit panel, export)
+frontend/  theme.js (light / night) · session.js (journey, import review, merge) · audit.js + final.js +
+           audit_report.js/.css (audit panel, final report, exports)
 tests/     fixtures/ (A–F, H 16S, I methylation, J subject-code blocks, messy file) · fake_europepmc.py · test_deterministic.py · test_grouping.py
            test_flow.py · test_consistency.py · test_command.py · test_literature.py · test_real_api.py
 ```

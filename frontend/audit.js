@@ -53,7 +53,8 @@
         runs.slice().reverse().map((r) => el("option", { value: r, selected: b && r === b.manifest.run_id ? "selected" : null, text: r })))) : null,
       el("button", { class: "linkbtn", type: "button", text: "Parameters", onclick: () => toggle("audit-params") }),
       el("button", { class: "linkbtn", type: "button", text: "Overrides", onclick: () => toggle("audit-overrides") }),
-      b ? el("a", { class: "linkbtn", href: `/api/sessions/${SID}/audit/${b.manifest.run_id}/report.html`, download: `prism_audit_${b.manifest.run_id}.html`, text: "Export HTML" }) : null,
+      b ? el("a", { class: "linkbtn", href: `/api/sessions/${SID}/audit/${b.manifest.run_id}/report.html`, download: `prism_audit_${b.manifest.run_id}.html`, text: "Export this audit" }) : null,
+      b ? el("button", { class: "btn btn-sm", type: "button", text: "Final report →", onclick: () => window.PRISM_FINAL && window.PRISM_FINAL.open({ session_id: SID }) }) : null,
       el("span", { class: "spacer" }),
       el("button", { class: "linkbtn", type: "button", text: "Close", onclick: close }));
   }
@@ -76,7 +77,7 @@
     CUR = b;
     const root = el("div", { id: "audit-report" });
     frame(root, b, diff);
-    CTRL = R().render(root, b, { live: true });
+    CTRL = R().render(root, b, { live: true, actions: el("span") });
     return CTRL;
   }
 
@@ -98,7 +99,8 @@
       renderChat();
     };
     input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
-    return el("div", { class: "audit-chat" },
+    return el("details", { class: "audit-chat", open: CHAT.length ? "" : null },
+      el("summary", {}, el("b", { text: "Ask the AI about these results" }), el("span", { class: "item-sub", text: " · optional" })),
       el("div", { id: "audit-chat-log" }),
       el("div", { class: "audit-chat-row" }, input, el("button", { class: "btn btn-sm", type: "button", id: "audit-chat-send", text: "Ask", onclick: send })),
       el("p", { class: "item-sub", text: "The AI sees the schemas and these findings only, never your data rows. Its tools run the same deterministic audit; every call is in the ledger. Parameters change only when your message names them." }));
@@ -157,6 +159,7 @@
         if (cmp) diff = R().diffPanel(cmp);
       }
       await show(man.run_id, diff);
+      window.PRISM_SESSION && window.PRISM_SESSION.refresh();
     } catch (e) { error(e.message); if (btn) { btn.disabled = false; btn.textContent = "Run audit"; } }
   }
 
