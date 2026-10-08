@@ -702,3 +702,5 @@ body { transition: background-color .3s, color .3s; }
 .journey { align-items: start; }
 .audit-chat > summary { cursor: pointer; font-size: 13px; padding: 2px 0; }
 .audit-chat[open] > summary { margin-bottom: 8px; }
+.journey.n3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 900px) { .journey.n3 { grid-template-columns: 1fr; } }

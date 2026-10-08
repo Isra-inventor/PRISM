@@ -89,38 +89,43 @@
   function renderBar() {
     const bar = $("session-bar");
     if (!ST) {
-      bar.replaceChildren(el("ol", { class: "journey" },
+      bar.replaceChildren(el("ol", { class: "journey n3" },
         step(1, "data", "Data", "current", "Add your first dataset", showStart),
-        step(2, "merge", "Merge", "locked", "Line up datasets"),
-        step(3, "audit", "Audit", "locked", "Check the data"),
-        step(4, "report", "Report", "locked", "Export the summary")));
+        step(2, "audit", "Audit", "locked", "Check the data"),
+        step(3, "report", "Report", "locked", "Export the summary")));
       return;
     }
     const ds = ST.datasets, conf = ds.filter((d) => d.status === "confirmed");
     const pending = ds.length - conf.length;
     const m = J.merge, runs = J.runs || [];
     const mergeOpen = m ? (m.blocking || []).length : 0;
-    const dataState = !ds.length ? "current" : pending ? "current" : "done";
-    const mergeState = conf.length < 2 ? (conf.length && !pending ? "skip" : "locked") : mergeOpen ? "current" : "done";
+    const multi = ds.length > 1;                    // merging only exists when there is something to line up
     const auditOk = ready() && (!m || m.ready_for_audit);
-    const auditState = !auditOk ? "locked" : runs.length ? "done" : "current";
-    const reportState = runs.length ? "current" : "locked";
+    const states = {
+      data: !ds.length || pending ? "current" : "done",
+      merge: conf.length < 2 ? "locked" : mergeOpen ? "current" : "done",
+      audit: !auditOk ? "locked" : runs.length ? "done" : "current",
+      report: runs.length ? "current" : "locked",
+    };
+    const shared = get(m, "cross_dataset.sample_overlap.n_in_all");
+    const mergeDetail = conf.length < 2 ? "After both datasets are confirmed"
+      : mergeOpen ? `${mergeOpen} item(s) to decide`
+      : shared ? `Nothing to decide · ${shared} shared samples` : "No shared samples: each dataset stands alone";
     const chips = el("div", { class: "j-chips" }, ds.map((d) => el("button", {
         class: `ds-chip st-${d.status}`, type: "button", title: `${d.origin} · ${STATUS[d.status] || d.status}`,
         onclick: () => openDataset(d) }, el("b", { text: d.dataset_id }), ` ${d.name}`)),
-      el("button", { class: "ds-chip add", type: "button", text: "+ Add", onclick: showStart }));
+      el("button", { class: "ds-chip add", type: "button", text: "+ Add", title: "Add another dataset (e.g. metabolomics of the same samples)", onclick: showStart }));
+    const steps = [["data", "Data", !ds.length ? "Add your first dataset" : `${conf.length} confirmed${pending ? ` · ${pending} in progress` : ""}`, showStart, chips]];
+    if (multi) steps.push(["merge", "Merge", mergeDetail, () => showMerge(), null, "open-merge"]);
+    steps.push(["audit", "Audit", !ready() ? "Confirm every dataset first" : !auditOk ? "Decide the open merge items first" :
+      runs.length ? `${runs.length} run(s) · open the latest` : "Run the 11 checks", () => window.PRISM_AUDIT && window.PRISM_AUDIT.open(ST), null, "run-audit"]);
+    steps.push(["report", "Report", runs.length ? "Preview and export" : "Run the audit first", () => window.PRISM_FINAL && window.PRISM_FINAL.open(ST), null, "open-report"]);
     bar.replaceChildren(
       el("div", { class: "sb-head" }, el("span", { class: "item-sub" }, "Session ", el("code", { text: ST.session_id })),
         el("span", { class: "spacer" }),
         el("button", { class: "linkbtn", type: "button", text: "New session", onclick: async () => { ST = null; J = { merge: null, runs: [] }; store.set(null); await ensure(); showStart(); } })),
-      el("ol", { class: "journey" },
-        step(1, "data", "Data", dataState, !ds.length ? "Add your first dataset" : `${conf.length} confirmed${pending ? ` · ${pending} in progress` : ""}`, showStart, chips),
-        step(2, "merge", "Merge", mergeState, conf.length < 2 ? (mergeState === "skip" ? "One dataset: nothing to merge" : "Needs two datasets") :
-          mergeOpen ? `${mergeOpen} item(s) to decide` : `${get(m, "cross_dataset.sample_overlap.n_in_all")} shared samples`, () => showMerge(), null, "open-merge"),
-        step(3, "audit", "Audit", auditState, !ready() ? "Confirm every dataset first" : !auditOk ? "Finish the merge first" :
-          runs.length ? `${runs.length} run(s) · open the latest` : "Run the 11 checks", () => window.PRISM_AUDIT && window.PRISM_AUDIT.open(ST), null, "run-audit"),
-        step(4, "report", "Report", reportState, runs.length ? "Preview and export" : "Run the audit first",
-          () => window.PRISM_FINAL && window.PRISM_FINAL.open(ST), null, "open-report")));
+      el("ol", { class: `journey n${steps.length}` }, steps.map(([key, title, detail, onclick, extra, id], i) =>
+        step(i + 1, key, title, states[key], detail, onclick, extra, id))));
   }
   const get = (o, path) => path.split(".").reduce((x, k) => (x == null ? x : x[k]), o);
 

@@ -280,7 +280,8 @@ sessions/<session_id>/
   guards give `insufficient_data`; BH q within each table; count, proportion and compositional data are
   `not_applicable`. Parameters in `prism/audit/audit_params.yaml` (heuristics labelled); every run writes a
   manifest (version, git hash, parameters and their hash, input sha256s, overrides hash, timings) and a ledger.
-- **Workspace and theme**: the tool page is a 4-step journey (Data → Merge → Audit → Report) that shows
+- **Workspace and theme**: the tool page is a short journey (Data → Audit → Report; a Merge step appears
+  only when the session has two or more datasets, and completes by itself when there is nothing to decide) that shows
   where you are and what is still open. Every page has a light / night toggle (remembered per browser; the
   OS setting is used until you choose).
 - **Final report**: step 4, or `python -m prism report --session SID`. One document for the whole session:

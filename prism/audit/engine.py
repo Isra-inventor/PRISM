@@ -130,7 +130,7 @@ def run(st, factors=None, datasets=None, params=None, who="user"):
                 index.append({"file": name, "audit_id": aid, "audit": f["audit"], "dataset": c.dataset_id,
                               "assay": u.unit_id, "assay_label": u.label, "status": f["status"],
                               "indicators": [i["code"] for i in f["indicators"]], "needs": f["needs"]})
-    if "A10" in audit_ids:
+    if "A10" in audit_ids and (len(ctxs) > 1 or factors):   # session level: only with several datasets
         t = time.time()
         f = a10_multiomics.run_session(merged, ctxs, P).to_json()
         name = "A10__session.json"

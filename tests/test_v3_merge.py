@@ -286,3 +286,15 @@ def test_golden_real_files_share_all_27_samples(client, isolated):
     p = x["sample_overlap"]["pairs"][0]
     assert (p["n_shared"], p["n_only_a"], p["n_only_b"]) == (27, 0, 0) and p["jaccard"] == 1.0
     assert x["id_mapping"]["suggestions"] == [] and doc["ready_for_audit"], doc["blocking"]
+
+
+def test_one_dataset_needs_no_merge(st, tmp_path):
+    """A single dataset: nothing to merge, nothing to decide, ready for audit; the session-level
+    multi-omics check is not run by default."""
+    from prism.audit import engine
+    add(st, tmp_path, "only", ["A", "B", "C"])
+    doc = merge.report(st)
+    assert doc["ready_for_audit"] and doc["blocking"] == []
+    assert doc["cross_dataset"]["id_mapping"]["suggestions"] == [] and doc["cross_dataset"]["conflicts"] == []
+    man = engine.run(st)
+    assert "A10" not in {i["audit_id"] for i in man["findings"]}
