@@ -73,9 +73,9 @@ def load_metabolomics(matrix, annotation, samples):
 z = lambda v: (v - v.mean()) / v.std(ddof=1)
 
 
-def vif_table(d, element, use_vl):
+def vif_table(d, element, use_vl, use_stage=True):
     """Variance-inflation factors of the fixed-effect design (excluding intercept)."""
-    X = pd.get_dummies(d["ART_stage"], drop_first=True).astype(float)
+    X = pd.get_dummies(d["ART_stage"], drop_first=True).astype(float) if use_stage else pd.DataFrame(index=d.index)
     X.insert(0, element, z(d[element].values))
     if use_vl:
         X.insert(1, "VL", z(d["Log10VL"].values))
@@ -88,13 +88,13 @@ def vif_table(d, element, use_vl):
     return pd.Series(out)
 
 
-def run_element(Y, d, ann, element, use_vl=True, df_method="bw"):
+def run_element(Y, d, ann, element, use_vl=True, df_method="bw", use_stage=True):
     d = d.loc[Y.index]
     cols = {"const": np.ones(len(d)), element: z(d[element].values)}
     if use_vl:
         cols["VL"] = z(d["Log10VL"].values)
     stage_dm = pd.get_dummies(d["ART_stage"], drop_first=True).astype(float)
-    present = [s for s in STAGES[1:] if s in stage_dm and stage_dm[s].sum() > 0]
+    present = [s for s in STAGES[1:] if s in stage_dm and stage_dm[s].sum() > 0] if use_stage else []
     for s in present:
         cols[s] = stage_dm[s].values
     names = list(cols)
@@ -126,9 +126,10 @@ def main():
     ap.add_argument("--out-dir", default="results")
     ap.add_argument("--omics", choices=["proteomics", "metabolomics"], default="proteomics")
     ap.add_argument("--elements", nargs="*", default=ELEMENTS)
-    ap.add_argument("--vl", choices=["none", "adjust", "both"], default="both",
-                    help="'none' = stage model WITHOUT viral load (recommended primary: VL is ~85%% "
-                         "explained by stage), 'adjust' = add log10 VL (notebook model), 'both' = run both")
+    ap.add_argument("--scenarios", nargs="*", default=["stage", "vl", "stage+vl"],
+                    choices=["stage", "vl", "stage+vl"],
+                    help="stage = element + ART stage | vl = element + log10 VL (no stage) | "
+                         "stage+vl = element + VL + stage (original notebook model)")
     ap.add_argument("--df", choices=["bw", "resid", "conservative"], default="bw")
     ap.add_argument("--metabolite-matrix"); ap.add_argument("--metabolite-annotation")
     a = ap.parse_args()
@@ -142,18 +143,18 @@ def main():
     print(f"{a.omics}: {Y.shape[1]} features, {len(d)} samples, {d.nhp_id.nunique()} animals")
     print(pd.crosstab(d.nhp_id, d.ART_stage).T.to_string())
 
-    for mode in (["none", "adjust"] if a.vl == "both" else [a.vl]):
-        print(f"\n=============== viral load: {mode} ===============")
+    for mode in a.scenarios:
+        print(f"\n=============== scenario: {mode} ===============")
         run_mode(a, d, Y, ann, mode)
 
 
 def run_mode(a, d, Y, ann, mode):
-    out = Path(a.out_dir) / a.omics / f"vl_{mode}"
+    out = Path(a.out_dir) / a.omics / mode.replace("+", "_")
     out.mkdir(parents=True, exist_ok=True)
     allres, vifs = [], {}
     for el in a.elements:
-        vifs[el] = vif_table(d, el, mode == "adjust")
-        r = run_element(Y, d, ann, el, mode == "adjust", a.df)
+        vifs[el] = vif_table(d, el, "vl" in mode, "stage" in mode)
+        r = run_element(Y, d, ann, el, "vl" in mode, a.df, "stage" in mode)
         r.to_csv(out / f"lmm_{el}.csv", index=False)
         allres.append(r)
         n = {k: int((r[k] < .05).sum()) for k in [c for c in r if c.startswith("q_")]}
@@ -164,12 +165,14 @@ def run_mode(a, d, Y, ann, mode):
     big.to_csv(out / "lmm_all_elements.csv", index=False)
     pd.DataFrame(vifs).T.round(2).to_csv(out / "vif.csv")
     print("\nVIF (>5 = worrying):\n", pd.DataFrame(vifs).T.round(1).to_string())
-    summ = big.groupby("element").agg(
-        n_features=("feature", "size"),
-        E_q05=("q_E", lambda s: (s < .05).sum()),
-        E_global_q05=("q_E_global", lambda s: (s < .05).sum()),
-        stage_q05=("q_stage", lambda s: (s < .05).sum()),
-        animal_var_zero=("animal_var_zero", "mean")).reindex(a.elements)
+    sig = lambda s: (s < .05).sum()
+    spec = {"n_features": ("feature", "size"), "E_q05": ("q_E", sig), "E_global_q05": ("q_E_global", sig)}
+    if "VL" in mode.upper():
+        spec["VL_q05"] = ("q_VL", sig)
+    if "stage" in mode:
+        spec["stage_q05"] = ("q_stage", sig)
+    spec["animal_var_zero"] = ("animal_var_zero", "mean")
+    summ = big.groupby("element").agg(**spec).reindex(a.elements)
     summ.to_csv(out / "summary_by_element.csv")
     print("\n", summ.round(3).to_string())
 

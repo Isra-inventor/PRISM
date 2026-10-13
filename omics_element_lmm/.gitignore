@@ -1,2 +1,5 @@
 results/**/lmm_*.csv
 __pycache__/
+deliverables/
+*.zip
+run.log
