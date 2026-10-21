@@ -165,6 +165,20 @@ def run(st, factors=None, datasets=None, params=None, who="user", state=None):
         index.append({"file": name, "audit_id": "A10", "audit": f["audit"], "dataset": "session", "assay": "session",
                       "assay_label": "all datasets", "status": f["status"],
                       "indicators": [i["code"] for i in f["indicators"]], "needs": f["needs"]})
+    for c in ctxs:     # C2: the verification measures (v4 section 9)
+        if c.state.get("checkpoint") == "C2":
+            from . import verification
+            t = time.time()
+            for f_ in verification.run_dataset(st, c.dataset_id, c.state, items, P):
+                f = f_.to_json()
+                f["state_id"], f["checkpoint"] = c.state["state_id"], "C2"
+                name = f"V__{c.dataset_id}_{f['assay']}.json"
+                write_json(rdir / "findings" / name, f)
+                ledger.record("audit.V", {"dataset": c.dataset_id, "unit": f["assay"]}, who, f)
+                index.append({"file": name, "audit_id": "V", "audit": f["audit"], "dataset": c.dataset_id,
+                              "assay": f["assay"], "assay_label": f["assay_label"], "status": f["status"],
+                              "indicators": [i["code"] for i in f["indicators"]], "needs": f["needs"]})
+            timings[f"V:{c.dataset_id}"] = round(time.time() - t, 3)
     dvo = []
     for i in index:
         if i["audit_id"] == "A4":
