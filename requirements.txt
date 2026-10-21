@@ -13,3 +13,11 @@ typing_extensions>=4.7
 numpy>=1.21,<1.22; python_version < "3.8"   # the Tier 1 audit (prism/)
 numpy>=1.21; python_version >= "3.8"
 pytest>=7   # tests only
+# v4: registry/rules files and the missingness detection curve
+pyyaml>=5.4
+scipy>=1.7,<1.8; python_version < "3.8"
+scipy>=1.7; python_version >= "3.8"
+# optional (v4): PVCA mixed models, LOESS (wraps the original loess code), Phase 2 kNN
+# statsmodels>=0.13
+# scikit-misc>=0.1.4
+# scikit-learn>=1.0
