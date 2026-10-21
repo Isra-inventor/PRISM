@@ -1,0 +1,6 @@
+min_animals_same_direction,observed_proteins,null_mean,null_95pct,null_max,perm_p
+1,4458,3711,4900,5979,0.1499
+2,531,313,597,991,0.08991
+3,37,12.46,34,209,0.04296
+4,1,0.231,1,9,0.1668
+5,0,0.003,0,1,1

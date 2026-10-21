@@ -1,0 +1,43 @@
+animals used: {'DEAB': 4, 'DEL5': 5, 'GA43': 4, 'T544': 6, 'T623': 5} | not usable (single sample, no within-animal information): {'KPN': 1, 'T530': 1, 'T545': 1}
+proteins with mean rho permutation q<0.05: 0 | q<0.10: 2 | meta (HK) q<0.05: 0
+null sd of mean rho 0.234; observed SD of mean rho across proteins 0.261  (ratio 1.12; 1 = nothing beyond chance)
+median I2 among proteins with perm q<0.05: None
+  held_out_animal  n_top  mean_oriented_rho_in_held_out  pct_same_sign_in_held_out  null_mean  perm_p
+0            DEAB    100                         -0.012                       36.0      0.002   0.585
+1            DEL5    100                          0.243                       67.0      0.001   0.068
+2            GA43    100                         -0.054                       38.0      0.000   0.627
+3            T544    100                          0.131                       59.0     -0.000   0.047
+4            T623    100                          0.285                       72.0     -0.002   0.039
+
+proteome-wide similarity of Cu-association profiles between animals (Pearson of rho vectors):
+       DEAB  DEL5  GA43  T544  T623
+DEAB  1.00  0.05 -0.10  0.07  0.10
+DEL5  0.05  1.00  0.05  0.11  0.18
+GA43 -0.10  0.05  1.00 -0.21 -0.03
+T544  0.07  0.11 -0.21  1.00  0.10
+T623  0.10  0.18 -0.03  0.10  1.00
+observed mean off-diagonal 0.032 | null mean -0.000 (sd 0.049, max over 100 perms 0.196)
+smallest possible exact two-sided p per animal: {'DEAB': 0.0833, 'DEL5': 0.0167, 'GA43': 0.0833, 'T544': 0.0028, 'T623': 0.0167}
+
+element P, per-animal association = exact permutation p <= 0.1; animals: {'DEAB': 4, 'DEL5': 5, 'GA43': 4, 'T544': 6, 'T623': 5}
+ min_animals_same_direction  observed_proteins  null_mean  null_95pct  null_max  perm_p
+                          1               4458    3711.47      4900.0      5979    0.15
+                          2                531     313.05       597.0       991    0.09
+                          3                 37      12.46        34.0       209    0.04
+                          4                  1       0.23         1.0         9    0.17
+                          5                  0       0.00         0.0         1    1.00
+
+proteins associated (p<=0.10, same direction) in >=3 animals: 37
+   label  rho_DEAB  rho_DEL5  rho_GA43  rho_T544  rho_T623  n_animals_same_direction
+  PPP3CA       1.0       0.9      -0.4      0.89       1.0                         4
+   KCNJ9      -0.8      -0.8      -1.0     -0.83      -0.9                         3
+   MMP19      -0.8      -0.5      -1.0     -0.94      -1.0                         3
+C10orf82      -0.4      -1.0      -0.8     -0.89      -1.0                         3
+   TEKT2      -0.8      -0.9      -0.4     -0.83      -1.0                         3
+   MAGI2       1.0       0.6       1.0      0.43       0.9                         3
+     IL5      -0.2      -0.9      -0.8     -1.00      -0.9                         3
+   MANEA       0.4       0.9       0.4      0.83       0.9                         3
+   CEPT1       0.6       0.9       0.0      0.94       0.9                         3
+    EMC1      -0.6      -0.9       0.0     -0.83      -0.9                         3
+   FNDC5      -0.2      -0.9      -0.4     -0.83      -0.9                         3
+  CXCL13      -0.4      -0.9      -0.2     -0.83      -0.9                         3

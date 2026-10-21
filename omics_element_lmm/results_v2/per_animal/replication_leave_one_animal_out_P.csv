@@ -1,0 +1,6 @@
+held_out_animal,n_top,mean_oriented_rho_in_held_out,pct_same_sign_in_held_out,null_mean,perm_p
+DEAB,100,-0.012,36,0.00186,0.5855
+DEL5,100,0.243,67,0.000788,0.06798
+GA43,100,-0.054,38,4.067e-05,0.6275
+T544,100,0.1312,59,-0.0003619,0.04732
+T623,100,0.285,72,-0.0019,0.03865
