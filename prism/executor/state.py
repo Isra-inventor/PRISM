@@ -216,13 +216,37 @@ def meta(st, did, state_id):
     raise StateError(f"Unknown state '{state_id}' for dataset {did}.")
 
 
+_scale_cache = {}
+
+
 def root_scale(st, did):
-    """linear | log2 | unknown, from the user-confirmed processing state (overrides.json)."""
+    """linear | log2 | unknown, from the confirmed processing state: the user's answer
+    (overrides.json, kind processing_state), else the Step 0 declaration when it matches the
+    observed A2 scale class of every assay (A13's `effective` value)."""
     from ..audit import overrides as ov
-    for o in reversed(ov.load(st)):
-        if o.get("kind") == "processing_state" and o.get("item") == "log_transformed" \
-                and o.get("dataset") in (None, "", did):
-            return {"yes": "log2", "no": "linear"}.get(str(o.get("value")), "unknown")
+    from ..audit.a13_processing_state import LOG_LIKE, confirmed, declared
+    items = ov.load(st)
+    c = confirmed(items, did, "log_transformed")
+    if c in ("yes", "no"):
+        return {"yes": "log2", "no": "linear"}[c]
+    out = st.output_dir(did)
+    from ..util import read_json as _rj
+    dec = declared(_rj(out / "schema.json").get("processing_history") or {}, "log_transformed")
+    if dec not in ("yes", "no"):
+        return "unknown"
+    key = (str(out), tuple(sorted(_matrix_hashes(out).items())))
+    if key not in _scale_cache:
+        from ..audit.context import scale_evidence
+        data = StateData.load(out)
+        classes = set()
+        for b in data.blocks:
+            classes.add(scale_evidence(b.X)[0])
+        _scale_cache[key] = classes
+    classes = _scale_cache[key]
+    if dec == "yes" and classes <= set(LOG_LIKE):
+        return "log2"
+    if dec == "no" and classes == {"continuous_linear"}:
+        return "linear"
     return "unknown"
 
 

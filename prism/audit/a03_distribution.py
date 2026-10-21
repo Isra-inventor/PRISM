@@ -37,6 +37,8 @@ def run(unit, ctx, params, results):
         boots = boots[np.isfinite(boots)]
         M["mean_sd_x"] = {"slope": b, "ci95": [float(np.quantile(boots, 0.025)), float(np.quantile(boots, 0.975))],
                           "n_features": int(ok.sum()), "excluded": int((~ok).sum()), "bootstrap": params["bootstrap"]}
+        results.setdefault(unit.dataset_id, {}).setdefault(unit.unit_id, {}).update(
+            a3_slope=float(b), a3_slope_ci95=M["mean_sd_x"]["ci95"])
         if M["mean_sd_x"]["ci95"][0] > 0.5:
             f.indicate("sd_grows_with_mean", M["mean_sd_x"], b=round(b, 3), lo=round(M["mean_sd_x"]["ci95"][0], 3),
                        hi=round(M["mean_sd_x"]["ci95"][1], 3))

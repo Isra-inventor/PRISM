@@ -1,0 +1,16 @@
+# Platform notes (Build Request v4, section 4.2). Editable. A note is shown next to a processing-
+# state mismatch; it never overrides the user's answer or the evidence.
+notes:
+  - id: somascan_vendor_normalized
+    platform: SomaScan
+    detect:
+      feature_columns_any: [SeqId, SeqIdVersion, SomaId, SomaId_meta, SomaId_anno]
+      text_any: [somascan, somalogic, somamer]
+    items: [normalized]
+    text: >-
+      SomaScan data come out of the vendor pipeline already normalized (hybridization normalization,
+      plate scaling, calibration, then median or ANML normalization); a declared normalized: no for
+      such a file is likely wrong.
+    verify_with_vendor_documentation: true
+    evidence: [somascan_vendor_docs]
+    evidence_level: unverified

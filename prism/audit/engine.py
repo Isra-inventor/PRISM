@@ -19,7 +19,7 @@ from ..ledger import Ledger
 from ..session import merge
 from ..util import canonical_json, now_iso, read_json, sha256_bytes, sha256_file, write_json
 from . import (a01_integrity, a02_scale, a03_distribution, a04_missingness, a05_dimensionality, a06_noise_qc, a07_batch, a08_repeated,
-               a09_source, a10_multiomics, a11_outliers, context, overrides as ov, params as params_mod)
+               a09_source, a10_multiomics, a11_outliers, a13_processing_state, context, overrides as ov, params as params_mod)
 
 # id, code, module (None: built in a later stage). Order of execution: A8 before A5 (ICC).
 REGISTRY = [
@@ -27,6 +27,7 @@ REGISTRY = [
     ("A2", "scale", a02_scale),
     ("A3", "distribution", a03_distribution),
     ("A4", "missingness", a04_missingness),
+    ("A13", "processing_state", a13_processing_state),
     ("A8", "repeated_measures", a08_repeated),
     ("A5", "dimensionality", a05_dimensionality),
     ("A7", "batch", a07_batch),
