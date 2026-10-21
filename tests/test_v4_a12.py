@@ -115,3 +115,26 @@ def test_wording_rule_and_nothing_filled(isolated, tmp_path):
     from prism.io.loader import load_output
     out = load_output(st.output_dir("D1"))
     assert np.isnan(out.assays[0]["blocks"][0].X).sum() == np.isnan(X).sum()
+
+
+def test_oracle_protdp_detection_curve(tmp_path):
+    """Compare PRISM's simplified b1 with the authors' protDP::dpc (Li and Smyth 2023; Apache-2.0,
+    installed from https://github.com/mengbo-li/protDP 1.1.0 for comparison only) on protDP's public
+    example data (datasetA, protein level, log2). The models differ (protDP corrects the observed
+    means for censoring with moderated variances), so the difference is recorded, not required to
+    be small."""
+    import r_oracle as ro
+    ro.need("protDP")
+    r = ro.run("data(datasetA); y <- log2(as.matrix(datasetA$prot)); f <- dpc(y);"
+               "write.csv(y, 'y.csv', na=''); write.csv(t(as.matrix(f$beta)), 'b.csv')", tmp_path,
+               packages=("protDP",))
+    assert r.returncode == 0, r.stderr
+    b_r = ro.read_matrix(tmp_path / "b.csv")[0]
+    import csv
+    rows = list(csv.reader(open(tmp_path / "y.csv")))[1:]
+    Y = np.array([[float(x) if x not in ("", "NA") else np.nan for x in r_[1:]] for r_ in rows])
+    dc = detection_curve(Y, defaults())
+    print(f"ORACLE protDP dpc (datasetA prot) b0 {b_r[0]:.4f} b1 {b_r[1]:.4f} vs PRISM b0 {dc['b0']:.4f} "
+          f"b1 {dc['b1']:.4f} (CI {dc['b1_ci95'][0]:.3f} to {dc['b1_ci95'][1]:.3f}); "
+          f"difference in b1 {dc['b1'] - b_r[1]:.4f}")
+    assert dc["status"] == "computed" and np.isfinite(b_r).all()
