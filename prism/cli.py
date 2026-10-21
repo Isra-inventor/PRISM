@@ -14,6 +14,9 @@
     python -m prism audit override --session SESSION --kind sample_role --sample S --role qc [--reason R]
     python -m prism audit compare --session SESSION RUN_A RUN_B
     python -m prism report --session SESSION [--run RUN] [--format html|json] [--out FILE]
+    python -m prism audit run --session SESSION --state STATE_ID      (the checkpoint battery of that state)
+    python -m prism audit compare --session SESSION --state A --state B
+    python -m prism state list|show|diff --session SESSION [STATE] [STATE_B]
     python -m prism registry show [--json]
     python -m prism evidence check
 """
@@ -58,6 +61,7 @@ def _audit_cmds(sub):
     r.add_argument("--factor", action="append", default=None, help="audit id or code (A4 / missingness); repeatable")
     r.add_argument("--dataset", action="append", default=None)
     r.add_argument("--param", action="append", default=[], help="key=value, recorded in the manifest")
+    r.add_argument("--state", default=None, help="a state id (or prefix): runs that state's checkpoint battery")
     sh = s2.add_parser("show")
     sh.add_argument("--session", required=True)
     sh.add_argument("--run", default=None)
@@ -68,8 +72,12 @@ def _audit_cmds(sub):
     rp.add_argument("--out", default=None)
     o = s2.add_parser("override", help="add an entry to overrides.json (input to the next run)")
     o.add_argument("--session", required=True)
-    o.add_argument("--kind", required=True, choices=["sample_role", "exclude_from_audit", "batch_variable",
-                                                      "design_variable", "source_variable", "param"])
+    from .audit.overrides import KINDS
+    o.add_argument("--kind", required=True, choices=list(KINDS))
+    o.add_argument("--item", default=None, help="processing_state item")
+    o.add_argument("--feature", default=None, help="control_feature")
+    o.add_argument("--level", default=None, help="feature_level")
+    o.add_argument("--assay", default=None)
     o.add_argument("--sample", default=None)
     o.add_argument("--role", default=None)
     o.add_argument("--column", default=None)
@@ -79,8 +87,24 @@ def _audit_cmds(sub):
     o.add_argument("--reason", default="")
     c = s2.add_parser("compare")
     c.add_argument("--session", required=True)
-    c.add_argument("run_a")
-    c.add_argument("run_b")
+    c.add_argument("run_a", nargs="?")
+    c.add_argument("run_b", nargs="?")
+    c.add_argument("--state", action="append", default=None, help="two states: a before/after table")
+
+
+def _state_cmds(sub):
+    p = sub.add_parser("state", help="data states (v4 section 2)")
+    s2 = p.add_subparsers(dest="action", required=True)
+    ls = s2.add_parser("list")
+    ls.add_argument("--session", required=True)
+    ls.add_argument("--dataset", default=None)
+    sh = s2.add_parser("show")
+    sh.add_argument("--session", required=True)
+    sh.add_argument("state")
+    df = s2.add_parser("diff")
+    df.add_argument("--session", required=True)
+    df.add_argument("state_a")
+    df.add_argument("state_b")
 
 
 def build_parser():
@@ -95,6 +119,7 @@ def build_parser():
     i.add_argument("--session", required=True)
     i.add_argument("--accept", action="store_true", help="accept the import if every check passes")
     _audit_cmds(sub)
+    _state_cmds(sub)
     fr = sub.add_parser("report", help="the final session report (datasets, merge, audit) as one file")
     fr.add_argument("--session", required=True)
     fr.add_argument("--run", default=None)
@@ -137,7 +162,9 @@ def main(argv=None):
         from .session.merge import MergeError
         from .audit.engine import AuditError
         from .audit.overrides import OverrideError
-        if isinstance(e, (MergeError, AuditError, OverrideError)):
+        from .executor import ExecutorError
+        from .executor.state import StateError
+        if isinstance(e, (MergeError, AuditError, OverrideError, ExecutorError, StateError)):
             print(f"error: {e}", file=sys.stderr)
             return 2
         raise
@@ -164,6 +191,28 @@ def _dispatch(args):
             print(f"  problem: {p}", file=sys.stderr)
         print("evidence check: ok" if res["ok"] else f"evidence check: {len(res['problems'])} problem(s)")
         return 0 if res["ok"] else 1
+    if args.cmd == "state":
+        from .executor import state as state_mod
+        st = store.load(args.session)
+        try:
+            if args.action == "list":
+                for s in state_mod.list_states(st, args.dataset):
+                    c = s["counts"]
+                    print(f"{s['dataset']:<4} {s['label']:<4} {s['state_id'][:12]} {s['checkpoint']} {s['scale']:<8} "
+                          f"{c['n_features']}x{c['n_samples']} nan={c['n_nan']} {s['op'] or 'root'}{'  HEAD' if s['head'] else ''}")
+            elif args.action == "show":
+                did, sid = state_mod.find(st, args.state)
+                print(json.dumps(state_mod.meta(st, did, sid), indent=2))
+            elif args.action == "diff":
+                da, a = state_mod.find(st, args.state_a)
+                db, b = state_mod.find(st, args.state_b)
+                if da != db:
+                    raise state_mod.StateError("The two states belong to different datasets.")
+                print(json.dumps(state_mod.diff(st, da, a, b), indent=2))
+        except state_mod.StateError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        return 0
     if args.cmd == "session":
         if args.action == "new":
             s = store.create(args.name)
@@ -210,7 +259,8 @@ def _dispatch(args):
         from .audit import engine
         st = store.load(args.session)
         if args.action == "run":
-            run = engine.run(st, factors=args.factor, datasets=args.dataset, params=parse_params(args.param), who="user")
+            run = engine.run(st, factors=args.factor, datasets=args.dataset, params=parse_params(args.param), who="user",
+                             state=args.state)
             print(run["run_id"])
             for i in run["findings"]:
                 print(f"  {i['audit_id']:<4} {i['dataset']}/{i['assay']:<8} {i['status']:<22} {', '.join(i['indicators'])}")
@@ -223,10 +273,19 @@ def _dispatch(args):
         elif args.action == "override":
             from .audit import overrides
             val = parse_params([f"v={args.value}"])["v"] if args.value is not None else None
+            if args.kind in ("processing_state", "zeros_are_missing", "floor_censored"):
+                val = args.value
             e = overrides.add(st, {"kind": args.kind, "sample": args.sample, "role": args.role, "column": args.column,
-                                   "dataset": args.dataset, "key": args.key, "value": val, "reason": args.reason})
+                                   "dataset": args.dataset, "key": args.key, "value": val, "reason": args.reason,
+                                   "item": args.item, "feature": args.feature, "level": args.level,
+                                   "assay": args.assay})
             print(e["override_id"])
         elif args.action == "compare":
-            print(json.dumps(engine.compare(st, args.run_a, args.run_b), indent=2))
+            if args.state:
+                if len(args.state) != 2:
+                    raise SystemExit("--state is given twice: --state BEFORE --state AFTER")
+                print(json.dumps(engine.compare_states(st, args.state[0], args.state[1]), indent=2))
+            else:
+                print(json.dumps(engine.compare(st, args.run_a, args.run_b), indent=2))
         return 0
     return 2

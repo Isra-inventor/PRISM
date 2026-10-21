@@ -162,7 +162,11 @@ class Unit:
     @property
     def Y(self):
         if self._Y is None:
-            self._Y, self.y_rule = diagnostic_copy(self.X)
+            if getattr(self.ds, "state_scale", None) in ("log2", "arcsinh"):
+                self._Y, self.y_rule = self.X.copy(), {"transform": "none", "c": None,
+                                                       "reason": f"the state is on a {self.ds.state_scale} scale"}
+            else:
+                self._Y, self.y_rule = diagnostic_copy(self.X)
         return self._Y
 
     @staticmethod
@@ -202,10 +206,14 @@ class Unit:
 
 
 class DatasetCtx:
-    def __init__(self, st, d, merged, overrides, params):
+    def __init__(self, st, d, merged, overrides, params, state=None):
         self.st, self.entry, self.params = st, d, params
         self.dataset_id = d["dataset_id"]
-        self.output = load_output(st.output_dir(self.dataset_id))
+        from ..executor import state as state_mod
+        self.state = state or state_mod.meta(st, self.dataset_id, state_mod.root_id(st, self.dataset_id))
+        self.state_scale = self.state.get("scale")
+        self.folder = state_mod.folder(st, self.dataset_id, self.state["state_id"])
+        self.output = load_output(self.folder)
         self.schema = self.output.schema
         view = next(v for v in merged["views"] if v.did == self.dataset_id)
         self.view = view
@@ -346,11 +354,12 @@ class DatasetCtx:
         return [self.subject["values"].get(s, "") for s in unit.samples]
 
 
-def build(st, overrides, params, datasets=None):
+def build(st, overrides, params, datasets=None, states=None):
+    """states: {dataset_id: state meta}; a dataset without one is read at its root state S0."""
     merged = merge.compute(st)
     out = []
     for d in st.confirmed():
         if datasets and d["dataset_id"] not in datasets:
             continue
-        out.append(DatasetCtx(st, d, merged, overrides, params))
+        out.append(DatasetCtx(st, d, merged, overrides, params, (states or {}).get(d["dataset_id"])))
     return merged, out

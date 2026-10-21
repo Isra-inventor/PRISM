@@ -4,14 +4,20 @@
 
 kinds: sample_role {sample, role: qc|blank|pool|study, dataset?}; exclude_from_audit {sample, dataset?};
 batch_variable / design_variable / source_variable {column}; param {key, value}.
+v4: processing_state {item, value: yes|no|unsure, dataset?} (a human confirmation of A13);
+control_feature {feature, dataset?, assay?}; feature_level {level, dataset?, assay?};
+zeros_are_missing {value: yes|no, dataset?, assay?}; floor_censored {value: yes|no, dataset?}.
 """
 
 from __future__ import annotations
 
 from ..util import now_iso, read_json, sha256_file, write_json
 
-KINDS = ("sample_role", "exclude_from_audit", "batch_variable", "design_variable", "source_variable", "param")
+KINDS = ("sample_role", "exclude_from_audit", "batch_variable", "design_variable", "source_variable", "param",
+         "processing_state", "control_feature", "feature_level", "zeros_are_missing", "floor_censored")
 ROLES = ("qc", "blank", "pool", "study")
+HISTORY_ITEMS = ("log_transformed", "normalized", "imputed", "batch_corrected", "removed_before_upload")
+FEATURE_LEVELS = ("fragment", "precursor", "peptide", "protein", "metabolite_feature", "other")
 
 
 class OverrideError(Exception):
@@ -42,6 +48,17 @@ def validate(o):
         raise OverrideError(f"role must be one of {', '.join(ROLES)}.")
     if k in ("batch_variable", "design_variable", "source_variable") and not o.get("column"):
         raise OverrideError(f"'{k}' needs a column.")
+    if k == "processing_state":
+        if o.get("item") not in HISTORY_ITEMS:
+            raise OverrideError(f"processing_state item must be one of {', '.join(HISTORY_ITEMS)}.")
+        if o.get("value") not in ("yes", "no", "unsure"):
+            raise OverrideError("processing_state value must be yes, no or unsure.")
+    if k == "control_feature" and not o.get("feature"):
+        raise OverrideError("'control_feature' needs a feature.")
+    if k == "feature_level" and o.get("level") not in FEATURE_LEVELS:
+        raise OverrideError(f"feature_level level must be one of {', '.join(FEATURE_LEVELS)}.")
+    if k in ("zeros_are_missing", "floor_censored") and o.get("value") not in ("yes", "no"):
+        raise OverrideError(f"'{k}' value must be yes or no.")
     if k == "param":
         from .params import ParamError, resolve
         try:

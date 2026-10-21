@@ -37,6 +37,12 @@ REGISTRY = [
 ]
 
 
+# The battery of each checkpoint (v4 section 2.3). C2 adds the verification measures (section 9).
+BATTERY = {"C0": None,   # the full battery
+           "C1": ("A3", "A4", "A6", "A7", "A8", "A12"),
+           "C2": ("A3", "A4", "A6", "A7", "A8", "A12")}
+
+
 class AuditError(Exception):
     pass
 
@@ -69,10 +75,11 @@ def _inputs(st, ctxs):
     """sha256 of every file the audit reads."""
     out = {}
     for c in ctxs:
-        folder = st.output_dir(c.dataset_id)
+        folder = c.folder
+        rel = folder.relative_to(st.dir).as_posix()
         for p in sorted(folder.iterdir()):
-            if p.is_file():
-                out[f"datasets/{c.dataset_id}/output/{p.name}"] = sha256_file(p)
+            if p.is_file() and p.name != "state.json":
+                out[f"{rel}/{p.name}"] = sha256_file(p)
     for name in ("session_sample_table.csv", "session_schema.json"):
         p = st.dir / name
         if p.exists():
@@ -80,8 +87,23 @@ def _inputs(st, ctxs):
     return out
 
 
-def run(st, factors=None, datasets=None, params=None, who="user"):
+def _resolve_state(st, state, datasets):
+    from ..executor import state as state_mod
+    if not state:
+        return None, datasets, None
+    try:
+        did, sid = state_mod.find(st, state)
+    except state_mod.StateError as e:
+        raise AuditError(str(e))
+    m = state_mod.meta(st, did, sid)
+    return {did: m}, datasets or [did], m["checkpoint"]
+
+
+def run(st, factors=None, datasets=None, params=None, who="user", state=None):
     t0 = time.time()
+    states, datasets, checkpoint = _resolve_state(st, state, datasets)
+    if not factors and checkpoint and BATTERY.get(checkpoint):
+        factors = [a for a in BATTERY[checkpoint] if any(a == x for x, _, m in REGISTRY if m is not None)]
     audit_ids = resolve_factors(factors)
     items = ov.load(st)
     try:
@@ -112,7 +134,7 @@ def run(st, factors=None, datasets=None, params=None, who="user"):
     ledger = Ledger(rdir / "ledger.jsonl")
     timings = {}
     t = time.time()
-    merged, ctxs = context.build(st, items, P, datasets)
+    merged, ctxs = context.build(st, items, P, datasets, states)
     timings["load"] = round(time.time() - t, 3)
     index = []
     results = {}
@@ -122,6 +144,7 @@ def run(st, factors=None, datasets=None, params=None, who="user"):
             for aid in [a for a in audit_ids if a != "A10"]:
                 t = time.time()
                 f = mods[aid].run(u, c, P, results).to_json()
+                f["state_id"], f["checkpoint"] = c.state["state_id"], c.state.get("checkpoint", "C0")
                 name = f"{aid}__{c.dataset_id}_{u.unit_id}.json"
                 write_json(rdir / "findings" / name, f)
                 dt = round(time.time() - t, 3)
@@ -151,6 +174,9 @@ def run(st, factors=None, datasets=None, params=None, who="user"):
              "units": [{"dataset": c.dataset_id, "unit": u.unit_id, "label": u.label, "n_samples": u.n,
                         "n_features": u.p, "excluded_by_override": u.excluded_by_override,
                         "non_study_samples": u.non_study_samples, "scale": u.scale} for c in ctxs for u in c.units],
+             "states": {c.dataset_id: {"state_id": c.state["state_id"], "label": c.state.get("label"),
+                                       "checkpoint": c.state.get("checkpoint", "C0"), "scale": c.state.get("scale")}
+                        for c in ctxs},
              "overrides_applied": items, "params_changed": changed}
     man = manifest_mod.build(run_id, st.sid, P, _inputs(st, ctxs), ov.sha(st), timings, scope)
     man["who"] = who
@@ -246,3 +272,42 @@ def compare(st, run_a, run_b):
             "overrides_changed": ma.get("overrides_sha256") != mb.get("overrides_sha256"),
             "findings_identical": ma["findings_sha256"] == mb["findings_sha256"], "findings": diffs,
             "compared_at": now_iso()}
+
+
+def latest_run_for_state(st, state_id):
+    for rid in reversed(list_runs(st)):
+        man = read_json(runs_dir(st) / rid / "manifest.json")
+        if any(v.get("state_id") == state_id for v in (man.get("scope", {}).get("states") or {}).values()):
+            return rid
+    return None
+
+
+def compare_states(st, state_a, state_b):
+    """Before/after table of two states: the state diff and the latest audit run on each."""
+    from ..executor import state as state_mod
+    try:
+        da, a = state_mod.find(st, state_a)
+        db, b = state_mod.find(st, state_b)
+    except state_mod.StateError as e:
+        raise AuditError(str(e))
+    if da != db:
+        raise AuditError("The two states belong to different datasets.")
+    ra, rb = latest_run_for_state(st, a), latest_run_for_state(st, b)
+    out = {"dataset": da, "state_a": a, "state_b": b, "state_diff": state_mod.diff(st, da, a, b),
+           "run_a": ra, "run_b": rb}
+    if not ra or not rb:
+        out["missing_runs"] = [s for s, r in ((a, ra), (b, rb)) if not r]
+        return out
+    cmp = compare(st, ra, rb)
+    ma, mb = read_json(runs_dir(st) / ra / "manifest.json"), read_json(runs_dir(st) / rb / "manifest.json")
+    fa = {(i["audit_id"], i["assay"]): i for i in ma["findings"] if i["dataset"] == da}
+    fb = {(i["audit_id"], i["assay"]): i for i in mb["findings"] if i["dataset"] == da}
+    rows = []
+    for key in sorted(set(fa) | set(fb)):
+        x, y = fa.get(key), fb.get(key)
+        rows.append({"audit_id": key[0], "assay": key[1], "status_before": x and x["status"],
+                     "status_after": y and y["status"],
+                     "indicators_before": x["indicators"] if x else None, "indicators_after": y["indicators"] if y else None})
+    out["table"] = rows
+    out["measures"] = cmp["findings"]
+    return out
