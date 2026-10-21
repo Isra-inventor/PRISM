@@ -1,0 +1,15 @@
+per_element/proteomics_<E>.csv  (one row per protein, sorted by M1 p). Every model has a random intercept per animal, REML, t-tests. All 27 samples used.
+beta = change in log2 protein per 1 SD of element.  p = t-test p;  q = Benjamini-Hochberg FDR across the 11,011 proteins, separately for each term.
+ M1_stage_*       protein ~ element + stage(ref Pre-ART).  *_E element term; *_Early/Mid/Late_vs_Pre; *_p_stageF = omnibus stage test
+ M2_vl_*          protein ~ element + log10 viral load (no stage)
+ M3_week_*        protein ~ element + log2(week+1)  (treatment time as continuous)
+ M4_wb_*          protein ~ element_within + element_between + stage.  within = sample's deviation from its own animal's mean; between = animal's mean
+ M5_Exweek_*      protein ~ element * time. *_E_x_week = does the element association change along treatment weeks (q = FDR)
+ M6_slope_*       element slope in each stage (Pre/Early/Mid/Late) with SE; *_heterogeneity = do the slopes differ between stages
+ M7_hemo_*        M1 + hemolysis score (red-cell proteins HBB, HBD, CA1, CAT, BLVRB, FECH, ALAS2, SOD1).  is_hemolysis_marker = protein is part of that score
+ M8_rank_*        M1 with the element rank-normalised (limits leverage of extreme concentrations; no sample removed)
+ LOAO_*           diagnostic only: M1 element term re-fitted leaving each animal out (n refits with p<.05, same sign; worst p)
+ animal_var_zero  True = animal variance estimated 0 (model reduces to ordinary regression for that protein)
+ df used: element terms 8, between-animal term 4, others n-G-(p-1)  (set by permutation calibration keeping animal clustering)
+Other files: element_trajectories_vs_naive.csv (all 37 samples), element_week_trend.csv, protein_trajectory_stage_week.csv (element-free protein changes with stage/week),
+ tri/modules_*.csv (protein modules), tri/protein_pairs_<E>.csv (best protein pairs, FWER by permutation), tri/coupling_<E>.csv (A->B coupling x element), top25_proteins_per_element.csv

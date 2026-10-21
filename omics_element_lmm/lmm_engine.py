@@ -84,8 +84,11 @@ def term_tests(fit, X, term_idx, df_method="bw"):
     df_method: 'bw' (default) = n-G-(p-1) ; 'resid' = n-p ; 'conservative' = min(n-p, G-1)
     """
     n, p, G = fit["n"], fit["p"], fit["G"]
-    df = {"resid": n - p, "conservative": max(1, min(n - p, G - 1)),
-          "bw": bw_df(n, G, p)}[df_method]
+    if isinstance(df_method, (int, float)):
+        df = df_method
+    else:
+        df = {"resid": n - p, "conservative": max(1, min(n - p, G - 1)),
+              "bw": bw_df(n, G, p)}[df_method]
     b, s = fit["beta"][term_idx], fit["se"][term_idx]
     t = b / s
     return b, s, t, df, 2 * stats.t.sf(np.abs(t), df)
@@ -95,8 +98,11 @@ def wald_f(fit, term_idxs, df_method="bw"):
     """Omnibus F test that several coefficients are jointly zero."""
     n, p, G = fit["n"], fit["p"], fit["G"]
     k = len(term_idxs)
-    df2 = {"resid": n - p, "conservative": max(1, min(n - p, G - 1)),
-           "bw": bw_df(n, G, p)}[df_method]
+    if isinstance(df_method, (int, float)):
+        df2 = df_method
+    else:
+        df2 = {"resid": n - p, "conservative": max(1, min(n - p, G - 1)),
+               "bw": bw_df(n, G, p)}[df_method]
     Fv = np.empty(fit["beta"].shape[1])
     for j in range(len(Fv)):
         b = fit["beta"][term_idxs, j]

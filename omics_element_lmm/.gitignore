@@ -3,3 +3,11 @@ __pycache__/
 deliverables/
 *.zip
 run.log
+results_v2/per_element/
+results_v2/tri/coupling_*.csv
+results_v2/tri/protein_pairs_*.csv
+results_v2/tri/module_eigengenes.csv
+results_v2/tri/modules_membership.csv
+*.zip
+run_*.log
+nohup.out
