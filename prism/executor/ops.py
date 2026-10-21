@@ -226,3 +226,221 @@ def op_arcsinh(data, p, ctx):
 
 register(OpSpec("arcsinh_transform", op_arcsinh, ("G5",), {"cofactor": REQUIRED, "justification": REQUIRED},
                 pre_arcsinh, scale_after="arcsinh", doc="arcsinh(x / cofactor); the cofactor needs a justification."))
+
+
+# ------------------------------------------------------------------ helpers for sample-level parameters
+
+
+def _sample_values(g, mapping):
+    """Values of a {sample: value} mapping for a unit's samples ('' when absent)."""
+    return [str(mapping.get(s, "")) if mapping.get(s) is not None else "" for s in g[0].sample_ids]
+
+
+def _orders(g, mapping):
+    out = []
+    for s in g[0].sample_ids:
+        try:
+            out.append(float(mapping.get(s)))
+        except (TypeError, ValueError):
+            out.append(np.nan)
+    return np.array(out)
+
+
+# ------------------------------------------------------------------ drift_qc_loess (G6, global)
+
+
+def pre_drift_qc(data, p, ctx):
+    out = [_check("log_scale", data.scale in ("log2", "arcsinh"), data.scale,
+                  "the state is on a log (or arcsinh) scale")]
+    for g in units(data, p.get("assay")):
+        ro = _orders(g, p["run_order"])
+        qc = [j for j, s in enumerate(g[0].sample_ids) if s in set(p["qc_samples"])]
+        out.append(_check(f"run_order_present:{g[0].assay_id}", np.isfinite(ro).all(), int((~np.isfinite(ro)).sum()),
+                          "run order present for every sample"))
+        out.append(_check(f"qc_n:{g[0].assay_id}", len(qc) >= p["min_qc"], len(qc),
+                          f"at least {p['min_qc']} QC samples (heuristic)"))
+        if qc and np.isfinite(ro).any():
+            fin = ro[np.isfinite(ro)]
+            lo, hi = np.quantile(fin, [0.1, 0.9])
+            qo = ro[qc]
+            out.append(_check(f"qc_span:{g[0].assay_id}", bool(np.nanmin(qo) <= lo and np.nanmax(qo) >= hi),
+                              [float(np.nanmin(qo)), float(np.nanmax(qo))],
+                              "QC injections span the run order (first QC at or before the 10th percentile, last at "
+                              "or after the 90th)"))
+    return out
+
+
+def op_drift_qc(data, p, ctx):
+    from ..batch import loess
+    t, info = {}, {"fitted": 0, "left_unchanged": 0, "engines": set()}
+    qcs = set(p["qc_samples"])
+    for g in units(data, p.get("assay")):
+        X = stack(g)
+        ro = _orders(g, p["run_order"])
+        qc = np.array([s in qcs for s in g[0].sample_ids])
+        out = X.copy()
+        touched = []
+        keys = [k for b in g for k in b.feature_keys]
+        for i in range(X.shape[0]):
+            ok = qc & np.isfinite(X[i])
+            if ok.sum() < p["min_qc_per_feature"]:
+                info["left_unchanged"] += 1
+                continue
+            try:
+                fit, eng = loess.fit_predict(ro[ok], X[i, ok], ro, span=p["span"], degree=p["degree"])
+            except Exception:
+                info["left_unchanged"] += 1
+                continue
+            info["engines"].add(eng)
+            out[i] = X[i] + (fit[ok].mean() - fit)
+            info["fitted"] += 1
+            touched.append(keys[i])
+        unstack(g, out)
+        t = _merge_touch(t, _touch(g, set(touched)))
+    info["engines"] = sorted(info["engines"])
+    info["_touched"] = t
+    info["evidence_level"] = "unverified"
+    return info
+
+
+register(OpSpec("drift_qc_loess", op_drift_qc, ("G6",),
+                {"qc_samples": REQUIRED, "run_order": REQUIRED, "span": 0.75, "degree": 2, "min_qc": 5,
+                 "min_qc_per_feature": 5},
+                pre_drift_qc, doc="Per feature, LOESS of QC values against run order fitted on the QC injections only, "
+                                  "removed from every sample as x + (mean QC fit - fit). Features with fewer than 5 "
+                                  "observed QC values are left unchanged and counted. Evidence: unverified (Dunn et "
+                                  "al. 2011 not checked)."))
+
+
+# ------------------------------------------------------------------ normalize_quantile (S1)
+
+
+def op_normalize_quantile(data, p, ctx):
+    from ..batch import normalize
+    t, forms = {}, {}
+    for g in units(data, p.get("assay")):
+        out, info = normalize.quantile(stack(g))
+        unstack(g, out)
+        forms[g[0].assay_id] = info["form"]
+        t.update(_touch(g))
+    return {"form": forms, "_touched": t}
+
+
+register(OpSpec("normalize_quantile", op_normalize_quantile, ("S1",), {}, pre_log_scale,
+                doc="Quantile normalization; NA-aware form with missing values (differs from preprocessCore)."))
+
+
+# ------------------------------------------------------------------ S2 batch correction through the backend
+
+
+def _backend_or_refuse():
+    from ..batch import backend
+    b = backend.get()
+    if b.name == "none":
+        raise ExecutorError("This op needs the proBatch port, which is disabled (PRISM_DISABLE_PORTS=1).")
+    return b
+
+
+def pre_batch(data, p, ctx):
+    out = pre_log_scale(data, p, ctx)
+    for g in units(data, p.get("assay")):
+        bv = _sample_values(g, p["batch"])
+        levels = sorted({v for v in bv if v})
+        out.append(_check(f"batch_levels:{g[0].assay_id}", len(levels) >= 2, len(levels), "at least 2 batch levels"))
+    return out
+
+
+def _with_batch(g, p):
+    """-> (stacked X, indices of samples with a batch value, their batch labels)."""
+    bv = _sample_values(g, p["batch"])
+    idx = [j for j, v in enumerate(bv) if v]
+    return stack(g), idx, [bv[j] for j in idx]
+
+
+def op_batch_center(data, p, ctx):
+    be = _backend_or_refuse()
+    t, info = {}, {"backend": be.name, "source": be.source, "stat": p["stat"]}
+    for g in units(data, p.get("assay")):
+        X, idx, labels = _with_batch(g, p)
+        sub, det = be.center(X[:, idx], labels, p["stat"])
+        X = X.copy()
+        X[:, idx] = sub
+        unstack(g, X)
+        info.setdefault("per_assay", {})[g[0].assay_id] = dict(det, samples_without_batch=len(g[0].sample_ids) - len(idx))
+        t.update(_touch(g))
+    info["_touched"] = t
+    return info
+
+
+register(OpSpec("batch_center", op_batch_center, ("S2",), {"batch": REQUIRED, "stat": "median"}, pre_batch,
+                doc="Per feature, per batch: x - stat(batch) + stat(all) (median or mean); NaN tolerant."))
+
+
+def pre_combat(data, p, ctx):
+    out = pre_batch(data, p, ctx)
+    for g in units(data, p.get("assay")):
+        X, idx, labels = _with_batch(g, p)
+        Xs = X[:, idx]
+        n_nan = int(np.isnan(Xs).sum())
+        complete = float(np.isfinite(Xs).all(1).mean()) if Xs.size else 0.0
+        out.append(_check(f"no_missing:{g[0].assay_id}", n_nan == 0, {"nan_cells": n_nan, "share_complete_features":
+                                                                      complete},
+                          "no missing values in the features ComBat corrects (share of complete features 100%)"))
+        counts = {lv: labels.count(lv) for lv in set(labels)}
+        out.append(_check(f"two_per_batch:{g[0].assay_id}", bool(counts) and min(counts.values()) >= 2, counts,
+                          "at least 2 samples in every batch"))
+    return out
+
+
+def op_batch_combat(data, p, ctx):
+    be = _backend_or_refuse()
+    t, info = {}, {"backend": be.name, "source": be.source}
+    for g in units(data, p.get("assay")):
+        X, idx, labels = _with_batch(g, p)
+        sub, det = be.combat(X[:, idx], labels)
+        X = X.copy()
+        X[:, idx] = sub
+        unstack(g, X)
+        info.setdefault("per_assay", {})[g[0].assay_id] = det
+        t.update(_touch(g))
+    info["_touched"] = t
+    return info
+
+
+register(OpSpec("batch_combat", op_batch_combat, ("S2",), {"batch": REQUIRED}, pre_combat,
+                doc="ComBat, parametric, intercept-only model; refuses any missing value."))
+
+
+def pre_drift_sample(data, p, ctx):
+    out = pre_batch(data, p, ctx)
+    for g in units(data, p.get("assay")):
+        ro = _orders(g, p["run_order"])
+        out.append(_check(f"run_order:{g[0].assay_id}", np.isfinite(ro).sum() >= p["min_measurements"],
+                          int(np.isfinite(ro).sum()), f"run order for at least {p['min_measurements']} samples"))
+    return out
+
+
+def op_drift_sample(data, p, ctx):
+    be = _backend_or_refuse()
+    t, info = {}, {"backend": be.name, "source": be.source}
+    for g in units(data, p.get("assay")):
+        X = stack(g)
+        bv = _sample_values(g, p["batch"])
+        ro = _orders(g, p["run_order"])
+        idx = [j for j, v in enumerate(bv) if v and np.isfinite(ro[j])]
+        sub, det = be.drift_loess(X[:, idx], [bv[j] for j in idx], ro[idx], p["span"], p["degree"], p["min_measurements"])
+        touched = det.pop("touched")
+        X = X.copy()
+        X[:, idx] = sub
+        unstack(g, X)
+        keys = [k for b in g for k in b.feature_keys]
+        t = _merge_touch(t, _touch(g, {keys[i] for i in np.where(touched)[0]}))
+        info.setdefault("per_assay", {})[g[0].assay_id] = det
+    info["_touched"] = t
+    return info
+
+
+register(OpSpec("drift_sample_loess", op_drift_sample, ("S2",),
+                {"batch": REQUIRED, "run_order": REQUIRED, "span": 0.75, "degree": 2, "min_measurements": 8},
+                pre_drift_sample, doc="proBatch: per feature, per batch, LOESS of study-sample values against run "
+                                      "order; value + (mean fit - fit). Fits that fail leave the feature unchanged."))
