@@ -1,0 +1,282 @@
+# PRISM step registry (Build Request v4, section 1): the one source of truth for steps.
+# Every audit, action and rule refers to a step by id. The report's 2x2 panel, the plan and
+# Figure 1 are generated from this file. Validated by steps.schema.json (prism registry show).
+#
+# Axes: kind (audit = measures, never changes data; action = changes data, only after approval;
+# constraint = a design object read by actions) x scope (global = needs only the data and its
+# technical metadata; study_dependent = needs the research question or design).
+#
+# preconditions are typed and evaluated by the plan engine against the session facts
+# (findings, the confirmed processing state, the intake): {fact, op, value, text}.
+
+version: 1
+modalities_in_scope: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+
+steps:
+  - id: G1
+    name: Integrity and structure
+    kind: audit
+    scope: global
+    modalities: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+    needs: [data]
+    preconditions: []
+    tolerates_missing: not_applicable
+    audits: [A1]
+    ops: []
+    evidence: []
+    evidence_level: convention
+    implemented: true
+    notes: A1 plus Step 0.
+
+  - id: G2
+    name: Processing history and scale
+    kind: audit
+    scope: global
+    modalities: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+    needs: [data]
+    preconditions: []
+    tolerates_missing: not_applicable
+    audits: [A2, A13]
+    ops: []
+    evidence: [somascan_vendor_docs]
+    evidence_level: convention
+    implemented: true
+    notes: A2 scale class plus A13 processing_state (declared vs observed vs confirmed).
+
+  - id: G3
+    name: Technical-record cleaning
+    kind: action
+    scope: global
+    modalities: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+    needs: [data]
+    preconditions:
+      - {fact: g3.n_candidates, op: gt, value: 0, text: at least one flagged class of technical records}
+    tolerates_missing: "yes"
+    audits: [A1, A6]
+    ops: [remove_features]
+    evidence: []
+    evidence_level: convention
+    implemented: true
+    notes: Flag first, remove only on approval, one class at a time; always before any other op.
+
+  - id: G4
+    name: Initial assessment
+    kind: audit
+    scope: global
+    modalities: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+    needs: [data]
+    preconditions: []
+    tolerates_missing: "yes"
+    audits: [A2, A3, A6, A7]
+    ops: []
+    evidence: [cuklina2021]
+    evidence_level: expert_guidance
+    implemented: true
+    notes: A report view over A2, A3, A6, A7 plus the relationship-stratified sample correlation (A7).
+
+  - id: G5
+    name: Log or variance-stabilizing transform
+    kind: action
+    scope: global
+    modalities: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+    needs: [data, confirmed_processing_state]
+    preconditions:
+      - {fact: scale.class, op: eq, value: continuous_linear, text: A2 scale class continuous_linear}
+      - {fact: processing_state.log_transformed, op: eq, value: "no", text: confirmed processing state log_transformed = no}
+    tolerates_missing: "yes"
+    audits: [A2, A3, A13]
+    ops: [log_transform]
+    evidence: [cuklina2021, vandenberg2006]
+    evidence_level: expert_guidance
+    implemented: true
+    notes: Conditional on G2. Excluded for signed, count, proportion, compositional and already-log data. vsn is out of scope (candidate, implemented false).
+
+  - id: G6
+    name: Drift correction on pooled QC
+    kind: action
+    scope: global
+    modalities: [ms_proteomics, metabolomics, lipidomics]
+    needs: [data, qc_samples, run_order]
+    preconditions:
+      - {fact: qc.n, op: ge, value: 5, text: at least 5 QC samples (heuristic)}
+      - {fact: run_order.present, op: is_true, text: run order present}
+    tolerates_missing: "yes"
+    audits: [A6]
+    ops: [drift_qc_loess]
+    evidence: [dunn2011]
+    evidence_level: unverified
+    implemented: true
+    notes: Per-feature LOESS of QC values against run order, applied to all samples. Not the sample-based drift of S2.
+
+  - id: G7
+    name: Missingness profile
+    kind: audit
+    scope: global
+    modalities: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+    needs: [data]
+    preconditions: []
+    tolerates_missing: native
+    audits: [A4, A12]
+    ops: [recode_zero_as_missing]
+    evidence: [lazar2016, li_smyth2023, molenberghs2008]
+    evidence_level: literature_independent
+    implemented: true
+    notes: A12. Never imputes. The only op is recode_zero_as_missing, after the user answers the zeros question.
+
+  - id: S1
+    name: Normalization
+    kind: action
+    scope: study_dependent
+    modalities: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+    needs: [data, confirmed_processing_state, contrast_variable]
+    preconditions:
+      - {fact: scale.log_like, op: is_true, text: data on a log scale (after G5 or confirmed log)}
+    tolerates_missing: "yes"
+    audits: [A3, A7]
+    ops: [normalize_median, normalize_quantile]
+    evidence: [cuklina2021, valikangas2018]
+    evidence_level: expert_guidance
+    implemented: true
+    notes: Decision node median_shift_technical. PQN and other metabolomics normalizations are candidates with implemented false.
+
+  - id: S2
+    name: Batch correction
+    kind: action
+    scope: study_dependent
+    modalities: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+    needs: [data, batch_variable, contrast_variable, protected_variables]
+    preconditions:
+      - {fact: scale.log_like, op: is_true, text: data on a log scale}
+    tolerates_missing: "yes"
+    audits: [A7, A8, A12]
+    ops: [drift_sample_loess, batch_center, batch_combat]
+    evidence: [cuklina2021, leek2010, nygaard2016, johnson2007]
+    evidence_level: expert_guidance
+    implemented: true
+    notes: Sample-based LOESS drift, then discrete correction (median/mean centering or ComBat). Decided jointly with missingness (node D2).
+
+  - id: S3
+    name: Feature filtering
+    kind: action
+    scope: study_dependent
+    modalities: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+    needs: [data, contrast_variable]
+    preconditions: []
+    tolerates_missing: "yes"
+    audits: [A4, A12]
+    ops: [remove_features]
+    evidence: []
+    evidence_level: convention
+    implemented: true
+    notes: Group-aware completeness thresholds (100/90/75/50/25 percent) are reported, never chosen.
+
+  - id: S4
+    name: Sample exclusion
+    kind: action
+    scope: study_dependent
+    modalities: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+    needs: [data, contrast_variable]
+    preconditions: []
+    tolerates_missing: "yes"
+    audits: [A6, A11]
+    ops: [remove_samples]
+    evidence: [iglewicz1993]
+    evidence_level: heuristic
+    implemented: true
+    notes: Recommendation list only; removal needs an explicit per-sample approval.
+
+  - id: S5
+    name: Repeated-measures handling
+    kind: constraint
+    scope: study_dependent
+    modalities: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+    needs: [subject]
+    preconditions: []
+    tolerates_missing: not_applicable
+    audits: [A5, A8]
+    ops: []
+    evidence: []
+    evidence_level: convention
+    implemented: true
+    notes: design_constraints.json read by S1 to S3; never changes the matrix.
+
+  - id: S6
+    name: Imputation
+    kind: action
+    scope: study_dependent
+    modalities: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+    needs: [data, downstream_family]
+    preconditions: []
+    tolerates_missing: not_applicable
+    audits: [A12]
+    ops: []
+    evidence: [lazar2016, wei2018, hui2023, hui_chan_goh2025, vanderaa_gatto2023]
+    evidence_level: literature_independent
+    implemented: false
+    notes: Phase 2 interface only (prism/phase2/imputation.py). Not in any Phase 1 plan; the plan engine cannot reach it.
+
+  - id: S7
+    name: Scaling and centering for multivariate methods
+    kind: action
+    scope: study_dependent
+    modalities: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+    needs: [downstream_family]
+    preconditions: []
+    tolerates_missing: not_applicable
+    audits: []
+    ops: []
+    evidence: [vandenberg2006]
+    evidence_level: literature_independent
+    implemented: false
+    notes: Registry entry only.
+
+  - id: S8
+    name: Multi-layer harmonization
+    kind: audit
+    scope: study_dependent
+    modalities: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+    needs: [data]
+    preconditions: []
+    tolerates_missing: "yes"
+    audits: [A10]
+    ops: []
+    evidence: [robert_escoufier1976]
+    evidence_level: unverified
+    implemented: true
+    notes: A10 report only; needs 2 or more datasets.
+
+  - id: S9
+    name: Tissue and cell-composition adjustment
+    kind: audit
+    scope: study_dependent
+    modalities: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+    needs: [data, technical_metadata]
+    preconditions: []
+    tolerates_missing: "yes"
+    audits: [A9]
+    ops: []
+    evidence: []
+    evidence_level: heuristic
+    implemented: true
+    notes: A9 detection; the rule always returns insufficient evidence for the action.
+
+  - id: S10
+    name: Confounding and design audit
+    kind: audit
+    scope: study_dependent
+    modalities: [ms_proteomics, affinity_proteomics, metabolomics, lipidomics]
+    needs: [data, contrast_variable]
+    preconditions: []
+    tolerates_missing: "yes"
+    audits: [A7, A8]
+    ops: []
+    evidence: [cuklina2021, nygaard2016]
+    evidence_level: expert_guidance
+    implemented: true
+    notes: A7 and A8 interpreted against the intake (contrast, protected variables).
+
+# Candidates listed for completeness; not implemented in this build.
+candidates:
+  - {id: vsn, step: G5, name: Variance-stabilizing normalization (vsn), implemented: false, evidence: [], evidence_level: unverified, notes: R-only, out of scope}
+  - {id: arcsinh, step: G5, name: arcsinh with a user-supplied cofactor, implemented: true, evidence: [], evidence_level: convention, notes: no default cofactor; needs justification}
+  - {id: pqn, step: S1, name: Probabilistic quotient normalization, implemented: false, evidence: [], evidence_level: unverified, notes: evidence not verified}

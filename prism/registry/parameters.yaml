@@ -1,0 +1,21 @@
+# Evidence level of every audit parameter (prism/audit/audit_params.yaml). `prism evidence check`
+# fails when a parameter has no entry here. Levels: literature_independent, expert_guidance,
+# convention, heuristic, unverified.
+parameters:
+  seed: {evidence_level: convention}
+  permutations: {evidence_level: convention}
+  exhaustive_max: {evidence_level: convention}
+  modified_z_cutoff: {evidence_level: heuristic, evidence: [iglewicz1993]}
+  max_pcs: {evidence_level: convention}
+  rsd_levels: {evidence_level: heuristic, evidence: [broadhurst2018]}
+  median_scaling_mad: {evidence_level: heuristic}
+  sentinel_share: {evidence_level: heuristic}
+  near_duplicate_r: {evidence_level: heuristic}
+  floor_min_observed: {evidence_level: convention}
+  floor_tie_share_indicator: {evidence_level: heuristic}
+  narrow_median_spread: {evidence_level: heuristic}
+  abundance_rho_indicator: {evidence_level: heuristic}
+  time_ordered_max_levels: {evidence_level: convention}
+  categorical_max_levels: {evidence_level: convention}
+  icc_indicator: {evidence_level: heuristic}
+  bootstrap: {evidence_level: convention}

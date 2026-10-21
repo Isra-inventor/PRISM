@@ -14,6 +14,8 @@
     python -m prism audit override --session SESSION --kind sample_role --sample S --role qc [--reason R]
     python -m prism audit compare --session SESSION RUN_A RUN_B
     python -m prism report --session SESSION [--run RUN] [--format html|json] [--out FILE]
+    python -m prism registry show [--json]
+    python -m prism evidence check
 """
 
 from __future__ import annotations
@@ -98,6 +100,13 @@ def build_parser():
     fr.add_argument("--run", default=None)
     fr.add_argument("--format", choices=["html", "json"], default="html")
     fr.add_argument("--out", default=None)
+    rg = sub.add_parser("registry", help="the step registry (v4 section 1)")
+    rg2 = rg.add_subparsers(dest="action", required=True)
+    rs = rg2.add_parser("show")
+    rs.add_argument("--json", action="store_true")
+    ev = sub.add_parser("evidence", help="evidence levels and the bibliography (v4 section 8.5)")
+    ev2 = ev.add_subparsers(dest="action", required=True)
+    ev2.add_parser("check")
     return ap
 
 
@@ -136,6 +145,25 @@ def main(argv=None):
 
 def _dispatch(args):
     from . import store
+    if args.cmd == "registry":
+        from . import registry
+        if args.json:
+            print(json.dumps(registry.registry(), indent=2))
+            return 0
+        for s in registry.steps():
+            mark = "" if s["implemented"] else "  (not implemented)"
+            print(f"{s['id']:<4} {s['kind']:<10} {s['scope']:<16} {s['name']}{mark}")
+            print(f"     needs: {', '.join(s['needs'])}; evidence level: {s['evidence_level']}")
+        return 0
+    if args.cmd == "evidence":
+        from . import registry
+        res = registry.check()
+        for k, v in res["counted"].items():
+            print(f"  {k}: {v} entries")
+        for p in res["problems"]:
+            print(f"  problem: {p}", file=sys.stderr)
+        print("evidence check: ok" if res["ok"] else f"evidence check: {len(res['problems'])} problem(s)")
+        return 0 if res["ok"] else 1
     if args.cmd == "session":
         if args.action == "new":
             s = store.create(args.name)
