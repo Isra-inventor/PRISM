@@ -84,6 +84,11 @@ def run(unit, ctx, params, results):
             elif s.get("code") == "nested":
                 f.indicate("batch_nested", {k: s[k] for k in ("batch", "design", "nesting")}, text=s["nesting"])
     M["structure"] = struct
+    # v4 section 4.4 (the G4 view): samples per batch, batch coverage, relationship-stratified
+    # sample correlation, control-feature trends
+    M["samples_per_batch"], M["batch_coverage"] = batch_sizes(f, unit, B, params)
+    M["relationship_correlation"] = relationship_correlation(unit, ctx, B)
+    M["control_features"] = control_features(unit, ctx, B)
 
     # 2. PCA of centered Y on the diagnostic matrix (v4 section 3: policy, fallback, bias warning)
     dm = diagnostic_matrix.default_matrix(unit.Y, params)
@@ -184,3 +189,107 @@ def sensitivity(unit, ctx, params, B, subj_all):
     block["conclusion_definition"] = ("the batch candidate with the largest marginal PERMANOVA R2, and the batch "
                                       "candidates with permutation p <= 0.05")
     return block
+
+
+
+def batch_sizes(f, unit, B, params):
+    sizes, cover = [], []
+    R = ~np.isfinite(unit.X)
+    for b in B:
+        if b.numeric:
+            continue
+        levels = b.levels()
+        counts = {lev: sum(1 for x in b.values if x == lev) for lev in levels}
+        small = [lev for lev, c in counts.items() if c < params["batch_min_samples"]]
+        sizes.append({"variable": b.name, "counts": counts, "min": min(counts.values()) if counts else None,
+                      "median": float(np.median(list(counts.values()))) if counts else None,
+                      "below_suggestion": small, "suggestion": params["batch_min_samples"],
+                      "suggestion_evidence": "heuristic: quoted in Cuklina et al. 2021 as a suggestion from other work; "
+                                             "unverified"})
+        if small:
+            f.indicate("small_batches", {"variable": b.name, "levels": small}, variable=b.name, n=len(small),
+                       cut=params["batch_min_samples"])
+        c1, c2 = np.ones(unit.p, bool), np.ones(unit.p, bool)
+        for lev in levels:
+            ix = [j for j, x in enumerate(b.values) if x == lev]
+            obs = (~R[:, ix]).sum(1)
+            c1 &= obs >= 1
+            c2 &= obs >= 2
+        cover.append({"variable": b.name, "share_observed_ge1_every_level": float(c1.mean()) if unit.p else None,
+                      "share_observed_ge2_every_level": float(c2.mean()) if unit.p else None})
+    return sizes, cover
+
+
+def _median(v):
+    return float(np.median(v)) if len(v) else None
+
+
+def relationship_correlation(unit, ctx, B):
+    """Pearson r on Y (pairwise-complete) for all sample pairs, by pair class. proBatch labels pairs by
+    biospecimen replicate and batch; PRISM designs have subjects, so subject is the stand-in."""
+    R, N = diagnostic_matrix.pairwise_corr(unit.Y)
+    n = unit.n
+    subj = ctx.subject_codes(unit)
+    tech_col = next((c for c in ctx.M_columns if ctx.col_kind.get(c) == "technical_replicate"), None)
+    tech = ctx.column(tech_col) if tech_col else None
+    iu = np.triu_indices(n, 1)
+    r = R[iu]
+    ok = np.isfinite(r)
+    out = dict(diagnostic_matrix.pairwise_report(N), n_pairs=int(ok.sum()),
+               subject_stand_in="subject is used as the stand-in for proBatch's biospecimen replicate")
+    same_subj = np.array([bool(subj and subj[i] and subj[i] == subj[j]) for i, j in zip(*iu)]) if subj else None
+    if same_subj is not None:
+        out["same_subject_median_r"] = _median(r[ok & same_subj])
+        out["different_subject_median_r"] = _median(r[ok & ~same_subj])
+    if tech:
+        tv = [tech.get(s, "") for s in unit.samples]
+        same_t = np.array([bool(tv[i] and tv[i] == tv[j]) for i, j in zip(*iu)])
+        out["technical_replicate"] = {"column": tech_col, "same_median_r": _median(r[ok & same_t]),
+                                      "different_median_r": _median(r[ok & ~same_t]), "n_same_pairs": int((ok & same_t).sum())}
+    per_batch = []
+    for b in B:
+        if b.numeric:
+            continue
+        same_b = np.array([bool(b.values[i] and b.values[i] == b.values[j]) for i, j in zip(*iu)])
+        e = {"variable": b.name, "same_batch_median_r": _median(r[ok & same_b]),
+             "different_batch_median_r": _median(r[ok & ~same_b])}
+        if e["same_batch_median_r"] is not None and e["different_batch_median_r"] is not None:
+            e["batch_effect_on_correlation"] = e["same_batch_median_r"] - e["different_batch_median_r"]
+        if same_subj is not None:
+            for name, m in (("within_same_subject", same_subj), ("within_different_subject", ~same_subj)):
+                a, c = _median(r[ok & m & same_b]), _median(r[ok & m & ~same_b])
+                e[name] = {"same_batch_median_r": a, "different_batch_median_r": c,
+                           "batch_effect_on_correlation": (a - c) if (a is not None and c is not None) else None}
+        per_batch.append(e)
+    out["by_batch"] = per_batch
+    return out
+
+
+def control_features(unit, ctx, B):
+    marked = [o for o in ctx.overrides if o["kind"] == "control_feature" and o.get("assay") in (None, "", unit.unit_id)]
+    if not marked:
+        return {"status": "not_applicable", "reason": "no feature is marked as a control (override control_feature)"}
+    ro = next((b for b in B if b.numeric and "run_order" in b.source), None)
+    idx = {k: i for i, k in enumerate(unit.feature_keys)}
+    rows = []
+    for o in marked:
+        i = idx.get(o["feature"])
+        if i is None:
+            rows.append({"feature": o["feature"], "status": "not_found"})
+            continue
+        e = {"feature": o["feature"], "observed": int(np.isfinite(unit.Y[i]).sum())}
+        if ro is None:
+            e["status"] = "insufficient_metadata"
+            e["reason"] = "no run order"
+        else:
+            x = ro.as_float()
+            y = unit.Y[i]
+            ok = np.isfinite(x) & np.isfinite(y)
+            if ok.sum() >= 4:
+                e.update(status="computed", spearman_run_order=stats.spearman(x[ok], y[ok])[0],
+                         ols_slope=stats.ols_slope(x[ok], y[ok]), n_used=int(ok.sum()),
+                         points=[[float(a), float(b)] for a, b in zip(x[ok], y[ok])])
+            else:
+                e["status"] = "insufficient_data"
+        rows.append(e)
+    return {"status": "computed", "features": rows, "run_order_variable": ro.name if ro else None}

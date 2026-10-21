@@ -199,3 +199,30 @@ def op_normalize_median(data, p, ctx):
 
 register(OpSpec("normalize_median", op_normalize_median, ("S1",), {}, pre_log_scale,
                 doc="x - median(sample) + median(all observed); NaN stays NaN."))
+
+
+# ------------------------------------------------------------------ arcsinh_transform (G5 alternative)
+
+
+def pre_arcsinh(data, p, ctx):
+    c = p.get("cofactor")
+    return [_check("cofactor_given", c is not None and float(c) > 0, c, "a user-supplied cofactor > 0 (no default)"),
+            _check("justification", bool(str(p.get("justification") or "").strip()), p.get("justification"),
+                   "a justification for the cofactor is recorded"),
+            _check("not_already_log", data.scale not in ("log2", "arcsinh"), data.scale,
+                   "the state is not already log or arcsinh"),
+            _check("confirmed_linear", data.scale == "linear", data.scale,
+                   "the confirmed processing state says log_transformed = no")]
+
+
+def op_arcsinh(data, p, ctx):
+    c = float(p["cofactor"])
+    t = {}
+    for g in units(data, p.get("assay")):
+        unstack(g, np.arcsinh(stack(g) / c))
+        t.update(_touch(g))
+    return {"cofactor": c, "_touched": t}
+
+
+register(OpSpec("arcsinh_transform", op_arcsinh, ("G5",), {"cofactor": REQUIRED, "justification": REQUIRED},
+                pre_arcsinh, scale_after="arcsinh", doc="arcsinh(x / cofactor); the cofactor needs a justification."))

@@ -29,3 +29,5 @@ parameters:
   a12_low_abundance_fraction: {evidence_level: heuristic}
   a12_min_level_n: {evidence_level: convention}
   a12_feature_permutations: {evidence_level: convention}
+  blank_dominated_ratio: {evidence_level: heuristic}
+  batch_min_samples: {evidence_level: heuristic, evidence: [cuklina2021], notes: quoted in the tutorial as a suggestion from other work; unverified}

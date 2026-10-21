@@ -9,7 +9,8 @@ DEFAULTS_PATH = Path(__file__).resolve().parent / "audit_params.yaml"
 HEURISTIC = ("modified_z_cutoff", "rsd_levels", "median_scaling_mad", "sentinel_share", "near_duplicate_r",
              "abundance_rho_indicator", "icc_indicator", "floor_tie_share_indicator", "narrow_median_spread",
              "diag_min_features", "diag_min_share", "diag_sample_missing_max", "a12_min_partial_features",
-             "a12_b1_negligible", "a12_batch_absence_share", "a12_low_abundance_fraction")
+             "a12_b1_negligible", "a12_batch_absence_share", "a12_low_abundance_fraction", "blank_dominated_ratio",
+             "batch_min_samples")
 
 
 class ParamError(Exception):

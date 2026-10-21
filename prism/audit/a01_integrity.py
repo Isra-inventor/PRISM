@@ -73,6 +73,8 @@ def run(unit, ctx, params, results):
     few = [keys[i] for i in np.where(n_obs < 3)[0]]
     M["constant_features"] = {"n": len(const_f), "examples": const_f[:20]}
     M["constant_samples"] = const_s
+    from .g3_candidates import candidates as g3
+    M["g3_candidates"] = g3(unit, ctx, params)
     M["features_fewer_than_3_observed"] = {"n": len(few), "examples": few[:20]}
     if const_f:
         f.indicate("constant_features", {"n": len(const_f)}, n=len(const_f))

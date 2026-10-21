@@ -63,6 +63,8 @@ TEMPLATES = {
     "diagnostic_conclusion_depends_on_policy": "{what} is not the same under every diagnostic policy ({n} variants "
                                                "computed): the conclusion depends on how missing and floor values "
                                                "are handled. No variant is preferred.",
+    "small_batches": "{n} level(s) of '{variable}' have fewer than {cut} samples (a heuristic suggestion, unverified): "
+                     "correction may overfit small batches.",
     # A11
     "outlier_sample": "Sample '{sample}' is a plausible outlier by {by} (modified z {z}, cut-off {cut}).",
     "outlier_cells": "{n_cells} cell(s) in {n_features} feature(s) have a within-feature modified z beyond {cut}.",
