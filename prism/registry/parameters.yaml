@@ -31,3 +31,6 @@ parameters:
   a12_feature_permutations: {evidence_level: convention}
   blank_dominated_ratio: {evidence_level: heuristic}
   batch_min_samples: {evidence_level: heuristic, evidence: [cuklina2021], notes: quoted in the tutorial as a suggestion from other work; unverified}
+  sample_median_spread_mad: {evidence_level: heuristic}
+  qc_drift_share: {evidence_level: heuristic}
+  neff_ratio_note: {evidence_level: heuristic}

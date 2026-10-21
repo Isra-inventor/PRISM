@@ -30,3 +30,6 @@ a12_min_level_n: 3                 # v4 §5.3: a batch level needs this many sam
 a12_feature_permutations: 999      # per-feature NaN-indicator tests: Monte Carlo permutations (no exhaustive enumeration)
 blank_dominated_ratio: 0.5         # heuristic (v4 §4.3): G3 flags features whose mean blank signal is this share of the study mean
 batch_min_samples: 25              # heuristic (v4 §4.4): quoted in Cuklina et al. 2021 as a suggestion from other work; unverified
+sample_median_spread_mad: 0.1      # heuristic (v3.1 / v4 §14.4): MAD (log2) of sample medians above this reads as "medians differ" (S1)
+qc_drift_share: 0.2                # heuristic: share of features with |rho| > 0.5 against run order in QC samples read as QC drift (G-R5)
+neff_ratio_note: 0.5               # heuristic: the plan notes when n_eff / n is below this (S5)

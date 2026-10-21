@@ -6,7 +6,7 @@ import numpy as np
 
 from . import stats
 from .context import skew_rows
-from .finding import Finding
+from .finding import Finding, association, table
 
 AUDIT_ID, CODE = "A3", "distribution"
 MAX_POINTS = 3000
@@ -64,6 +64,22 @@ def run(unit, ctx, params, results):
     M["rle"] = {"sample_medians": stats.summary(smed), "sample_iqr": stats.summary(siqr),
                 "mad_of_sample_medians": mad_med}
     f.plot["rle"] = [{"sample": s, "median": float(smed[j]), "iqr": float(siqr[j])} for j, s in enumerate(unit.samples)]
+    # 5. median shift (v4 6.1, the S1 decision node median_shift_technical): does the spread of
+    #    sample medians track a technical variable (batch, run order) or a design variable?
+    B, G, _ = ctx.variables(unit)
+    subj = ctx.subject_codes(unit)
+    rows = []
+    for v in B + G:
+        if v.role == "subject":
+            continue
+        r = association(smed, v, subj, params, f"A3|{unit.dataset_id}|{unit.unit_id}|median|{v.name}")
+        r["technical"] = v.role == "batch"
+        rows.append(r)
+    rows, n_tests = table(rows)
+    M["median_shift"] = {"mad_of_sample_medians": mad_med, "cut": params["sample_median_spread_mad"],
+                         "medians_differ": bool(mad_med > params["sample_median_spread_mad"]),
+                         "associations": {"n_tests": n_tests, "rows": rows},
+                         "evidence_level": "heuristic"}
     idx = np.where(ok)[0]
     if len(idx) > MAX_POINTS:
         idx = idx[np.linspace(0, len(idx) - 1, MAX_POINTS).astype(int)]

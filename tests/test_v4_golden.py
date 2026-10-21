@@ -39,3 +39,21 @@ def test_v4_golden_real_files(client, isolated):
     assert {"exclude_floor", "floor_censored"} <= {v["variant"] for v in a11["sensitivity"]["variants"]}
     a7m = find(man, st, "A7", "D2")
     assert a7m["status"] == "insufficient_metadata" and "batch variable" in a7m["needs"]
+    # the plan: G5 and S1 wait for the processing-state confirmation; metabolomics S2 needs a batch variable;
+    # SomaScan's animals are nested in plates and no batch correction is proposed
+    from prism.plan import engine as pe
+    plan = pe.build(st)
+    ent = {(e["dataset"], e.get("group")): e for e in plan["entries"] if not e.get("checkpoint")}
+    for did in ("D1", "D2"):
+        assert ent[(did, "G5")]["status"] == "Insufficient metadata"
+        assert ent[(did, "S1")]["status"] == "Insufficient metadata"
+    assert ent[("D2", "G5")]["because"][0] == "Insufficient metadata: confirm processing state."
+    assert ent[("D2", "S2")]["status"] == "Insufficient metadata" and "needs batch variable" in ent[("D2", "S2")]["because"][0]
+    s2 = ent[("D1", "S2")]
+    assert s2["status"] in ("Insufficient metadata", "Do not automate")
+    assert not [c for c in s2["candidates"] if c["op"] in ("batch_center", "batch_combat", "drift_sample_loess")]
+    # Difference from the v4 expectation (recorded in reports/v4_build.md): the SomaScan session as uploaded
+    # has no plate column (the sample metadata step was skipped), so A7 has no batch candidate and the plate
+    # nesting cannot be reported; S2 is Insufficient metadata: needs batch variable, like metabolomics.
+    a7s = find(man, st, "A7", "D1")
+    assert a7s["status"] == "insufficient_metadata" and "needs batch variable" in s2["because"][0]

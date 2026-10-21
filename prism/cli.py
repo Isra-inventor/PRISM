@@ -17,6 +17,12 @@
     python -m prism audit run --session SESSION --state STATE_ID      (the checkpoint battery of that state)
     python -m prism audit compare --session SESSION --state A --state B
     python -m prism state list|show|diff --session SESSION [STATE] [STATE_B]
+    python -m prism intake --session SESSION [--contrast C] [--protected A,B] [--nuisance A,B]
+                           [--question-type T] [--downstream F]
+    python -m prism plan --session SESSION                       (build plan.json; runs the audit if needed)
+    python -m prism plan approve ENTRY_ID --session SESSION [--candidate N] [--user U]
+    python -m prism plan reject ENTRY_ID --session SESSION [--reason R]
+    python -m prism plan replay --session SESSION
     python -m prism registry show [--json]
     python -m prism evidence check
 """
@@ -92,6 +98,30 @@ def _audit_cmds(sub):
     c.add_argument("--state", action="append", default=None, help="two states: a before/after table")
 
 
+def _plan_cmds(sub):
+    it = sub.add_parser("intake", help="the four intake answers (v4 section 8.1)")
+    it.add_argument("--session", required=True)
+    it.add_argument("--contrast", default=None)
+    it.add_argument("--protected", default=None)
+    it.add_argument("--nuisance", default=None)
+    it.add_argument("--question-type", default=None)
+    it.add_argument("--downstream", default=None)
+    pl = sub.add_parser("plan", help="the plan engine (v4 section 8.6)")
+    pl.add_argument("--session", required=False)
+    s2 = pl.add_subparsers(dest="action", required=False)
+    for name in ("approve", "reject"):
+        a = s2.add_parser(name)
+        a.add_argument("entry_id")
+        a.add_argument("--session", required=True)
+        a.add_argument("--candidate", type=int, default=0)
+        a.add_argument("--user", default="user")
+        a.add_argument("--reason", default="")
+    r = s2.add_parser("replay")
+    r.add_argument("--session", required=True)
+    sh = s2.add_parser("show")
+    sh.add_argument("--session", required=True)
+
+
 def _state_cmds(sub):
     p = sub.add_parser("state", help="data states (v4 section 2)")
     s2 = p.add_subparsers(dest="action", required=True)
@@ -120,6 +150,7 @@ def build_parser():
     i.add_argument("--accept", action="store_true", help="accept the import if every check passes")
     _audit_cmds(sub)
     _state_cmds(sub)
+    _plan_cmds(sub)
     fr = sub.add_parser("report", help="the final session report (datasets, merge, audit) as one file")
     fr.add_argument("--session", required=True)
     fr.add_argument("--run", default=None)
@@ -191,6 +222,52 @@ def _dispatch(args):
             print(f"  problem: {p}", file=sys.stderr)
         print("evidence check: ok" if res["ok"] else f"evidence check: {len(res['problems'])} problem(s)")
         return 0 if res["ok"] else 1
+    if args.cmd == "intake":
+        from .plan import intake
+        st = store.load(args.session)
+        cur = intake.get(st)
+        for k, v in (("contrast_variable", args.contrast), ("protected_variables", args.protected),
+                     ("nuisance_variables", args.nuisance), ("question_type", args.question_type),
+                     ("downstream_family", args.downstream)):
+            if v is not None:
+                cur[k] = v
+        try:
+            doc = intake.set_intake(st, cur)
+        except intake.IntakeError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        print(json.dumps(doc["intake"], indent=2))
+        return 0
+    if args.cmd == "plan":
+        from .plan import engine as pe
+        sid = args.session
+        if not sid:
+            raise SystemExit("--session is required")
+        st = store.load(sid)
+        try:
+            if args.action in (None, "show"):
+                plan = pe.build(st) if args.action is None else pe.load(st)
+                for e in plan["entries"]:
+                    if e.get("checkpoint"):
+                        print(f"  -- {e['checkpoint']} --")
+                        continue
+                    print(f"  {e['entry_id']:<28} {e['status']:<22} {e['because'][0] if e['because'] else ''}")
+                    for i, c in enumerate(e["candidates"]):
+                        print(f"      [{i}] {c['status']:<20} {c['label']}")
+                print(str(pe.plan_dir(st) / "plan.json"))
+            elif args.action == "approve":
+                out = pe.approve(st, args.entry_id, args.candidate, args.user)
+                print(json.dumps(out, indent=2))
+            elif args.action == "reject":
+                print(json.dumps(pe.reject(st, args.entry_id, args.user, args.reason), indent=2))
+            elif args.action == "replay":
+                r = pe.replay(st)
+                print(json.dumps(r, indent=2))
+                return 0 if r["identical"] else 1
+        except pe.PlanError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        return 0
     if args.cmd == "state":
         from .executor import state as state_mod
         st = store.load(args.session)

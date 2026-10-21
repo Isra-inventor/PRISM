@@ -1,0 +1,383 @@
+# PRISM rule base v0 (Build Request v4, section 8.4). Versioned data, not code.
+#
+# Each rule: id, decision_group (the step it decides), effect (decide: the first matching decide
+# rule of a group wins; annotate: adds text, warnings or candidates to the decided entry;
+# scope: evaluated before the metadata gate), when (typed conditions on session facts:
+# all / any of {fact, op, value}), then (status, candidates, text), because, contraindications,
+# requires, evidence, evidence_level.
+#
+# A condition on a fact that is missing or indeterminate never holds, so an indeterminate input
+# can never yield Recommended. R2 to R13 come from one expert tutorial (Cuklina et al. 2021): their
+# level is expert_guidance until paired with an independent source (Leek 2010, Nygaard 2016,
+# Hui/Chan/Goh 2025, Valikangas 2018).
+
+version: 0
+statuses: [Recommended, Alternative, Do not automate, Insufficient metadata, Not applicable]
+
+rules:
+  # ---------------------------------------------------------------- G3 technical-record cleaning
+  - id: G-R6
+    decision_group: G3
+    effect: decide
+    expand: g3.classes
+    when: {all: [{fact: g3.n_candidates, op: gt, value: 0}]}
+    then:
+      status: Recommended
+      candidates: [{op: remove_features, params: {ids: $item.ids, reason: $item.class}, label: "remove the flagged features ($item.class)"}]
+      text: "Flagged technical records: $item.why ($item.n features). Removal needs approval, per class."
+    because: G3 flags technical records; nothing is removed without approval and removal runs before any other op.
+    contraindications: []
+    requires: []
+    evidence: []
+    evidence_level: convention
+
+  # ---------------------------------------------------------------- G7 zeros and floors
+  - id: G7-zeros-yes
+    decision_group: G7-zeros
+    effect: decide
+    when: {all: [{fact: zeros.present, op: is_true}, {fact: zeros.answer, op: eq, value: "yes"}]}
+    then:
+      status: Recommended
+      candidates: [{op: recode_zero_as_missing, params: {answer: "yes"}, label: "recode zeros as missing values"}]
+      text: The user said zeros represent missing values.
+    because: An answered question; the op is the one documented NaN exception of the executor.
+    contraindications: []
+    requires: []
+    evidence: []
+    evidence_level: convention
+  - id: G7-zeros-ask
+    decision_group: G7-zeros
+    effect: decide
+    when: {all: [{fact: zeros.question, op: is_true}]}
+    then: {status: Insufficient metadata, text: "Answer the question: do zeros represent missing values?"}
+    because: Zeros in a non-count assay can be values or missing values; only the user knows.
+    contraindications: []
+    requires: []
+    evidence: []
+    evidence_level: convention
+  - id: M-R2
+    decision_group: G7-floor
+    effect: decide
+    when: {all: [{fact: floor.present, op: is_true}, {fact: floor.answer, op: exists, value: false}]}
+    then: {status: Insufficient metadata, text: "Answer the question: should floor values be treated as censored (below a detection limit) in diagnostics?"}
+    because: Floor-tied values are numbers in the file; whether they are censored values changes the diagnostic policy, never the data.
+    contraindications: []
+    requires: []
+    evidence: []
+    evidence_level: convention
+
+  # ---------------------------------------------------------------- G5 transform
+  - id: G-R3
+    decision_group: G5
+    effect: scope
+    when: {any: [{fact: scale.out_of_scope, op: is_true}, {fact: scale.class, op: eq, value: continuous_signed}]}
+    then: {status: Not applicable, text: "The scale is not continuous linear (signed, count, proportion or compositional); counts and compositional data are out of scope."}
+    because: A log transform needs positive continuous values on a linear scale.
+    contraindications: []
+    requires: []
+    evidence: []
+    evidence_level: convention
+  - id: G-R1
+    decision_group: G5
+    effect: scope
+    when: {all: [{fact: processing_state.any_unconfirmed, op: is_true}]}
+    then: {status: Insufficient metadata, text: "Insufficient metadata: confirm processing state."}
+    because: A declared processing step does not match the evidence; G5 waits for the user's confirmation.
+    contraindications: []
+    requires: [confirmed_processing_state]
+    evidence: []
+    evidence_level: convention
+  - id: G-R4
+    decision_group: G5
+    effect: decide
+    when: {any: [{fact: processing_state.log_transformed, op: eq, value: "yes"}, {fact: state_scale, op: in, value: [log2, arcsinh]}]}
+    then: {status: Do not automate, text: "The data are already on a log-like scale: a second transform is a documented error."}
+    because: Double transformation.
+    contraindications: []
+    requires: []
+    evidence: [vandenberg2006]
+    evidence_level: convention
+  - id: G-R2
+    decision_group: G5
+    effect: decide
+    when: {all: [{fact: scale.class, op: eq, value: continuous_linear}, {fact: a3.slope_ci_excludes_zero, op: is_true},
+                 {fact: processing_state.log_transformed, op: eq, value: "no"}]}
+    then:
+      status: Recommended
+      candidates:
+        - {op: log_transform, params: {base: 2, offset_rule: half_min}, label: "log2(x + c), c = 0.5 x smallest positive value"}
+        - {op: arcsinh_transform, params: {cofactor: null, justification: ""}, label: "arcsinh(x / cofactor): needs a justified cofactor", status: Alternative}
+      text: "SD grows with the mean on the original scale (A3 slope b $a3.slope, 95% CI $a3.slope_ci); after log2 the Spearman rho of mean and SD is $a3.rho_y."
+    because: A variance that grows with the mean is the usual reason for a log transform.
+    contraindications: [data already log-like]
+    requires: [confirmed_processing_state]
+    evidence: [cuklina2021, vandenberg2006]
+    evidence_level: expert_guidance
+  - id: G-R2b
+    decision_group: G5
+    effect: decide
+    when: {all: [{fact: scale.class, op: eq, value: continuous_linear}, {fact: processing_state.log_transformed, op: eq, value: "no"}]}
+    then:
+      status: Alternative
+      candidates: [{op: log_transform, params: {base: 2, offset_rule: half_min}, label: "log2(x + c), c = 0.5 x smallest positive value"}]
+      text: "The A3 slope CI does not exclude 0 (or was not computed): the evidence for a log transform is weak."
+    because: An indeterminate or absent mean-variance relation cannot give Recommended.
+    contraindications: []
+    requires: [confirmed_processing_state]
+    evidence: [vandenberg2006]
+    evidence_level: convention
+
+  # ---------------------------------------------------------------- G6 QC drift
+  - id: G-R5
+    decision_group: G6
+    effect: decide
+    when: {all: [{fact: qc.n, op: ge, value: 5}, {fact: run_order.present, op: is_true}, {fact: qc.drift, op: is_true}]}
+    then:
+      status: Recommended
+      candidates: [{op: drift_qc_loess, params: {qc_samples: $qc_samples, run_order: $run_order_mapping}, label: "LOESS on pooled QC against run order"}]
+      text: "QC samples drift with run order. Evidence level unverified until Dunn et al. 2011 is checked."
+    because: QC-based drift correction is the standard metabolomics approach (primary reference not verified).
+    contraindications: []
+    requires: [qc_samples, run_order]
+    evidence: [dunn2011]
+    evidence_level: unverified
+
+  # ---------------------------------------------------------------- S1 normalization
+  - id: S1-node-contrast
+    decision_group: S1
+    effect: decide
+    when: {all: [{fact: median.differ, op: is_true}, {fact: median.contrast, op: is_true}]}
+    then: {status: Do not automate, text: "Sample medians differ and track the contrast variable: normalization could remove the biology. Decide by hand."}
+    because: median_shift_technical is false when the median shift tracks the contrast.
+    contraindications: []
+    requires: [contrast_variable]
+    evidence: [cuklina2021]
+    evidence_level: expert_guidance
+  - id: R2
+    decision_group: S1
+    effect: decide
+    when: {all: [{fact: median.differ, op: is_true}, {fact: median.technical, op: is_true}, {fact: median.contrast, op: is_false}]}
+    then:
+      status: Recommended
+      candidates:
+        - {op: normalize_median, params: {}, label: "median centering"}
+        - {op: normalize_quantile, params: {}, label: "quantile normalization", status: Alternative}
+      text: "Sample medians differ and the shift tracks a technical variable, not the contrast (median_shift_technical)."
+    because: Samples similar, medians differ for technical reasons.
+    contraindications: [many features expected to differ]
+    requires: [contrast_variable, confirmed_processing_state]
+    evidence: [cuklina2021, valikangas2018]
+    evidence_level: expert_guidance
+  - id: S1-untracked
+    decision_group: S1
+    effect: decide
+    when: {all: [{fact: median.differ, op: is_true}]}
+    then:
+      status: Alternative
+      candidates:
+        - {op: normalize_median, params: {}, label: "median centering"}
+        - {op: normalize_quantile, params: {}, label: "quantile normalization"}
+      text: "Sample medians differ but the shift is not shown to be technical: normalization is an option, not a recommendation."
+    because: The decision node median_shift_technical could not be established.
+    contraindications: []
+    requires: []
+    evidence: [cuklina2021]
+    evidence_level: expert_guidance
+  - id: S1-similar
+    decision_group: S1
+    effect: decide
+    when: {all: [{fact: median.differ, op: is_false}]}
+    then:
+      status: Alternative
+      candidates: [{op: normalize_median, params: {}, label: "median centering"}]
+      text: "Sample medians are close (MAD below sample_median_spread_mad): normalization is optional."
+    because: Nothing to correct at the level of sample medians.
+    contraindications: []
+    requires: []
+    evidence: []
+    evidence_level: heuristic
+  - id: R3
+    decision_group: S1
+    effect: annotate
+    when: {all: [{fact: outliers.flagged, op: nonempty}]}
+    then: {candidate_status: {normalize_quantile: Do not automate}, text: "Flagged samples may be informative outliers: quantile normalization is not automated; ask the user."}
+    because: Quantile normalization forces distributions to match and can erase informative extremes.
+    contraindications: []
+    requires: []
+    evidence: [cuklina2021]
+    evidence_level: expert_guidance
+
+  # ---------------------------------------------------------------- S2 batch correction (with D2)
+  - id: R13
+    decision_group: S2
+    effect: scope
+    when: {all: [{fact: batch.present, op: is_false}, {fact: run_order.present, op: is_false}]}
+    then: {status: Insufficient metadata, text: "Insufficient metadata: needs batch variable. Suspected structure is reported only."}
+    because: No batch or run-order metadata.
+    contraindications: []
+    requires: [batch_variable]
+    evidence: [cuklina2021]
+    evidence_level: expert_guidance
+  - id: R10
+    decision_group: S2
+    effect: decide
+    when: {all: [{fact: confound.contrast, op: is_true}]}
+    then: {status: Do not automate, text: "A technical factor is confounded with the contrast: model batch as a covariate downstream; this is a design problem."}
+    because: Correcting a confounded factor removes the biology with it.
+    contraindications: []
+    requires: [contrast_variable]
+    evidence: [cuklina2021, nygaard2016]
+    evidence_level: expert_guidance
+  - id: S5-nesting
+    decision_group: S2
+    effect: decide
+    when: {all: [{fact: nested.subject_in_batch, op: is_true}]}
+    then: {status: Do not automate, text: "Subjects are nested in the batch ($nested.text): a per-batch correction would silently absorb subject differences. Not proposed."}
+    because: S5 design constraint; batch correction must not absorb subject structure silently.
+    contraindications: []
+    requires: [subject]
+    evidence: [cuklina2021]
+    evidence_level: expert_guidance
+  - id: R9
+    decision_group: S2
+    effect: decide
+    when: {all: [{fact: batch.two_confounded, op: is_true}]}
+    then: {status: Insufficient metadata, text: "Two technical factors are confounded ($batch.pairs_confounded): correct one; which one is your call."}
+    because: The two factors cannot be separated.
+    contraindications: []
+    requires: [batch_variable]
+    evidence: [cuklina2021]
+    evidence_level: expert_guidance
+  - id: R4
+    decision_group: S2
+    effect: decide
+    when: {all: [{fact: checkpoint, op: in, value: [C1, C2]}, {fact: batch.association, op: is_false}, {fact: batch.same_r_above_diff, op: is_false}]}
+    then:
+      status: Recommended
+      candidates: [{op: null, params: {}, label: "do not correct: no batch clustering and same-batch r not above different-batch r"}]
+      text: "After C1 there is no batch clustering and same-batch correlation is not above different-batch correlation: do not correct."
+    because: Correcting an absent batch effect only adds noise.
+    contraindications: []
+    requires: []
+    evidence: [cuklina2021]
+    evidence_level: expert_guidance
+  - id: R5
+    decision_group: S2
+    effect: decide
+    when: {all: [{fact: run_order.drift, op: is_true}, {fact: batch.present, op: is_true}]}
+    then:
+      status: Recommended
+      candidates:
+        - {op: drift_sample_loess, params: {batch: $batch_mapping, run_order: $run_order_mapping, span: 0.75}, label: "sample-based LOESS drift (proBatch), span 0.75: check the span", joint: D2}
+        - {op: batch_center, params: {batch: $batch_mapping, stat: median}, label: "then per-batch median centering", joint: D2}
+      text: "Continuous drift with run order: LOESS on run order within batch, then discrete correction. The span is flagged for review."
+    because: Continuous drift is not removed by a per-batch shift.
+    contraindications: []
+    requires: [batch_variable, run_order]
+    evidence: [cuklina2021]
+    evidence_level: expert_guidance
+  - id: R6
+    decision_group: S2
+    effect: decide
+    when: {all: [{fact: batch.association, op: is_true}]}
+    then:
+      status: Recommended
+      candidates:
+        - {op: batch_center, params: {batch: $batch_mapping, stat: median}, label: "per-batch median centering", joint: D2}
+        - {op: batch_combat, params: {batch: $batch_mapping}, label: "ComBat (parametric, ~1)", status: Alternative, joint: D2}
+      text: "Discrete batch shifts: per-batch median centering; ComBat is an Alternative when coverage is complete."
+    because: Discrete shifts only.
+    contraindications: []
+    requires: [batch_variable]
+    evidence: [cuklina2021, johnson2007]
+    evidence_level: expert_guidance
+  - id: S2-none
+    decision_group: S2
+    effect: decide
+    when: {all: [{fact: batch.association, op: is_false}]}
+    then:
+      status: Alternative
+      candidates: [{op: null, params: {}, label: "no correction: the batch candidates show no association"}]
+      text: "No batch association was found at this checkpoint."
+    because: Nothing to correct is the default when no batch effect is found.
+    contraindications: []
+    requires: []
+    evidence: [cuklina2021]
+    evidence_level: expert_guidance
+  - id: R11
+    decision_group: S2
+    effect: annotate
+    when: {all: [{fact: batch.small, op: is_true}]}
+    then: {text: "Warning: some batches have fewer than about 25 samples (heuristic, unverified); correction may overfit."}
+    because: Small batches give unstable batch estimates.
+    contraindications: []
+    requires: []
+    evidence: [cuklina2021]
+    evidence_level: heuristic
+  - id: R12
+    decision_group: S2
+    effect: annotate
+    when: {all: [{fact: intake.downstream_family, op: eq, value: differential_abundance}, {fact: batch.present, op: is_true}]}
+    then:
+      candidates: [{op: null, params: {}, label: "batch as a covariate in the final model (no change to the data)", status: Alternative}]
+      text: "Alternative: model batch as a covariate in the downstream differential-abundance model."
+    because: A covariate keeps the uncertainty of the batch estimate in the test.
+    contraindications: []
+    requires: [downstream_family]
+    evidence: [cuklina2021, nygaard2016]
+    evidence_level: expert_guidance
+  - id: M-R3
+    decision_group: S2
+    effect: annotate
+    when: {all: [{fact: missing.batch_wide_absent_any, op: is_true}]}
+    then: {candidate_status: {batch_combat: Do not automate}, text: "Batch-wide absent features: ComBat is not automated (R7); use batch_center or remove the incomplete features."}
+    because: ComBat needs every feature observed in every batch.
+    contraindications: []
+    requires: []
+    evidence: [hui_chan_goh2025, cuklina2021]
+    evidence_level: literature_independent
+  - id: M-R4
+    decision_group: S2
+    effect: annotate
+    when: {all: [{fact: missing.batch_association, op: eq, value: "yes"}]}
+    then: {text: "Missingness is batch-associated: the joint node D2 applies (NaN-tolerant correction first; hand-off to the method-selection stage)."}
+    because: Batch-associated missingness breaks imputation and ComBat alike.
+    contraindications: []
+    requires: []
+    evidence: [hui2023]
+    evidence_level: literature_independent
+
+  # ---------------------------------------------------------------- S3 filtering, S4 exclusion
+  - id: S3-table
+    decision_group: S3
+    effect: decide
+    when: {all: [{fact: missing.any, op: is_true}]}
+    then: {status: Alternative, text: "Completeness thresholds are reported, not chosen (convention). Pick one to remove the features below it."}
+    because: Filtering depends on the question; PRISM reports the cost of each threshold.
+    contraindications: []
+    requires: [contrast_variable]
+    evidence: []
+    evidence_level: convention
+  - id: R3-S4
+    decision_group: S4
+    effect: decide
+    when: {all: [{fact: outliers.flagged, op: nonempty}]}
+    then: {status: Do not automate, text: "Flagged samples are listed for your decision; informative outliers (strong biology) are your call. Each removal needs its own approval."}
+    because: Sample exclusion is a recommendation list only in this build.
+    contraindications: []
+    requires: [contrast_variable]
+    evidence: [iglewicz1993, matzke2011]
+    evidence_level: heuristic
+
+# Notes that are not plan entries.
+notes:
+  - id: M-R1
+    when: {all: [{fact: missing.any, op: is_false}, {fact: floor.present, op: is_false}]}
+    text: No missing values and no floor ties - no missingness handling needed.
+    evidence: []
+    evidence_level: convention
+  - id: M-R5
+    when: {all: [{fact: missing.intensity, op: eq, value: "yes"}]}
+    text: Intensity-dependent missingness - the feasible set of imputation families is handed to the method-selection stage (nothing is imputed).
+    evidence: [lazar2016, li_smyth2023]
+    evidence_level: literature_independent

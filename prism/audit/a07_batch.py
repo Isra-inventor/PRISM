@@ -84,6 +84,12 @@ def run(unit, ctx, params, results):
             elif s.get("code") == "nested":
                 f.indicate("batch_nested", {k: s[k] for k in ("batch", "design", "nesting")}, text=s["nesting"])
     M["structure"] = struct
+    pairs = []      # technical factors against each other (R9)
+    cat_b = [b for b in B if not b.numeric]
+    for i in range(len(cat_b)):
+        for j in range(i + 1, len(cat_b)):
+            pairs.append(structure(cat_b[i], cat_b[j]))
+    M["structure_batch_pairs"] = pairs
     # v4 section 4.4 (the G4 view): samples per batch, batch coverage, relationship-stratified
     # sample correlation, control-feature trends
     M["samples_per_batch"], M["batch_coverage"] = batch_sizes(f, unit, B, params)
