@@ -28,3 +28,9 @@ are used in the element-level analysis. **No sample is excluded anywhere.** (Lea
 Mid-ART has 4 samples. Hemolysis score is a proxy from SomaScan red-cell proteins. Viral load for blanks in metadata set to 50 (undetectable); GA43_4 is 50 in metadata vs 67 in the old Run2 file.
 
 Run: `python full_analysis.py --data-dir D --out-dir results_v2; python tri_analysis.py ...; python pair_followup.py ...; python figures_v2.py ...`
+
+## Addendum - Cu analysed animal by animal (`per_animal_assoc.py`, results_v2/per_animal)
+Per animal (>=4 samples: DEAB, DEL5, GA43, T544, T623), each protein's within-animal Spearman rho and slope vs Cu; then compared across animals
+(random-effects meta-analysis, exact within-animal permutation test of the mean rho, leave-one-animal-out replication, animal-vs-animal profile similarity).
+Result: 1 protein at FDR<0.05 (FAM170B, same sign in all 5 animals), GSN q=0.08; spread of mean rho = chance (ratio 1.03); top-100 proteins chosen on 4 animals do not replicate in the 5th (p 0.14-1.0);
+animal profiles uncorrelated (mean off-diagonal 0.007). The pooled-model Cu signal (25 proteins) is therefore not supported as a consistent per-animal pattern.
