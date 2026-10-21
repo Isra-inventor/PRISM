@@ -314,6 +314,27 @@ python -m prism report --session SID [--format html|json] [--out FILE]
 ```
 Python 3.7 or later; numpy, FastAPI and Pydantic 2 (no pandas, scipy or scikit-learn).
 
+## v4: data states, missingness, the proBatch port and the plan engine
+
+PRISM sorts preprocessing steps on two axes: **audit or action**, and **global or study-dependent**
+(`prism/registry/steps.yaml`, G1–G7 and S1–S10). Audits measure and never change data. Actions run
+only after you approve them. Each action writes a new, immutable data state (`S0` is the Step 0
+output), and the checkpoint battery (C0, C1, C2) is re-run on it.
+
+```bash
+python -m prism intake --session S --contrast group           # four answers unlock study-dependent steps
+python -m prism plan --session S                              # the plan: Recommended / Alternative / Do not automate / Insufficient metadata
+python -m prism plan approve D1:A1:G5 --session S             # run one entry, then re-audit the new state
+python -m prism plan replay --session S                       # re-apply every approved op from S0; same state ids
+python -m prism state list --session S
+python -m prism evidence check                                # every rule, threshold and parameter has an evidence level
+```
+
+- **A12 missingness profile.** It describes missingness and never imputes. A13 compares the declared processing state with what the data show.
+- **Diagnostic matrices.** Every diagnostic matrix states its NaN and floor policy, with a sensitivity block.
+- **Batch correction.** proBatch-derived correction lives in `prism/ports/probatch/` (GPL-3 derived; see `LICENSING.md` and `docs/probatch_port.md`). `PRISM_DISABLE_PORTS=1` runs PRISM without it.
+- **Reports.** The preflight and build reports are `reports/v4_preflight.md` and `reports/v4_build.md`.
+
 ## API
 
 | Method | Path | |
