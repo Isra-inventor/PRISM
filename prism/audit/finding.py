@@ -54,6 +54,9 @@ TEMPLATES = {
     "pc_association": "PC{pc} ({pct}% of variance) is associated with '{variable}' ({stat} {value}, q {q}).",
     "permanova_association": "'{variable}' accounts for {r2}% of the between-sample distance (PERMANOVA pseudo-F {F}, "
                              "q {q}; marginal).",
+    # A12
+    "missingness_pattern": "Missingness pattern: {pclass} (intensity dependence {intensity}, batch association "
+                           "{batch}, floor pattern {floor}). Pattern quantified, plausible mechanisms assessed.",
     # A13
     "processing_state_mismatch": "Declared {item}: {declared}, but the evidence does not match (confirmed: {confirmed}).",
     # v4 section 3 (A7, A11)

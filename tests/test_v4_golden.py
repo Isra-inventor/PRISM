@@ -28,6 +28,12 @@ def test_v4_golden_real_files(client, isolated):
     assert si["imputed"]["match"] == "matches"                       # 20/11,083 floor-tied: below the 1% indicator
     assert soma["questions"], "SomaScan: log_transformed and normalized were declared not_sure"
     assert si["normalized"]["platform_notes"] and si["normalized"]["platform_notes"][0]["platform"] == "SomaScan"
+    # A12: metabolomics has 0 NaN and 397 floor-tied features; the detection curve is not applicable
+    a12 = find(man, st, "A12", "D2")["measures"]
+    assert a12["cell_encoding"]["nan"] == 0 and a12["cell_encoding"]["n_floor_tied_features"] == 397
+    assert a12["detection_curve"]["status"] == "not_applicable" and "A4 item 4" in a12["detection_curve"]["substitute"]
+    assert a12["pattern"]["pattern_class"] == "none" and a12["pattern"]["indicators"]["floor_pattern"] == "yes"
+    assert find(man, st, "A12", "D1")["measures"]["cell_encoding"]["n_floor_tied_features"] == 20
     # A7/A11 sensitivity on the metabolomics file (33.8% floor-tied features)
     a11 = find(man, st, "A11", "D2")["measures"]
     assert {"exclude_floor", "floor_censored"} <= {v["variant"] for v in a11["sensitivity"]["variants"]}

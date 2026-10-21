@@ -22,3 +22,10 @@ parameters:
   diag_min_features: {evidence_level: heuristic}
   diag_min_share: {evidence_level: heuristic}
   diag_sample_missing_max: {evidence_level: heuristic}
+  a12_bootstrap: {evidence_level: convention}
+  a12_min_partial_features: {evidence_level: heuristic}
+  a12_b1_negligible: {evidence_level: heuristic}
+  a12_batch_absence_share: {evidence_level: heuristic}
+  a12_low_abundance_fraction: {evidence_level: heuristic}
+  a12_min_level_n: {evidence_level: convention}
+  a12_feature_permutations: {evidence_level: convention}

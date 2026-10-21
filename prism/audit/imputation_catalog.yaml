@@ -1,0 +1,61 @@
+# Imputation candidates handed forward by A12.8 (Build Request v4, section 5.8). A feasible set,
+# never ranked, never applied: whether to impute is decided by the later method-selection module.
+# `fits_when` is evaluated against the A12 profile. Seed content from the build request; each entry
+# carries the evidence keys of evidence.yaml.
+families:
+  - id: left_censored
+    kind: family
+    family: MNAR-type, left-censoring
+    methods: [MinDet, MinProb, QRILC (metabolomics)]
+    fits_when: {pattern_class_in: [mostly_intensity_dependent, mixed]}
+    evidence: [lazar2016, wei2018]
+    evidence_level: literature_independent
+    caveats: [QRILC is listed for metabolomics after Wei et al. 2018.]
+    tolerates_batch_wide_absence: false
+    notes: No catalog source shows tolerance of batch-wide absence; treated as false.
+  - id: local_similarity
+    kind: family
+    family: MCAR/MAR-type
+    methods: [kNN, SVD, BPCA, random forest]
+    fits_when: {scattered_majority: true}
+    evidence: [lazar2016, wei2018]
+    evidence_level: literature_independent
+    caveats: [Random forest is listed for metabolomics after Wei et al. 2018.]
+    tolerates_batch_wide_absence: false
+    notes: Hui, Chan and Goh 2025 report that kNN, SVD and random forest amplified false confidence most under batch-wide absence.
+  - id: unknown_pattern
+    kind: family
+    family: unknown pattern
+    methods: [kNN, SVD, BPCA, random forest]
+    fits_when: {pattern_class_in: [insufficient_data]}
+    evidence: [lazar2016]
+    evidence_level: literature_independent
+    caveats: [MCAR-type methods did better on average in Lazar et al. 2016 when the pattern was unknown.]
+    tolerates_batch_wide_absence: false
+  - id: borrowing_across_batches
+    kind: caveat
+    family: caveat
+    methods: [kNN, SVD, random forest]
+    fits_when: {batch_wide_absent_any: true}
+    evidence: [hui_chan_goh2025]
+    evidence_level: literature_independent
+    caveats: [Methods that borrow across batches are harmful when batch-wide absence is present.]
+    tolerates_batch_wide_absence: false
+  - id: within_batch
+    kind: caveat
+    family: caveat
+    methods: [impute within batch]
+    fits_when: {batch_association_in: ["yes"]}
+    evidence: [hui2023]
+    evidence_level: literature_independent
+    caveats: [Impute within batch when missingness is batch-associated.]
+    tolerates_batch_wide_absence: false
+  - id: prefer_no_imputation
+    kind: caveat
+    family: caveat
+    methods: [no imputation]
+    fits_when: {always: true}
+    evidence: [vanderaa_gatto2023, imputation_criteria_biorxiv2023]
+    evidence_level: literature_independent
+    caveats: [Prefer no imputation where the downstream method tolerates missing values.]
+    tolerates_batch_wide_absence: true

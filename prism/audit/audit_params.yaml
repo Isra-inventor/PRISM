@@ -21,3 +21,10 @@ bootstrap: 999                     # A3 bootstrap resamples
 diag_min_features: 20              # heuristic (v4 §3): complete_features(100) needs this many features, else q = 75, 50
 diag_min_share: 0.1                # heuristic (v4 §3): ... and this share of all features
 diag_sample_missing_max: 0.5       # heuristic (v4 §3): for q < 100, samples missing more than this share are dropped
+a12_bootstrap: 200                 # A12.4 bootstrap resamples over features for the b1 CI
+a12_min_partial_features: 50       # heuristic (v4 §5.4): features with 0 < d < n needed for the detection curve
+a12_b1_negligible: 0.1             # heuristic (v4 §5.7): |b1| CI inside +-this (per log2 unit) reads as "no" intensity dependence
+a12_batch_absence_share: 0.01      # heuristic (v4 §5.7): batch-wide absence above this share reads as batch-associated
+a12_low_abundance_fraction: 0.3333 # heuristic (v4 §5.6): "lowest third" of features by mean observed Y
+a12_min_level_n: 3                 # v4 §5.3: a batch level needs this many samples for batch-wide absence
+a12_feature_permutations: 999      # per-feature NaN-indicator tests: Monte Carlo permutations (no exhaustive enumeration)

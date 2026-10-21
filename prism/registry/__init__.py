@@ -142,7 +142,6 @@ EVIDENCE_FILES = [
     ("rules/rules_v0.yaml", "rules"),
     ("audit/imputation_catalog.yaml", "families"),
     ("audit/platform_notes.yaml", "notes"),
-    ("audit/audit_params_v4.yaml", "parameters"),
     ("phase2/methods_registry.yaml", "methods"),
 ]
 

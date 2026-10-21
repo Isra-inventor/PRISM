@@ -211,7 +211,7 @@ def test_contract_determinism_params_and_read_only(st, tmp_path):
     d = engine.run(st, factors=["missingness"])
     assert {i["audit_id"] for i in d["findings"]} == {"A4"}
     with pytest.raises(engine.AuditError, match="Unknown audit"):
-        engine.run(st, factors=["A12"])
+        engine.run(st, factors=["A42"])
 
 
 def test_overrides_change_what_is_used(st, tmp_path):
@@ -249,7 +249,7 @@ def test_audit_runs_with_the_uploads_deleted(client, flow, isolated):
     shutil.rmtree(str(st.dataset_dir("D1") / "upload"), ignore_errors=True)
     shutil.rmtree(str(isolated / "sessions" / step0))
     man = engine.run(st)
-    assert {i["status"] for i in man["findings"]} <= {"computed", "insufficient_metadata", "not_applicable"}
+    assert {i["status"] for i in man["findings"]} <= {"computed", "partial", "insufficient_metadata", "not_applicable"}
 
 
 def test_not_ready_session_is_refused(st, tmp_path):
