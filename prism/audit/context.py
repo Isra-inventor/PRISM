@@ -114,6 +114,9 @@ class Variable:
     def as_float(self):
         return np.array([float(v) if is_num(v) else np.nan for v in self.values])
 
+    def subset(self, idx):
+        return Variable(self.name, [self.values[j] for j in idx], self.role, self.kind, self.source)
+
     def describe(self):
         return {"name": self.name, "role": self.role, "kind": self.kind, "source": self.source,
                 "n_levels": len(self.levels())}

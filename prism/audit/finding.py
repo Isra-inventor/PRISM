@@ -54,6 +54,10 @@ TEMPLATES = {
     "pc_association": "PC{pc} ({pct}% of variance) is associated with '{variable}' ({stat} {value}, q {q}).",
     "permanova_association": "'{variable}' accounts for {r2}% of the between-sample distance (PERMANOVA pseudo-F {F}, "
                              "q {q}; marginal).",
+    # v4 section 3 (A7, A11)
+    "diagnostic_conclusion_depends_on_policy": "{what} is not the same under every diagnostic policy ({n} variants "
+                                               "computed): the conclusion depends on how missing and floor values "
+                                               "are handled. No variant is preferred.",
     # A11
     "outlier_sample": "Sample '{sample}' is a plausible outlier by {by} (modified z {z}, cut-off {cut}).",
     "outlier_cells": "{n_cells} cell(s) in {n_features} feature(s) have a within-feature modified z beyond {cut}.",

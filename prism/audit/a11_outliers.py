@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import stats
+from . import diagnostic_matrix, stats
 from .finding import Finding
 
 AUDIT_ID, CODE = "A11", "outliers"
@@ -21,29 +21,17 @@ def run(unit, ctx, params, results):
     M = f.measures
     if n < 3:
         return f.status("insufficient_data", "fewer than 3 samples")
-    # 1. samples: distance to the median profile (complete features), PC1/PC2 scores, r with the median
-    Yc = stats.complete_features(Y)
+    # 1. samples: distance to the median profile, PC1/PC2 scores, r with the median, on the
+    #    diagnostic matrix (v4 section 3)
+    dm = diagnostic_matrix.default_matrix(Y, params)
+    M["diagnostic"] = dm.report(samples)
     flagged = set()
-    sample_rows = [{"sample": s} for s in samples]
-    if Yc.shape[0] >= 2:
-        med = np.median(Yc, axis=1)
-        d = np.sqrt(((Yc - med[:, None]) ** 2).sum(0))
-        zd = stats.modified_z(d)
-        r = [stats.pearson(Yc[:, j], med) for j in range(n)]
-        k = min(2, n - 1)
-        scores, ve = stats.pca(Yc, k)
-        zpc = [stats.modified_z(scores[:, j]) for j in range(k)]
-        for j, row in enumerate(sample_rows):
-            row.update(distance=float(d[j]), z_distance=float(zd[j]), r_median=float(r[j]),
-                       **{f"z_pc{i + 1}": float(zpc[i][j]) for i in range(k)})
-            reasons = []
-            if zd[j] > cut:
-                reasons.append("distance")
-            reasons += [f"pc{i + 1}" for i in range(k) if abs(zpc[i][j]) > cut]
-            row["flags"] = reasons
-            if reasons:
-                flagged.add(samples[j])
-        M["samples"] = {"n_features_complete": int(Yc.shape[0]), "cutoff": cut,
+    sample_rows = []
+    cols = dm.cols.tolist()
+    if dm.n_features >= 2 and len(cols) >= 3:
+        sample_rows, k = flag_samples(dm.Y, [samples[j] for j in cols], cut)
+        flagged = {r_["sample"] for r_ in sample_rows if r_["flags"]}
+        M["samples"] = {"n_features_complete": dm.n_features, "cutoff": cut, "policy": dm.policy, "q": dm.q,
                         "flagged": [r_["sample"] for r_ in sample_rows if r_["flags"]], "per_sample": sample_rows}
         for r_ in sample_rows:
             if r_["flags"]:
@@ -51,8 +39,13 @@ def run(unit, ctx, params, results):
                            sample=r_["sample"], by=", ".join(r_["flags"]), z=round(max(
                                [abs(r_.get("z_distance", 0))] + [abs(r_.get(f"z_pc{i + 1}", 0)) for i in range(k)]), 2),
                            cut=cut)
+        sens = sensitivity(Y, unit.X, samples, params, cut)
+        M["sensitivity"] = sens
+        if sens["depends"]:
+            f.indicate("diagnostic_conclusion_depends_on_policy", {"variants": sens["variants"]},
+                       what="the set of flagged samples", n=sum(1 for v in sens["variants"] if v["computable"]))
     else:
-        M["samples"] = {"status": "insufficient_data", "reason": "fewer than 2 complete features"}
+        M["samples"] = {"status": "insufficient_data", "reason": "fewer than 2 features in the diagnostic matrix"}
 
     # 2. cells: modified z within each feature on Y
     Z = stats.row_modified_z(Y)
@@ -125,3 +118,42 @@ def _spread(pos):
         return 0.0
     d = np.abs(pos[:, None] - pos[None, :])
     return float(d[np.triu_indices(len(pos), 1)].mean())
+
+
+def flag_samples(Yc, samples, cut):
+    """Distance to the median profile, PC1/PC2 scores and r with the median on a complete matrix."""
+    n = Yc.shape[1]
+    med = np.median(Yc, axis=1)
+    d = np.sqrt(((Yc - med[:, None]) ** 2).sum(0))
+    zd = stats.modified_z(d)
+    r = [stats.pearson(Yc[:, j], med) for j in range(n)]
+    k = min(2, n - 1)
+    scores, ve = stats.pca(Yc, k)
+    zpc = [stats.modified_z(scores[:, j]) for j in range(k)]
+    rows = []
+    for j in range(n):
+        row = {"sample": samples[j], "distance": float(d[j]), "z_distance": float(zd[j]), "r_median": float(r[j])}
+        row.update({f"z_pc{i + 1}": float(zpc[i][j]) for i in range(k)})
+        reasons = []
+        if zd[j] > cut:
+            reasons.append("distance")
+        reasons += [f"pc{i + 1}" for i in range(k) if abs(zpc[i][j]) > cut]
+        row["flags"] = reasons
+        rows.append(row)
+    return rows, k
+
+
+def sensitivity(Y, X, samples, params, cut):
+    vs, n_tied = diagnostic_matrix.variants(Y, X, params)
+    res = []
+    for name, d in vs:
+        cols = d.cols.tolist()
+        if d.n_features < 2 or len(cols) < 3:
+            res.append((name, d, None))
+            continue
+        rows, _ = flag_samples(d.Y, [samples[j] for j in cols], cut)
+        res.append((name, d, tuple(sorted(r["sample"] for r in rows if r["flags"]))))
+    block = diagnostic_matrix.sensitivity_block(res, lambda c: {"flagged_samples": list(c)})
+    block["n_floor_tied_features"] = n_tied
+    block["conclusion_definition"] = "the set of flagged samples"
+    return block

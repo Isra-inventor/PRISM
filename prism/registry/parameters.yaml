@@ -19,3 +19,6 @@ parameters:
   categorical_max_levels: {evidence_level: convention}
   icc_indicator: {evidence_level: heuristic}
   bootstrap: {evidence_level: convention}
+  diag_min_features: {evidence_level: heuristic}
+  diag_min_share: {evidence_level: heuristic}
+  diag_sample_missing_max: {evidence_level: heuristic}

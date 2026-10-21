@@ -10,7 +10,7 @@ import re
 
 import numpy as np
 
-from . import stats
+from . import diagnostic_matrix, stats
 from .a04_missingness import floor_ties
 from .context import is_num
 from .finding import Finding
@@ -104,10 +104,12 @@ def run(unit, ctx, params, results):
                          lowess_range=float(fit.max() - fit.min()),
                          lowess=[[float(a), float(b)] for a, b in zip(x[ok][order], fit)])
             f.plot["run_order_points"] = [[float(x[j]), float(med_y[j]), unit.samples[j]] for j in np.where(ok)[0]]
-            Yc = stats.complete_features(Y)
-            if Yc.shape[0] >= 2:
-                sc, _ = stats.pca(Yc, 1)
-                drift["spearman_pc1"] = stats.spearman(x[ok], sc[ok, 0])[0]
+            dm = diagnostic_matrix.default_matrix(Y, params)
+            drift["diagnostic"] = dm.report(unit.samples)
+            if dm.n_features >= 2 and len(dm.cols) >= 4:
+                sc, _ = stats.pca(dm.Y, 1)
+                okc = ok[dm.cols]
+                drift["spearman_pc1"] = stats.spearman(x[dm.cols][okc], sc[okc, 0])[0]
             if abs(rho) >= 0.3:
                 f.indicate("run_order_drift", {"rho": rho, "variable": ro_col}, variable=ro_col, rho=round(rho, 3))
         # QC per-feature trend

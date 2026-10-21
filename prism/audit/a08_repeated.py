@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import stats
+from . import diagnostic_matrix, stats
 from .context import is_num
 from .finding import Finding
 
@@ -179,18 +179,20 @@ def run(unit, ctx, params, results):
                        cut=params["icc_indicator"])
         results.setdefault(unit.dataset_id, {}).setdefault(unit.unit_id, {})["median_icc"] = M["icc"]["raw"]["median"]
 
-    # 5. mean Pearson r, same vs different subject (features observed in every used sample)
+    # 5. mean Pearson r, same vs different subject (v4 section 3: pairwise-complete features)
     Ys = Y[:, idx]
-    full = np.isfinite(Ys).all(1)
-    if full.sum() >= 3 and len(idx) >= 3:
-        C = np.corrcoef(Ys[full].T)
+    if len(idx) >= 3:
+        C, Nsh = diagnostic_matrix.pairwise_corr(Ys)
         same, diff = [], []
         for i in range(len(idx)):
             for j in range(i + 1, len(idx)):
-                (same if sc[i] == sc[j] else diff).append(C[i, j])
-        M["sample_correlation"] = {"n_features": int(full.sum()), "same_subject_mean_r": float(np.mean(same)) if same else None,
-                                   "different_subject_mean_r": float(np.mean(diff)) if diff else None,
-                                   "n_same_pairs": len(same), "n_different_pairs": len(diff)}
+                if np.isfinite(C[i, j]):
+                    (same if sc[i] == sc[j] else diff).append(C[i, j])
+        M["sample_correlation"] = dict(diagnostic_matrix.pairwise_report(Nsh),
+                                       n_features=int(np.isfinite(Ys).any(1).sum()),
+                                       same_subject_mean_r=float(np.mean(same)) if same else None,
+                                       different_subject_mean_r=float(np.mean(diff)) if diff else None,
+                                       n_same_pairs=len(same), n_different_pairs=len(diff))
         if same and diff:
             d = float(np.mean(same) - np.mean(diff))
             M["sample_correlation"]["difference"] = d

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import stats
+from . import diagnostic_matrix, stats
 from .a02_scale import median_scaling
 from .finding import Finding
 
@@ -60,8 +60,10 @@ def run_session(merged, ctxs, params):
             ub_ids = {members_key(members, cb.dataset_id, s): k for k, s in enumerate(ub.samples)}
             shared = [x for x in ua_ids if x in ub_ids and x is not None]
             row = {"a": f"{ca.dataset_id}/{ua.unit_id}", "b": f"{cb.dataset_id}/{ub.unit_id}", "n_shared": len(shared)}
-            Ya = stats.complete_features(ua.Y[:, [ua_ids[x] for x in shared]])
-            Yb = stats.complete_features(ub.Y[:, [ub_ids[x] for x in shared]])
+            da = diagnostic_matrix.diagnostic_matrix(ua.Y[:, [ua_ids[x] for x in shared]], "complete_features", 100)
+            db = diagnostic_matrix.diagnostic_matrix(ub.Y[:, [ub_ids[x] for x in shared]], "complete_features", 100)
+            Ya, Yb = da.Y, db.Y
+            row["diagnostic"] = {"a": da.report(), "b": db.report()}
             if len(shared) < 4 or Ya.shape[0] < 2 or Yb.shape[0] < 2:
                 rvs.append(dict(row, status="insufficient_data", reason="fewer than 4 shared samples or 2 complete features"))
                 continue

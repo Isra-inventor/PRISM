@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from . import stats
+from . import diagnostic_matrix, stats
 from .context import Variable
 from .finding import Finding, association, permanova, table
 
@@ -21,9 +21,12 @@ def run(unit, ctx, params, results):
         return f.status("insufficient_metadata", "no column has audit_kind sample_type and no source_variable override",
                         needs=["sample source"])
     subj = ctx.subject_codes(unit)
-    Yc = stats.complete_features(unit.Y)
-    K = stats.gram(Yc) if Yc.shape[0] >= 2 else None
-    k = min(params["max_pcs"], unit.n - 1)
+    dm = diagnostic_matrix.default_matrix(unit.Y, params)
+    M["diagnostic"] = dm.report(unit.samples)
+    Yc, cols = dm.Y, dm.cols.tolist()
+    subj_d = [subj[j] for j in cols] if subj else None
+    K = stats.gram(Yc) if (Yc.shape[0] >= 2 and len(cols) >= 3) else None
+    k = min(params["max_pcs"], len(cols) - 1)
     scores, ve = stats.pca(Yc, k) if K is not None else (None, [])
     out, rows = [], []
     for c in names:
@@ -48,11 +51,12 @@ def run(unit, ctx, params, results):
         elif scores is not None:
             e["homogeneous"] = False
             for j in range(k):
-                r = association(scores[:, j], v, subj, params, f"A9|{unit.dataset_id}|{unit.unit_id}|PC{j + 1}|{c}",
+                r = association(scores[:, j], v.subset(cols), subj_d, params,
+                                f"A9|{unit.dataset_id}|{unit.unit_id}|PC{j + 1}|{c}",
                                 categorical="eta_squared")
                 r["pc"] = j + 1
                 rows.append(r)
-            r = permanova(K, v, subj, params, f"A9|{unit.dataset_id}|{unit.unit_id}|PERMANOVA|{c}")
+            r = permanova(K, v.subset(cols), subj_d, params, f"A9|{unit.dataset_id}|{unit.unit_id}|PERMANOVA|{c}")
             r["pc"] = None
             rows.append(r)
         out.append(e)
@@ -64,6 +68,6 @@ def run(unit, ctx, params, results):
             f.indicate("source_association", {k_: r.get(k_) for k_ in ("variable", "test", "pc", "value", "q")},
                        variable=r["variable"], what="PERMANOVA" if r["test"] == "permanova" else f"PC{r['pc']}",
                        q=round(r["q"], 4))
-    f.method("level counts; eta squared per PC and marginal PERMANOVA with restricted permutations", n_used=unit.n,
-             transform=unit.transform)
+    f.method("level counts; eta squared per PC and marginal PERMANOVA with restricted permutations", n_used=len(cols),
+             transform=unit.transform, diagnostic_policy=dm.policy, q=dm.q)
     return f

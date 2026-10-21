@@ -7,7 +7,7 @@ import hashlib
 
 import numpy as np
 
-from . import stats
+from . import diagnostic_matrix, stats
 from .finding import Finding
 
 AUDIT_ID, CODE = "A1", "integrity"
@@ -89,7 +89,9 @@ def run(unit, ctx, params, results):
     if dfeat:
         f.indicate("duplicate_features", {"n_groups": len(dfeat)}, n=len(dfeat))
     Y = unit.diagnostic(X)
-    Yc = stats.complete_features(Y)
+    dm = diagnostic_matrix.diagnostic_matrix(Y, "complete_features", 100)   # integrity check: q = 100, no fallback
+    Yc = dm.Y
+    M["diagnostic"] = dm.report()
     near = []
     if Yc.shape[0] >= 3 and Yc.shape[1] >= 2:
         with np.errstate(invalid="ignore", divide="ignore"):

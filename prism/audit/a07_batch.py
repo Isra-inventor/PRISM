@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from . import stats
+from . import diagnostic_matrix, stats
 from .finding import Finding, association, permanova, table
 
 AUDIT_ID, CODE = "A7", "batch"
@@ -85,13 +85,18 @@ def run(unit, ctx, params, results):
                 f.indicate("batch_nested", {k: s[k] for k in ("batch", "design", "nesting")}, text=s["nesting"])
     M["structure"] = struct
 
-    # 2. PCA of centered Y on complete features
-    Y = stats.complete_features(unit.Y)
-    n = unit.n
-    subj = ctx.subject_codes(unit)
+    # 2. PCA of centered Y on the diagnostic matrix (v4 section 3: policy, fallback, bias warning)
+    dm = diagnostic_matrix.default_matrix(unit.Y, params)
+    M["diagnostic"] = dm.report(unit.samples)
+    Y = dm.Y
+    cols = dm.cols.tolist()
+    n = len(cols)
+    subj_all = ctx.subject_codes(unit)
+    subj = [subj_all[j] for j in cols] if subj_all else None
     variables = [v for v in B + G if v.role != "subject"] + [v for v in G if v.role == "subject"]
+    variables = [v.subset(cols) for v in variables] if n != unit.n else variables
     if Y.shape[0] < 2 or n < 3:
-        M["pca"] = {"status": "insufficient_data", "reason": "fewer than 2 complete features or 3 samples"}
+        M["pca"] = {"status": "insufficient_data", "reason": "fewer than 2 features in the diagnostic matrix or 3 samples"}
         f.method("structure codes", n_used=n)
         return f
     k = min(params["max_pcs"], n - 1)
@@ -114,7 +119,7 @@ def run(unit, ctx, params, results):
         r["pc"] = None
         rows.append(r)
     rows, n_tests = table(rows)
-    M["pca"] = {"n_features_complete": int(Y.shape[0]), "of": unit.p, "k": k,
+    M["pca"] = {"n_features_complete": int(Y.shape[0]), "of": unit.p, "k": k, "policy": dm.policy, "q": dm.q,
                 "variance_explained": [float(x) for x in var_exp]}
     M["associations"] = {"n_tests": n_tests, "rows": rows}
     for r in rows:
@@ -129,11 +134,53 @@ def run(unit, ctx, params, results):
                        stat="eta²" if r["statistic"] == "eta_squared" else "rho", value=round(r["value"], 3),
                        q=round(r["q"], 4))
     f.plot["pca"] = {"variance_explained": [float(x) for x in var_exp],
-                     "samples": [{"sample": s, "scores": [float(x) for x in scores[i]],
-                                  "values": {v.name: v.values[i] for v in B + G}} for i, s in enumerate(unit.samples)]}
+                     "samples": [{"sample": unit.samples[j], "scores": [float(x) for x in scores[i]],
+                                  "values": {v.name: v.values[j] for v in B + G}} for i, j in enumerate(cols)]}
+    # 4. sensitivity block: does the main conclusion depend on the diagnostic policy?
+    if B:
+        sens = sensitivity(unit, ctx, params, B, subj_all)
+        M["sensitivity"] = sens
+        if sens["depends"]:
+            f.indicate("diagnostic_conclusion_depends_on_policy",
+                       {"variants": sens["variants"]}, what="the strongest batch association",
+                       n=sum(1 for v in sens["variants"] if v["computable"]))
     f.plot["crosstabs"] = [{k_: s[k_] for k_ in ("batch", "design", "batch_levels", "design_levels", "table")}
                            for s in struct]
-    f.method("contingency structure, PCA (SVD of feature-centered Y, complete features), eta squared / Spearman "
-             "and marginal PERMANOVA with restricted permutations", n_used=n, transform=unit.transform,
-             k=k, permutations=params["permutations"], seed=params["seed"])
+    f.method("contingency structure, PCA (SVD of feature-centered Y on the diagnostic matrix), eta squared / "
+             "Spearman and marginal PERMANOVA with restricted permutations", n_used=n, transform=unit.transform,
+             k=k, permutations=params["permutations"], seed=params["seed"], diagnostic_policy=dm.policy, q=dm.q)
     return f
+
+
+def _conclusion(d, B, subj_all, params, key):
+    """The strongest batch association (PERMANOVA R2 over the batch candidates) and the set of
+    batch candidates with p <= 0.05 under one diagnostic matrix; None when not computable."""
+    cols = d.cols.tolist()
+    if d.n_features < 2 or len(cols) < 3:
+        return None
+    K = stats.gram(d.Y)
+    subj = [subj_all[j] for j in cols] if subj_all else None
+    best, sig = None, []
+    for b in B:
+        r = permanova(K, b.subset(cols), subj, params, f"{key}|{b.name}")
+        if r.get("status") != "computed":
+            continue
+        if best is None or r["r2"] > best[1]:
+            best = (b.name, r["r2"])
+        if r["p"] <= 0.05:
+            sig.append(b.name)
+    if best is None:
+        return None
+    return (best[0], tuple(sorted(sig)))
+
+
+def sensitivity(unit, ctx, params, B, subj_all):
+    key = f"A7sens|{unit.dataset_id}|{unit.unit_id}"
+    vs, n_tied = diagnostic_matrix.variants(unit.Y, unit.X, params)
+    res = [(name, d, _conclusion(d, B, subj_all, params, key)) for name, d in vs]
+    block = diagnostic_matrix.sensitivity_block(
+        res, lambda c: {"strongest_batch_variable": c[0], "batch_variables_p_le_0_05": list(c[1])})
+    block["n_floor_tied_features"] = n_tied
+    block["conclusion_definition"] = ("the batch candidate with the largest marginal PERMANOVA R2, and the batch "
+                                      "candidates with permutation p <= 0.05")
+    return block

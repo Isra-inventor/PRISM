@@ -18,3 +18,6 @@ time_ordered_max_levels: 12        # time is an ordered factor up to this many v
 categorical_max_levels: 20         # categorical covariates with 2 to this many levels
 icc_indicator: 0.5                 # share of features with ICC above this is reported
 bootstrap: 999                     # A3 bootstrap resamples
+diag_min_features: 20              # heuristic (v4 §3): complete_features(100) needs this many features, else q = 75, 50
+diag_min_share: 0.1                # heuristic (v4 §3): ... and this share of all features
+diag_sample_missing_max: 0.5       # heuristic (v4 §3): for q < 100, samples missing more than this share are dropped
