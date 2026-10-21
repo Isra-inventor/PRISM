@@ -151,3 +151,15 @@ def test_cli_intake_and_plan(isolated, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "D1:A1:G5" in out and "plan.json" in out
     assert cli.main(["plan", "approve", "D1:A1:G6", "--session", st.sid]) == 2
+
+
+def test_g3_removal_keeps_the_processing_state(isolated, tmp_path):
+    """After a G3 removal (still C0), A13 is read from S0, so G5 stays decidable."""
+    import numpy as np
+    st = batch_session(tmp_path, "g3first")
+    from prism.executor import apply
+    apply(st, "D1", "remove_features", {"ids": ["f0"], "reason": "test"},
+          {"user": "u", "at": "2026-10-21T00:00:00Z", "plan_entry": "x"}, step="G3")
+    intake.set_intake(st, {"contrast_variable": "group"})
+    plan = pe.build(st)
+    assert entry(plan, "G5")["status"] == "Recommended"

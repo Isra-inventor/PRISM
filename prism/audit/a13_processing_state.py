@@ -134,6 +134,9 @@ def assess(item, dec, ev, params):
 
 def run(unit, ctx, params, results):
     f = Finding(AUDIT_ID, CODE, unit).feeds("transformation", "normalization", "missingness_handling")
+    if (getattr(ctx, "state", None) or {}).get("parent"):
+        return f.status("not_applicable", "the processing state describes the Step 0 output (S0); this state has PRISM "
+                                          "ops, so A13 is read from S0")
     hist = ctx.schema.get("processing_history") or {}
     ev = evidence(unit, params, results)
     notes = platform_notes(ctx.schema, ctx.output.feature_table.get("columns", []))

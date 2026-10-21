@@ -389,8 +389,9 @@ def build(st, who="user", run_audit=True):
     RULES, ORDER = rules(), order()
     col = facts_mod.collect(st, run_audit=run_audit, who="plan")
     P = col["params"]
-    entries, skipped, gates, nts, hand = [], [], [], [], []
+    entries, skipped, gates, nts, hand, questions = [], [], [], [], [], []
     for F in col["units"]:
+        questions += F.get("questions", [])
         e, s = unit_entries(st, F, RULES, ORDER, P)
         entries += e
         skipped += s
@@ -404,6 +405,7 @@ def build(st, who="user", run_audit=True):
             "order": ORDER["order"], "intake": col.get("intake"), "runs": col["runs"], "states": col["states"],
             "insufficient_metadata_first": [e["entry_id"] for e in insufficient],
             "entries": entries, "skipped": skipped, "gate": gates, "notes": nts, "hand_off": hand,
+            "questions": questions,
             "statuses": list(STATUSES)}
     dc = design_constraints(col["units"], P)
     write_json(st.dir / "design_constraints.json", {"constraints": dc, "created_at": now_iso()})

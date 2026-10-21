@@ -7,15 +7,19 @@
   "use strict";
   const NAMES = { A1: "Integrity", A2: "Data type and scale", A3: "Distribution", A4: "Missing and floor values",
     A5: "Sample size", A6: "Noise and QC", A7: "Batch structure", A8: "Repeated measures",
-    A9: "Sample source", A10: "Multi-omics overlap", A11: "Outliers" };
-  const ORDER = ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9", "A11", "A10"];
+    A9: "Sample source", A10: "Multi-omics overlap", A11: "Outliers", A12: "Missingness profile",
+    A13: "Processing state", V: "Verification (C2)" };
+  const ORDER = ["A1", "A2", "A13", "A3", "A4", "A12", "A5", "A6", "A7", "A8", "A9", "A11", "A10", "V"];
+  const STATUS_CLASS = { "Recommended": "rec", "Alternative": "alt", "Do not automate": "dna",
+    "Insufficient metadata": "ins", "Not applicable": "na" };
   // which sentences surface first in the summary (the rest stay in the cards)
   const PRIORITY = ["declared_not_imputed_floor_ties", "declared_not_normalized_signature", "declared_not_logged_log_like",
     "dimension_mismatch", "samples_x_vs_m", "duplicate_samples", "near_duplicate_samples", "duplicate_sample_ids",
     "batch_confounded", "batch_nested", "permanova_association", "pc_association", "missingness_associated",
     "outlier_sample", "outlier_max_cell", "floor_ties_present", "sentinel_value", "abundance_dependent_missingness",
     "median_scaling_signature", "run_order_drift", "qc_rsd", "source_association", "effective_sample_size", "high_icc",
-    "repeated_measures", "irregular_time_grid", "out_of_scope_type", "missing_values_present", "sd_grows_with_mean"];
+    "repeated_measures", "irregular_time_grid", "out_of_scope_type", "missing_values_present", "sd_grows_with_mean",
+    "processing_state_mismatch", "diagnostic_conclusion_depends_on_policy", "missingness_pattern", "small_batches"];
   const HOWTO = {
     "batch variable": "Add a sample-metadata file with a plate or batch column, or mark a column as a batch variable in Overrides.",
     "sample roles": "Mark QC, blank and pool samples in Overrides (sample role).",
@@ -246,6 +250,13 @@
       case "A9": add("source variables", (m.variables || []).map((v) => v.variable).join(", ") || null); break;
       case "A10": add("unified samples", get(m, "overlap.n_unified")); add("in every dataset", get(m, "overlap.n_in_all")); add("open ID suggestions", get(m, "overlap.open_id_suggestions")); break;
       case "A11": add("flagged samples", (get(m, "samples.flagged") || []).join(", ") || "none"); add("flagged cells", get(m, "cells.n_flagged")); add("cut-off |z|", get(m, "cells.cutoff")); break;
+      case "A12": add("pattern", (get(m, "pattern.pattern_class") || "").replace(/_/g, " ")); add("missing cells", get(m, "cell_encoding.nan"));
+        add("floor-tied features", get(m, "cell_encoding.n_floor_tied_features")); add("detection slope b1", get(m, "detection_curve.b1")); add("b1 95% CI", get(m, "detection_curve.b1_ci95")); break;
+      case "A13": add("unconfirmed mismatches", (m.unconfirmed_mismatches || []).join(", ") || "none"); add("questions", (m.questions || []).length);
+        add("blocks", (get(m, "gate.blocks") || []).join(", ") || "nothing"); break;
+      case "V": add("no batch clustering", get(m, "negative_controls.no_batch_clustering"));
+        add("same-batch r not above different-batch r", get(m, "negative_controls.same_batch_r_not_above_different_batch_r"));
+        add("same-subject r above unrelated r", get(m, "positive_controls.same_subject_r_above_unrelated_r")); break;
     }
     return out;
   }
@@ -283,7 +294,37 @@
       case "A11": T("Samples", table(["sample", "z distance", "z PC1", "z PC2", "flags"], (get(m, "samples.per_sample") || []).map((x) => Object.assign([x.sample, x.z_distance, x.z_pc1, x.z_pc2, (x.flags || []).join(", ")], { _flag: (x.flags || []).length > 0 }))));
         T("Largest value per stratum", table(["stratum", "max", "max / p99", "feature", "sample", "z"], (get(m, "by_stratum.strata") || []).map((s) => Object.assign([s.stratum, s.max, s.max_over_p99, s.feature, s.sample, s.z], { _flag: s.flagged }))));
         T("Most extreme cells", table(["feature", "sample", "value", "z"], (get(m, "cells.top") || []).slice(0, 20).map((c) => [c.feature, c.sample, c.value, c.z]))); break;
+      case "A12": {
+        const dc = m.detection_curve || {};
+        if (p.detection_curve) plots.push(scatter(p.detection_curve.binned.map((b) => [b[0], b[1]]), "Fraction detected vs mean observed value",
+          { line: p.detection_curve.curve, xtitle: "mean observed value (log2)", r: 4 }));
+        tables.push(el("p", { class: "ar-note" }, el("b", { text: get(m, "pattern.wording") || "" }), " ", get(m, "pattern.mechanism_note") || ""));
+        if (dc.limitation) tables.push(el("p", { class: "ar-note", text: dc.limitation }));
+        T("Cell encoding", table(["observed", "missing", "zero", "floor-tied", "cells"], [[get(m, "cell_encoding.observed"), get(m, "cell_encoding.nan"), get(m, "cell_encoding.zero"), get(m, "cell_encoding.floor_tied"), get(m, "cell_encoding.n_cells")]]));
+        T("Missing values by batch", table(["batch", "level", "samples", "missing rate"], [].concat(...(get(m, "rates.by_batch") || []).map((v) => v.levels.map((l) => [v.variable, l.level, l.n, pct(l.missing_rate)]))), { empty: "No batch variable." }));
+        T("Batch-wide absence", table(["batch", "features absent from a level", "share", "observed in every level"], (get(m, "batch_wide_absence.variables") || []).map((v) => [v.variable, v.n_features, pct(v.share), pct(v.coverage_100_share)]), { empty: "No batch variable." }));
+        T("Feature classes (descriptive, heuristic)", table(["class", "features"], Object.entries(get(m, "feature_classes.counts") || {})));
+        T("Indicators (yes / no / indeterminate)", table(["indicator", "value"], Object.entries(get(m, "pattern.indicators") || {}).map(([k, v]) => [k.replace(/_/g, " "), v])));
+        const ic = m.imputation_candidates || {};
+        T("Imputation candidates — hand-off to the method-selection stage; nothing is imputed", table(["family", "methods", "fits this profile", "tolerates batch-wide absence", "evidence", "caveats"],
+          (ic.entries || []).map((e) => [e.family, (e.methods || []).join(", "), e.fits_profile ? "yes" : "no", e.tolerates_batch_wide_absence ? "yes" : "no", `${(e.evidence || []).join(", ")} (${e.evidence_level})`, (e.caveats || []).join(" ")]),
+          { empty: "No missing values: nothing to hand off." }));
+        break; }
+      case "A13": T("Declared vs observed vs confirmed", table(["item", "declared", "observed evidence", "match", "confirmed", "platform note"],
+          (m.items || []).map((r) => Object.assign([r.item.replace(/_/g, " "), r.declared, (r.observed_evidence || []).join(" "), r.match.replace(/_/g, " "), r.confirmed || "—",
+            (r.platform_notes || []).map((n) => `${n.text}${n.verify_with_vendor_documentation ? " (verify with the vendor documentation)" : ""}`).join(" ")], { _flag: r.match === "does_not_match" && !r.confirmed }))));
+        if ((m.questions || []).length) T("Questions", table(["question", "why"], m.questions.map((q) => [q.text, q.reason]))); break;
+      case "V": for (const [k, c] of Object.entries(m.comparisons || {})) T(k.replace(/_/g, " "), table(["measure", "before", "after"], c.table.map((r) => [r.measure, r.before, r.after])));
+        T("Controls", table(["control", "value"], [...Object.entries(m.negative_controls || {}), ...Object.entries(m.positive_controls || {})].map(([k, v]) => [k.replace(/_/g, " "), v])));
+        tables.push(el("p", { class: "ar-note", text: m.use || "" })); break;
     }
+    const diag = m.diagnostic || get(m, "run_order.diagnostic");
+    if (diag) tables.unshift(el("p", { class: "ar-note ar-policy" }, el("b", { text: "Diagnostic matrix: " }),
+      `${diag.policy}${diag.q != null ? ` (q = ${diag.q})` : ""}, ${fmt(diag.n_features_used)} of ${fmt(diag.of)} features (${pct(diag.share)})` +
+      `${diag.n_samples_dropped ? `, ${diag.n_samples_dropped} sample(s) dropped` : ""}. Note: ${diag.bias_warning}.`));
+    if (m.sensitivity) T(`Sensitivity: ${m.sensitivity.conclusion_definition || "conclusion"} under each policy${m.sensitivity.depends ? " — the conclusion depends on the policy" : " — same conclusion"}`,
+      table(["variant", "policy", "q", "features", "samples", "conclusion"], m.sensitivity.variants.map((v) => Object.assign([v.variant, v.policy, v.q, v.n_features, v.n_samples,
+        v.conclusion ? Object.values(v.conclusion).map((x) => Array.isArray(x) ? (x.join(", ") || "none") : x).join(" · ") : "not computable"], { _flag: m.sensitivity.depends }))));
     return { plots: plots.filter((x) => x && x.nodeType), tables };
   }
   function flatten(o, path = "", out = []) {
@@ -473,6 +514,61 @@
       openAll: () => setAll(true) };
   }
 
+  // ------------------------------------------------------------------ v4: steps, plan, checkpoints
+  function planStatusOf(v4, stepId) {
+    const es = (get(v4, "plan.entries") || []).filter((e) => e.step === stepId && !e.checkpoint);
+    if (!es.length) return null;
+    const order = ["Insufficient metadata", "Do not automate", "Recommended", "Alternative", "Not applicable"];
+    return es.map((e) => e.status).sort((a, c) => order.indexOf(a) - order.indexOf(c))[0];
+  }
+  function stepsGrid(v4, findings) {
+    if (!v4 || !v4.grid) return null;
+    const seen = new Set((findings || []).map((f) => f.audit_id));
+    const cell = (key, title) => el("div", { class: "v4-cell" }, el("h4", { text: title }),
+      el("ul", {}, (v4.grid[key] || []).map((s) => {
+        const st = s.kind === "audit" ? (seen.size ? "measured" : null) : planStatusOf(v4, s.id);
+        return el("li", {}, el("span", { class: "v4-id", text: s.id }), el("span", { text: s.name + (s.implemented ? "" : " (not implemented)") }),
+          st ? el("span", { class: `v4-st ${STATUS_CLASS[st] || "meas"}`, text: st }) : null);
+      })));
+    return el("div", { class: "v4-grid" },
+      el("div", { class: "v4-axis" }), el("div", { class: "v4-axis", text: "Global" }), el("div", { class: "v4-axis", text: "Study-dependent" }),
+      el("div", { class: "v4-axis v", text: "Audit" }), cell("global|audit", "measures, never changes data"), cell("study_dependent|audit", "interpreted against the question"),
+      el("div", { class: "v4-axis v", text: "Action" }), cell("global|action", "changes data, after approval"), cell("study_dependent|action", "needs the research question"));
+  }
+  function planBlock(v4) {
+    const plan = v4 && v4.plan;
+    if (!plan) return null;
+    const dec = v4.decisions || [];
+    const done = new Map(dec.filter((d) => d.decision && d.decision.startsWith("approved")).map((d) => [d.entry_id, d]));
+    const first = new Set(plan.insufficient_metadata_first || []);
+    const entries = plan.entries.slice().sort((a, c) => (first.has(c.entry_id) - first.has(a.entry_id)));
+    const rows = entries.map((e) => e.checkpoint ? el("div", { class: "v4-cp", text: `${e.checkpoint} · ${e.dataset}: ${e.text}` })
+      : el("article", { class: "v4-entry" },
+        el("header", {}, el("span", { class: "v4-id", text: e.step }), el("b", { text: `${e.step_name} · ${e.dataset}/${e.assay}` }),
+          el("span", { class: `v4-st ${STATUS_CLASS[e.status] || ""}`, text: e.status }),
+          done.has(e.entry_id) ? el("span", { class: "v4-st done", text: `approved earlier by ${get(done.get(e.entry_id), "approval.user") || "user"}` }) : null),
+        el("p", { text: (e.because || []).join(" ") }),
+        e.candidates && e.candidates.length ? el("ul", { class: "v4-cands" }, e.candidates.map((c) => el("li", {},
+          el("span", { class: `v4-st ${STATUS_CLASS[c.status] || ""}`, text: c.status }), " ", c.label))) : null,
+        e.filtering ? table(["threshold %", "kept overall", "kept within a group", "kept by subject cluster", "removed"],
+          e.filtering.rows.map((r) => [r.threshold, r.n_kept_overall, r.n_kept_within_a_group, r.n_kept_by_subject_cluster, r.n_removed])) : null,
+        el("p", { class: "ar-faint", text: `rules ${e.rule_ids.join(", ") || "gate"} · evidence ${Object.values(e.evidence_levels || {}).join(", ") || "—"}` +
+          `${(e.blocked_by || []).length ? ` · blocked by ${e.blocked_by.join(", ")}` : ""}` })));
+    const notes = (plan.notes || []).map((n) => el("li", { text: `${n.dataset}: ${n.text}` }));
+    return el("div", { class: "v4-plan" }, rows, notes.length ? el("ul", { class: "ar-note" }, notes) : null,
+      el("p", { class: "ar-note", text: "Nothing runs without approval. Statuses: Recommended, Alternative, Do not automate, Insufficient metadata (and Not applicable for scope)." }));
+  }
+  function checkpointBlock(v4) {
+    if (!v4 || !(v4.states || []).length) return null;
+    const st = table(["dataset", "state", "checkpoint", "scale", "features", "samples", "missing cells", "op", "head"],
+      v4.states.map((s) => [s.dataset, `${s.label} · ${s.state_id.slice(0, 10)}`, s.checkpoint, s.scale, get(s, "counts.n_features"), get(s, "counts.n_samples"), get(s, "counts.n_nan"), s.op || "Step 0 output", s.head ? "yes" : ""]));
+    const comps = (v4.checkpoints || []).map((c) => el("div", {}, el("h3", { text: `${c.dataset}: C0 → ${c.to}` }),
+      c.error ? el("p", { class: "ar-note", text: c.error }) :
+        table(["check", "unit", "status before", "status after", "notes before", "notes after"], (c.table || []).map((r) => [r.audit_id, r.assay, r.status_before, r.status_after,
+          (r.indicators_before || []).join(", "), (r.indicators_after || []).join(", ")]), { empty: "Run the audit at both states to compare them." })));
+    return el("div", {}, st, comps);
+  }
+
   function render(root, b, opts = {}) {
     root.classList.add("ar");
     tooltips(root);
@@ -485,11 +581,15 @@
           el("p", { class: "ar-sub", text: "Numbers and plain sentences only. Nothing in your data was changed, and no verdict is given." })),
         opts.actions || standaloneActions(root, det)),
       kpis(b),
+      b.v4 ? el("section", { class: "ar-section" }, el("header", {}, el("h2", { text: "Steps" }), el("span", { class: "ar-sub", text: "Two axes: audit or action, global or study-dependent." })), stepsGrid(b.v4, b.findings)) : null,
       el("section", { class: "ar-section" }, el("header", {}, el("h2", { text: "Highlights" }), el("span", { class: "ar-sub", text: "The most important observations first; click a tag for the details." })), highlights(b, jump)),
+      planBlock(b.v4) ? el("section", { class: "ar-section" }, el("header", {}, el("h2", { text: "Plan" }), el("span", { class: "ar-sub", text: "What the rules propose; insufficient metadata first." })), planBlock(b.v4)) : null,
+      checkpointBlock(b.v4) ? el("section", { class: "ar-section" }, el("header", {}, el("h2", { text: "Data states and checkpoints" })), checkpointBlock(b.v4)) : null,
       needs ? el("section", { class: "ar-section" }, el("header", {}, el("h2", { text: "Needs your input" })), needs) : null,
       dvo ? el("section", { class: "ar-section" }, el("header", {}, el("h2", { text: "What you declared vs what the data shows" }), el("span", { class: "ar-sub", text: "Hover a cell for the observed numbers." })), dvo) : null,
       det.block,
       el("section", { class: "ar-section" }, reproBlock(b)));
+    addEventListener("beforeprint", () => { det.openAll(); setTimeout(() => root.querySelectorAll("details").forEach((d) => { d.open = true; }), 0); });
     return { showTab: det.show, focus: det.focus, setView: det.setView };
   }
   function themeButton() {
@@ -507,7 +607,8 @@
   }
   function standaloneActions(root, det) {
     return el("div", { class: "ar-actions no-print" }, themeButton(),
-      el("button", { type: "button", class: "ar-btn", onclick: () => { det && det.openAll && det.openAll(); setTimeout(() => print(), 300); } }, icon(I.print), "Print / PDF"));
+      el("button", { type: "button", class: "ar-btn", onclick: () => { det && det.openAll && det.openAll();
+        setTimeout(() => { root.querySelectorAll("details").forEach((d) => { d.open = true; }); setTimeout(() => print(), 250); }, 150); } }, icon(I.print), "Print / PDF"));
   }
 
   // ------------------------------------------------------------------ the final report
@@ -568,9 +669,11 @@
     const jump = (f) => det && det.openCard(f);
     const sections = [
       ["summary", "Summary"], ["highlights", "Key findings"], ["input", "Needs your input"], ["declared", "Declared vs observed"],
+      ["steps", "Steps"], ["plan", "Plan"], ["checkpoints", "Checkpoints"],
       ["datasets", "Datasets"], ["figures", "Key figures"], ["details", "All checks"], ["methods", "Methods"]];
     const needs = au ? needsBlock(au, jump) : null, dvo = au ? dvoBlock(au) : null, figs = keyFigures(au);
-    const has = { input: !!needs, declared: !!dvo, highlights: !!au, figures: !!figs, details: !!au };
+    const v4 = fb.v4, grid = stepsGrid(v4, au ? au.findings : []), pl = planBlock(v4), cps = checkpointBlock(v4);
+    const has = { input: !!needs, declared: !!dvo, highlights: !!au, figures: !!figs, details: !!au, steps: !!grid, plan: !!pl, checkpoints: !!cps };
     const S = (id, title, sub, ...body) => el("section", { class: "ar-section fr-reveal", id: `fr-${id}` },
       el("header", {}, el("h2", { text: title }), sub ? el("span", { class: "ar-sub", text: sub }) : null), body);
     const progress = el("div", { class: "fr-progress", "aria-hidden": "true" });
@@ -587,6 +690,9 @@
       au ? S("highlights", "Key findings", "The most important observations per dataset.", highlights(au, jump)) : null,
       needs ? S("input", "Needs your input", null, needs) : null,
       dvo ? S("declared", "Declared vs observed", "What the Step 0 history says next to what the values show.", dvo) : null,
+      grid ? S("steps", "Steps", "Two axes: audit or action, global or study-dependent.", grid) : null,
+      pl ? S("plan", "Plan", "What the rules propose; nothing runs without approval.", pl) : null,
+      cps ? S("checkpoints", "Data states and checkpoints", "C0 raw, C1 after transform and normalization, C2 after batch correction and filtering.", cps) : null,
       S("datasets", "Datasets", "How each dataset was read and confirmed.", datasetCards(fb)),
       figs ? S("figures", "Key figures", "Interactive here; static in print.", figs) : null,
       det ? el("div", { class: "fr-page fr-reveal", id: "fr-details" }, det.block) : null,
@@ -600,7 +706,8 @@
       reveal();
     };
     addEventListener("scroll", onScroll, { passive: true });
-    addEventListener("beforeprint", () => { root.querySelectorAll(".fr-reveal").forEach((n) => n.classList.add("in")); det && det.openAll(); });
+    addEventListener("beforeprint", () => { root.querySelectorAll(".fr-reveal").forEach((n) => n.classList.add("in")); det && det.openAll();
+      setTimeout(() => root.querySelectorAll("details").forEach((d) => { d.open = true; }), 0); });   // print: no collapsed cards
     requestAnimationFrame(onScroll);
     return det ? { showTab: det.show, focus: det.focus, setView: det.setView } : {};
   }

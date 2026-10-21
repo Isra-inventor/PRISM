@@ -53,6 +53,8 @@
         runs.slice().reverse().map((r) => el("option", { value: r, selected: b && r === b.manifest.run_id ? "selected" : null, text: r })))) : null,
       el("button", { class: "linkbtn", type: "button", text: "Parameters", onclick: () => toggle("audit-params") }),
       el("button", { class: "linkbtn", type: "button", text: "Overrides", onclick: () => toggle("audit-overrides") }),
+      el("button", { class: "linkbtn", type: "button", text: "Intake", onclick: () => { toggle("audit-intake"); loadIntake(); } }),
+      el("button", { class: "btn btn-light btn-sm", type: "button", text: "Plan", onclick: () => { toggle("audit-plan"); loadPlan(); } }),
       b ? el("a", { class: "linkbtn", href: `/api/sessions/${SID}/audit/${b.manifest.run_id}/report.html`, download: `prism_audit_${b.manifest.run_id}.html`, text: "Export this audit" }) : null,
       b ? el("button", { class: "btn btn-sm", type: "button", text: "Final report →", onclick: () => window.PRISM_FINAL && window.PRISM_FINAL.open({ session_id: SID }) }) : null,
       el("span", { class: "spacer" }),
@@ -65,7 +67,7 @@
     box().replaceChildren(
       el("div", { class: "panel-head" }, el("h2", { text: "Tier 1 audit" }), el("span", { class: "meta", text: "deterministic · no AI" })),
       el("div", { class: "panel-body" }, toolbar(b), el("div", { id: "audit-error", class: "alert alert-error hidden" }),
-        paramsDrawer(b), overridesDrawer(), chatBox(), diff || null, content));
+        paramsDrawer(b), overridesDrawer(), intakeDrawer(), planDrawer(), chatBox(), diff || null, content));
     loadOverrides();
     renderChat();
   }
@@ -188,7 +190,8 @@
   }
 
   function overridesDrawer() {
-    const kind = el("select", { class: "input input-sm" }, ["sample_role", "exclude_from_audit", "batch_variable", "design_variable", "source_variable", "param"].map((k) => el("option", { value: k, text: k })));
+    const kind = el("select", { class: "input input-sm" }, ["sample_role", "exclude_from_audit", "batch_variable", "design_variable", "source_variable", "param",
+      "processing_state", "control_feature", "feature_level", "zeros_are_missing", "floor_censored"].map((k) => el("option", { value: k, text: k })));
     const target = el("input", { class: "input input-sm", placeholder: "sample, column or parameter" });
     const value = el("input", { class: "input input-sm", placeholder: "role (qc, blank, pool, study) or value" });
     const reason = el("input", { class: "input input-sm", placeholder: "reason (optional)" });
@@ -196,6 +199,10 @@
       const k = kind.value, body = { kind: k, reason: reason.value };
       if (k === "sample_role" || k === "exclude_from_audit") body.sample = target.value.trim();
       else if (k === "param") { body.key = target.value.trim(); try { body.value = JSON.parse(value.value); } catch (_) { body.value = value.value; } }
+      else if (k === "processing_state") { body.item = target.value.trim(); body.value = value.value.trim(); }
+      else if (k === "control_feature") body.feature = target.value.trim();
+      else if (k === "feature_level") body.level = value.value.trim();
+      else if (k === "zeros_are_missing" || k === "floor_censored") body.value = value.value.trim();
       else body.column = target.value.trim();
       if (k === "sample_role") body.role = value.value.trim();
       try { await api(`/api/sessions/${SID}/overrides`, body); target.value = value.value = reason.value = ""; loadOverrides(); }
@@ -217,6 +224,88 @@
           try { await api(`/api/sessions/${SID}/overrides/${o.override_id}`, undefined, "DELETE"); loadOverrides(); } catch (e) { error(e.message); } } }))))
         : el("p", { class: "item-sub", text: "No overrides." }));
     } catch (e) { list.replaceChildren(el("p", { class: "item-sub", text: e.message })); }
+  }
+
+  // ---------------------------------------------------------------- v4: intake and the plan
+  function intakeDrawer() {
+    return el("div", { id: "audit-intake", class: "audit-drawer hidden" },
+      el("p", { class: "item-sub", text: "Four answers unlock the study-dependent steps. An empty field is fine: the steps that need it say so." }),
+      el("div", { id: "audit-intake-form" }));
+  }
+  async function loadIntake() {
+    const box_ = $("audit-intake-form");
+    if (!box_) return;
+    let doc;
+    try { doc = await api(`/api/sessions/${SID}/intake`); } catch (e) { box_.replaceChildren(el("p", { class: "item-sub", text: e.message })); return; }
+    const cur = doc.intake || {}, F = doc.fields || {};
+    const sel = (name, options) => el("select", { class: "input input-sm", name },
+      [el("option", { value: "", text: "— not answered —" }), ...options.map((o) => el("option", { value: o, text: o, selected: cur[name] === o ? "selected" : null }))]);
+    const txt = (name) => el("input", { class: "input input-sm", name, value: (cur[name] || []).join ? (cur[name] || []).join(", ") : (cur[name] || ""), placeholder: "comma-separated columns" });
+    const fields = { contrast_variable: sel("contrast_variable", ["none", ...(doc.columns || [])]), protected_variables: txt("protected_variables"),
+      nuisance_variables: txt("nuisance_variables"), question_type: sel("question_type", doc.question_types || []),
+      downstream_family: sel("downstream_family", doc.downstream_families || []) };
+    const save = async () => {
+      const body = {};
+      for (const [k, n] of Object.entries(fields)) if (n.value.trim()) body[k] = n.value.trim();
+      try { await api(`/api/sessions/${SID}/intake`, body); loadIntake(); loadPlan(); } catch (e) { error(e.message); }
+    };
+    box_.replaceChildren(el("div", { class: "audit-params" }, Object.entries(fields).map(([k, n]) =>
+      el("div", { class: "audit-param" }, el("label", {}, el("code", { text: k }), el("span", { class: "item-sub", text: ` ${F[k] || ""}` })), n))),
+      el("div", { class: "guide-actions" }, el("button", { class: "btn btn-sm", type: "button", text: "Save intake", onclick: save }),
+        el("span", { class: "item-sub", text: doc.version ? ` version ${doc.version}` : " not answered yet" })));
+  }
+  function planDrawer() {
+    return el("div", { id: "audit-plan", class: "audit-drawer hidden" }, el("div", { id: "audit-plan-body" },
+      el("p", { class: "item-sub", text: "Building the plan…" })));
+  }
+  let PLAN = null, POS = 0;
+  async function loadPlan() {
+    const body = $("audit-plan-body");
+    if (!body) return;
+    try { PLAN = await api(`/api/sessions/${SID}/plan`); } catch (e) { body.replaceChildren(el("p", { class: "item-sub", text: e.message })); return; }
+    const actions = PLAN.entries.filter((e) => !e.checkpoint);
+    POS = Math.min(POS, Math.max(0, actions.length - 1));
+    renderPlan();
+  }
+  function renderPlan() {
+    const body = $("audit-plan-body");
+    const actions = PLAN.entries.filter((e) => !e.checkpoint);
+    const qs = (PLAN.questions || []).map((q) => el("div", { class: "audit-q" }, el("b", { text: `${q.dataset}: ${q.text}` }),
+      el("p", { class: "item-sub", text: [q.reason, ...(q.evidence || []), ...(q.platform_notes || []).map((n) => `Note: ${n.text}`), q.consequence].filter(Boolean).join(" ") }),
+      el("div", { class: "guide-actions" }, (q.options || ["yes", "no"]).map((o) => el("button", { class: "btn btn-light btn-sm", type: "button", text: o,
+        onclick: async () => { try { await api(`/api/sessions/${SID}/overrides`, Object.assign({}, q.override, { value: o, reason: "answered in the plan" })); await run({}); loadPlan(); } catch (e) { error(e.message); } } })))));
+    const e = actions[POS];
+    const STATUS = { "Recommended": "rec", "Alternative": "alt", "Do not automate": "dna", "Insufficient metadata": "ins", "Not applicable": "na" };
+    const card = e ? el("article", { class: "v4-entry" },
+      el("header", {}, el("span", { class: "v4-id", text: e.step }), el("b", { text: `${e.step_name} · ${e.dataset}/${e.assay}` }), el("span", { class: `v4-st ${STATUS[e.status] || ""}`, text: e.status })),
+      el("p", { text: (e.because || []).join(" ") }),
+      el("p", { class: "item-sub", text: `Evidence: ${Object.entries(e.evidence_levels || {}).map(([k, v]) => `${k} (${v})`).join(", ") || "—"}${(e.evidence || []).length ? ` · ${e.evidence.join(", ")}` : ""}` }),
+      (e.blocked_by || []).length ? el("p", { class: "item-sub", text: `Blocked by: ${e.blocked_by.join(", ")}` }) : null,
+      el("ul", { class: "v4-cands" }, (e.candidates || []).map((c, i) => el("li", {},
+        el("span", { class: `v4-st ${STATUS[c.status] || ""}`, text: c.status }), ` ${c.label} `,
+        ["Recommended", "Alternative"].includes(e.status) && ["Recommended", "Alternative"].includes(c.status)
+          ? el("button", { class: "btn btn-sm", type: "button", text: c.op ? "Approve and run" : "Approve", onclick: (ev) => approve(e, i, ev.target) }) : null))),
+      el("div", { class: "guide-actions" },
+        el("button", { class: "linkbtn", type: "button", text: "Reject", onclick: async () => { try { await api(`/api/sessions/${SID}/plan/${encodeURIComponent(e.entry_id)}/reject`, { reason: "rejected in the plan view" }); POS += 1; renderPlan(); } catch (er) { error(er.message); } } }))) : el("p", { class: "item-sub", text: "Nothing to decide." });
+    body.replaceChildren(...[
+      qs.length ? el("div", {}, el("h3", { text: "Questions" }), qs) : null,
+      el("div", { class: "audit-bar" },
+        el("button", { class: "linkbtn", type: "button", text: "← previous", disabled: POS <= 0, onclick: () => { POS -= 1; renderPlan(); } }),
+        el("span", { class: "item-sub", text: actions.length ? `entry ${POS + 1} of ${actions.length}` : "" }),
+        el("button", { class: "linkbtn", type: "button", text: "next →", disabled: POS >= actions.length - 1, onclick: () => { POS += 1; renderPlan(); } })),
+      card,
+      el("p", { class: "item-sub", text: "Nothing runs without approval. Approving calls the executor on a new data state, then re-runs that checkpoint's audit." })]
+      .filter(Boolean));
+  }
+  async function approve(e, i, btn) {
+    btn.disabled = true; btn.textContent = "Running…";
+    try {
+      const out = await api(`/api/sessions/${SID}/plan/${encodeURIComponent(e.entry_id)}/approve`, { candidate: i });
+      if (out.run_id) await show(out.run_id);
+      const d = $("audit-plan"); if (d) d.classList.remove("hidden");
+      POS += 1;
+      await loadPlan();
+    } catch (er) { error(er.message); btn.disabled = false; btn.textContent = "Approve and run"; }
   }
 
   window.PRISM_AUDIT = { open, show, run };

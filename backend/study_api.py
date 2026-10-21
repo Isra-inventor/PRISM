@@ -206,10 +206,14 @@ def merge_clear_mapping_csv(sid: str):
 
 def _audit(sid, fn):
     from prism.audit import engine, overrides
+    from prism.executor import ExecutorError
+    from prism.executor.state import StateError
+    from prism.plan.engine import PlanError
+    from prism.plan.intake import IntakeError
     st = _load(sid)
     try:
         return fn(st, engine)
-    except (engine.AuditError, overrides.OverrideError) as e:
+    except (engine.AuditError, overrides.OverrideError, ExecutorError, StateError, PlanError, IntakeError) as e:
         raise HTTPException(422, str(e))
 
 
@@ -217,11 +221,13 @@ class AuditRun(BaseModel):
     factors: Optional[list] = None
     datasets: Optional[list] = None
     params: Optional[dict] = None
+    state: Optional[str] = None
 
 
 @router.post("/api/sessions/{sid}/audit/run")
 def audit_run(sid: str, req: AuditRun):
-    return _audit(sid, lambda st, e: e.run(st, req.factors, req.datasets, req.params or {}, who="user"))
+    return _audit(sid, lambda st, e: e.run(st, req.factors, req.datasets, req.params or {}, who="user",
+                                           state=req.state))
 
 
 @router.get("/api/sessions/{sid}/audit")
@@ -277,6 +283,10 @@ class OverrideIn(BaseModel):
     key: Optional[str] = None
     value: Optional[object] = None
     reason: Optional[str] = ""
+    item: Optional[str] = None
+    feature: Optional[str] = None
+    level: Optional[str] = None
+    assay: Optional[str] = None
 
 
 @router.post("/api/sessions/{sid}/overrides")
@@ -361,3 +371,88 @@ def final_report_html(sid: str, run_id: Optional[str] = None, download: int = 1)
     html = _audit(sid, lambda st, e: report.final_html(st, run_id))
     headers = {"Content-Disposition": f'attachment; filename="prism_report_{sid}.html"'} if download else {}
     return HTMLResponse(html, headers=headers)
+
+
+# ---------------------------------------------------------------- v4: registry, intake, plan, states
+
+
+@router.get("/api/registry")
+def get_registry():
+    from prism import registry
+    return {"steps": registry.steps(), "grid": registry.grid(), "candidates": registry.registry().get("candidates", [])}
+
+
+@router.get("/api/sessions/{sid}/intake")
+def get_intake(sid: str):
+    from prism.plan import intake
+    st = _load(sid)
+    doc = intake.load_doc(st)
+    return dict(doc, fields=intake.FIELDS, columns=intake.columns(st) if st.confirmed() else [],
+                question_types=list(intake.QUESTION_TYPES), downstream_families=list(intake.DOWNSTREAM))
+
+
+class IntakeIn(BaseModel):
+    contrast_variable: Optional[str] = None
+    protected_variables: Optional[object] = None
+    nuisance_variables: Optional[object] = None
+    question_type: Optional[str] = None
+    downstream_family: Optional[str] = None
+
+
+@router.post("/api/sessions/{sid}/intake")
+def post_intake(sid: str, req: IntakeIn):
+    from prism.plan import intake
+    body = {k: v for k, v in req.model_dump().items() if v not in (None, "", [])}
+    return _audit(sid, lambda st, e: intake.set_intake(st, body, who="user"))
+
+
+@router.get("/api/sessions/{sid}/plan")
+def get_plan(sid: str, rebuild: int = 1):
+    from prism.plan import engine as pe
+    from prism.audit.report import _trim_plan
+    return _audit(sid, lambda st, e: _trim_plan(pe.build(st) if rebuild else pe.load(st)))
+
+
+class Approval(BaseModel):
+    candidate: Optional[int] = 0
+    user: Optional[str] = "user"
+    reason: Optional[str] = ""
+
+
+@router.post("/api/sessions/{sid}/plan/{entry_id}/approve")
+def approve_entry(sid: str, entry_id: str, req: Approval):
+    from prism.plan import engine as pe
+    return _audit(sid, lambda st, e: pe.approve(st, entry_id, req.candidate or 0, req.user or "user"))
+
+
+@router.post("/api/sessions/{sid}/plan/{entry_id}/reject")
+def reject_entry(sid: str, entry_id: str, req: Approval):
+    from prism.plan import engine as pe
+    return _audit(sid, lambda st, e: pe.reject(st, entry_id, req.user or "user", req.reason or ""))
+
+
+@router.get("/api/sessions/{sid}/plan/decisions")
+def plan_decisions(sid: str):
+    from prism.plan import engine as pe
+    return _audit(sid, lambda st, e: pe.decisions(st))
+
+
+@router.get("/api/sessions/{sid}/states")
+def get_states(sid: str):
+    from prism.executor import state as state_mod
+    return _audit(sid, lambda st, e: state_mod.list_states(st))
+
+
+@router.get("/api/sessions/{sid}/states/{state_id}/audit/{run_id}")
+def state_audit(sid: str, state_id: str, run_id: str):
+    from prism.audit import report
+    from prism.executor import state as state_mod
+
+    def fn(st, e):
+        did, full = state_mod.find(st, state_id)
+        b = report.bundle(st, run_id)
+        st_ = (b["manifest"]["scope"].get("states") or {}).get(did, {})
+        if st_.get("state_id") != full:
+            raise e.AuditError(f"Run {run_id} was not made at state {state_id}.")
+        return b
+    return _audit(sid, fn)

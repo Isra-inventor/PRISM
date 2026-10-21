@@ -148,8 +148,13 @@ def run(unit, ctx, params, results):
         batch_tables.append({"variable": v.name, "levels": tbl})
     M["per_batch"] = batch_tables
 
-    # 6. declared vs observed: comparison only, nothing is overridden
-    M["declared_vs_observed"] = declared_vs_observed(f, unit, ctx, params, n_tied / n_feat)
+    # 6. declared vs observed: comparison only, nothing is overridden. The declaration describes the
+    #    Step 0 output, so it is compared at S0 only (after PRISM's own ops it would compare the wrong thing).
+    if (getattr(ctx, "state", None) or {}).get("parent"):
+        M["declared_vs_observed"] = {"status": "not_applicable", "rows": [],
+                                     "reason": "the declaration describes the Step 0 output (S0); this state has PRISM ops"}
+    else:
+        M["declared_vs_observed"] = declared_vs_observed(f, unit, ctx, params, n_tied / n_feat)
 
     f.plot.update(feature_missing_rate=stats.histogram(feat_rate, 20), feature_floor_rate=stats.histogram(floor_rate, 20),
                   sample_rates=[{"sample": s, "missing": float(samp_rate[j]), "floor": float(S[:, j].mean())}

@@ -153,6 +153,19 @@ def unit_facts(st, did, assay, F, P, intake, state_meta, items):
                                            if v is False)
     f["a8.nested"] = M("A8").get("nested") or []
     f["a5.smallest_cell"] = a5.get("smallest_cell")
+    # questions the user can answer (stored as overrides)
+    qs = []
+    for q in a13.get("questions", []):
+        qs.append(dict(q, override={"kind": "processing_state", "item": q["item"], "dataset": did}))
+    for q in a12.get("questions", []):
+        qs.append(dict(q, override={"kind": "zeros_are_missing", "dataset": did, "assay": assay}))
+    if f["floor.present"] and f["floor.answer"] is None:
+        qs.append({"kind": "floor_censored", "question_id": f"floor:{did}", "dataset": did, "assay": assay,
+                   "text": "Should floor-tied values be treated as censored (below a detection limit) in diagnostics?",
+                   "options": ["yes", "no"], "reason": f"{ft.get('n_features')} of {ft.get('of')} features have floor ties",
+                   "consequence": "changes the diagnostic policy only; the data are never changed",
+                   "override": {"kind": "floor_censored", "dataset": did}})
+    f["questions"] = qs
     # intake
     for k in ("contrast_variable", "protected_variables", "nuisance_variables", "question_type", "downstream_family"):
         f[f"intake.{k}"] = intake.get(k)
@@ -174,6 +187,9 @@ def collect(st, run_audit=True, who="plan"):
         if rid is None:
             continue
         man, by_unit = findings_of(st, rid, did)
+        for F in by_unit.values():      # A13 is read at S0 (it describes the Step 0 output)
+            if (F.get("A13") or {}).get("status") == "not_applicable" and meta.get("parent"):
+                F.pop("A13")
         # audits outside this checkpoint's battery (A1, A2, A13, ...) come from the nearest ancestor
         # state that has them (the root is audited with the full C0 battery when needed)
         chain = [head]

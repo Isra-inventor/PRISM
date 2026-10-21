@@ -31,7 +31,71 @@ def bundle(st, run_id=None):
     return {"session": {"session_id": st.sid, "name": st.data.get("name")}, "datasets": datasets,
             "manifest": man, "findings": shown["findings"], "runs": runs,
             "previous_run": runs[i - 1] if i > 0 else None,
-            "params_meta": {"defaults": params_mod.defaults(), "heuristic": list(params_mod.HEURISTIC)}}
+            "params_meta": {"defaults": params_mod.defaults(), "heuristic": list(params_mod.HEURISTIC)},
+            "v4": v4_block(st)}
+
+
+def _trim_plan(plan):
+    """The plan for the report: feature-id lists become counts (the full plan stays in plan.json)."""
+    import copy
+    p = copy.deepcopy(plan)
+    for e in p.get("entries", []):
+        for c in e.get("candidates", []):
+            prm = c.get("params") or {}
+            for k in ("ids", "batch", "run_order", "qc_samples"):
+                v = prm.get(k)
+                if isinstance(v, (list, dict)) and len(v) > 12:
+                    prm[k] = f"<{len(v)} values>"
+        f = e.get("filtering")
+        if f:
+            for r in f.get("rows", []):
+                r["n_removed"] = len(r.pop("remove_ids", []))
+    for h in p.get("hand_off", []):
+        ic = h.get("imputation_candidates") or {}
+        ic.pop("profile", None)
+    return p
+
+
+def v4_block(st):
+    """Registry grid, plan, decisions, states and checkpoint comparisons for the v4 report sections."""
+    from .. import registry
+    from ..executor import state as state_mod
+    out = {"grid": registry.grid(), "steps": [{k: s[k] for k in ("id", "name", "kind", "scope", "needs",
+                                                                  "evidence_level", "implemented")}
+                                               for s in registry.steps()]}
+    p = st.dir / "plan" / "plan.json"
+    if p.exists():
+        out["plan"] = _trim_plan(read_json(p))
+    try:
+        from ..plan import engine as pe
+        out["decisions"] = pe.decisions(st)
+    except Exception:
+        out["decisions"] = []
+    try:
+        states = state_mod.list_states(st)
+    except Exception:
+        states = []
+    out["states"] = states
+    comps = []
+    for d in st.confirmed():
+        did = d["dataset_id"]
+        mine = [s for s in states if s["dataset"] == did]
+        best = {}
+        for s in mine:               # the latest state reached at each checkpoint
+            best[s["checkpoint"]] = s
+        root = state_mod.root_id(st, did)
+        for cp in ("C1", "C2"):
+            if cp in best:
+                try:
+                    c = engine.compare_states(st, root, best[cp]["state_id"])
+                    comps.append({"dataset": did, "from": "C0", "to": cp, "state_from": root,
+                                  "state_to": best[cp]["state_id"], "counts": c["state_diff"]["counts"],
+                                  "blocks": c["state_diff"]["blocks"], "table": c.get("table"),
+                                  "missing_runs": c.get("missing_runs")})
+                except Exception as e:
+                    comps.append({"dataset": did, "from": "C0", "to": cp, "error": str(e)[:200]})
+    out["checkpoints"] = comps
+    return out
 
 
 def _script_json(obj):
@@ -136,7 +200,7 @@ def final_bundle(st, run_id=None):
     audit = bundle(st, run_id) if engine.list_runs(st) else None
     return {"session": {"session_id": st.sid, "name": st.data.get("name")}, "generated_at": now_iso(),
             "prism_version": __version__, "datasets": [dataset_summary(st, d) for d in st.datasets],
-            "merge": merged, "audit": audit}
+            "merge": merged, "audit": audit, "v4": audit["v4"] if audit else v4_block(st)}
 
 
 def final_html(st, run_id=None):
