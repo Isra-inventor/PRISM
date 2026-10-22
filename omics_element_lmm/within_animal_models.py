@@ -127,8 +127,10 @@ def run(D, ann, el, B=200):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(); ap.add_argument("--data-dir"); ap.add_argument("--out-dir", default="results_v2"); ap.add_argument("--elements", nargs="*", default=fa.ELS)
-    ap.add_argument("--calibrate", action="store_true"); ap.add_argument("--B", type=int, default=200); a = ap.parse_args()
-    d, Y, ann, xl, meta = fa.load(a.data_dir); D = Data(d, Y); out = Path(a.out_dir) / "within"; out.mkdir(parents=True, exist_ok=True)
+    ap.add_argument("--calibrate", action="store_true"); ap.add_argument("--by-slide", action="store_true", help="separate baseline per animal x microarray slide (batch-adjusted)"); ap.add_argument("--B", type=int, default=200); a = ap.parse_args()
+    d, Y, ann, xl, meta = fa.load(a.data_dir)
+    if a.by_slide: d = d.assign(nhp_id=d.nhp_id + "|" + meta.loc[d.index, "SlideId"].astype(str).values)
+    D = Data(d, Y); out = Path(a.out_dir) / ("within_slide_adjusted" if a.by_slide else "within"); out.mkdir(parents=True, exist_ok=True)
     print(f"within-animal analysis: {D.k} animals {dict(pd.Series(D.g).value_counts())}, N={D.N}, proteins={Y.shape[1]}")
     if a.calibrate:
         cal = pd.concat([calibrate(D, el, a.B) for el in a.elements]); cal.to_csv(out / "calibration_permutation.csv", index=False, float_format="%.4f"); print(cal.round(4).to_string(index=False)); raise SystemExit
