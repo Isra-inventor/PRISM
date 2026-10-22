@@ -34,3 +34,12 @@ Per animal (>=4 samples: DEAB, DEL5, GA43, T544, T623), each protein's within-an
 (random-effects meta-analysis, exact within-animal permutation test of the mean rho, leave-one-animal-out replication, animal-vs-animal profile similarity).
 Result: 1 protein at FDR<0.05 (FAM170B, same sign in all 5 animals), GSN q=0.08; spread of mean rho = chance (ratio 1.03); top-100 proteins chosen on 4 animals do not replicate in the 5th (p 0.14-1.0);
 animal profiles uncorrelated (mean off-diagonal 0.007). The pooled-model Cu signal (25 proteins) is therefore not supported as a consistent per-animal pattern.
+
+## Addendum 2 - best-practice within-animal re-analysis for every element (`within_animal_models.py`, `predict_loao.py`, `adjust_cellular.py`, `time_spec_check.py`; results_v2/within)
+* Common-slope within-animal model (animal fixed intercepts, shared quadratic time trend; = repeated-measures correlation) + slope-heterogeneity F test; p-values from 1000 within-animal permutations of the element (the parametric heterogeneity F test was too liberal, 11-12% FPR at 0.05).
+  Variance shrinkage across proteins (limma-style) changed nothing (d0~2.3).
+* Held-out-animal prediction (ridge on proteome, element shuffled within animals as null).
+* Results: no protein FDR<0.05 for any element. Excess of small p (p<0.001; chance = 11): Mg 166, P 162, Cu 37; Fe, Na, K, Ca, Zn and both Ni controls at chance.
+  Held-out prediction: Mg rho=0.56 (p=0.023), Cu 0.49 (p=0.033), P 0.31 (p=0.13); others and Ni controls none.
+* Mg and P within-animal slopes correlate r=0.97 across proteins; ~90% positive; mostly intracellular/blood-cell proteins (MYL9, MYL12A, PTK2B, PRKCB, G6PD, S100A9, STAT1/3). Partly explained by global protein level (Mg p<0.001: 166 -> 55) and by red-cell/platelet scores (P q<0.10: 304 -> 0).
+* Min detectable within-animal slope (80% power, p=1e-4): 0.33-0.51 log2 per SD of element.

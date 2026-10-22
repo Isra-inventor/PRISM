@@ -1,0 +1,37 @@
+element,time_model,p_lt_0_001,q_lt_0_05_parametric,expected_p_lt_0_001_by_chance
+Mg,no time term,71,11,11.0
+Mg,linear log-time,132,0,11.0
+Mg,quadratic log-time (default),204,180,11.0
+Mg,cubic log-time,195,150,11.0
+Mg,ART stage (3 dummies),43,0,11.0
+Mg,stage + quadratic,121,0,11.0
+P,no time term,80,4,11.0
+P,linear log-time,94,0,11.0
+P,quadratic log-time (default),134,0,11.0
+P,cubic log-time,96,0,11.0
+P,ART stage (3 dummies),18,0,11.0
+P,stage + quadratic,91,0,11.0
+Cu,no time term,115,78,11.0
+Cu,linear log-time,106,49,11.0
+Cu,quadratic log-time (default),116,61,11.0
+Cu,cubic log-time,109,49,11.0
+Cu,ART stage (3 dummies),96,26,11.0
+Cu,stage + quadratic,79,24,11.0
+Na,no time term,12,0,11.0
+Na,linear log-time,9,0,11.0
+Na,quadratic log-time (default),1,0,11.0
+Na,cubic log-time,1,0,11.0
+Na,ART stage (3 dummies),0,0,11.0
+Na,stage + quadratic,1,0,11.0
+Fe,no time term,6,0,11.0
+Fe,linear log-time,5,0,11.0
+Fe,quadratic log-time (default),4,0,11.0
+Fe,cubic log-time,4,0,11.0
+Fe,ART stage (3 dummies),1,0,11.0
+Fe,stage + quadratic,1,0,11.0
+Ni,no time term,29,0,11.0
+Ni,linear log-time,6,0,11.0
+Ni,quadratic log-time (default),4,0,11.0
+Ni,cubic log-time,6,0,11.0
+Ni,ART stage (3 dummies),3,0,11.0
+Ni,stage + quadratic,3,0,11.0
