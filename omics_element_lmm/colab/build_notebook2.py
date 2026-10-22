@@ -115,13 +115,13 @@ def run(name):
 
 code('''
 def volcano(ax, r, tag, title):
-    x, y = r[f"slope_{tag}"], -np.log10(r[f"p_{tag}"]); q = r[f"q_{tag}"] < .10; n = r[f"p_{tag}"] < .001
+    x, y = r[f"slope_{tag}"], -np.log10(r[f"p_{tag}"]); q = r[f"q_{tag}"] < .05; n = r[f"p_{tag}"] < .001
     ax.scatter(x[~n], y[~n], s=4, c=GREY); ax.scatter(x[n & ~q], y[n & ~q], s=9, c=BLUE); ax.scatter(x[q], y[q], s=14, c=ORANGE)
     for i in r[f"p_{tag}"].nsmallest(5).index: ax.annotate(r.label[i][:10], (x[i], y[i]), fontsize=7, xytext=(2, 2), textcoords="offset points")
-    ax.set_title(f"{title}\\nFDR<0.10: {int(q.sum())} | p<0.001: {int(n.sum())}", fontsize=9); ax.set_xlabel("slope (log2 protein / SD)"); ax.set_ylabel("-log10 p")
+    ax.set_title(f"{title}\\nFDR<0.05: {int(q.sum())} | p<0.001: {int(n.sum())}", fontsize=9); ax.set_xlabel("slope (log2 protein / SD)"); ax.set_ylabel("-log10 p")
 def counts(r):
     rows = []
-    for nm, fe, fv in [("FDR<0.10", r.q_E < .10, r.q_VL < .10), ("p<0.001", r.p_E < .001, r.p_VL < .001), ("p<0.01", r.p_E < .01, r.p_VL < .01)]:
+    for nm, fe, fv in [("FDR<0.05", r.q_E < .05, r.q_VL < .05), ("p<0.001", r.p_E < .001, r.p_VL < .001), ("p<0.01", r.p_E < .01, r.p_VL < .01)]:
         rows.append({"threshold": nm, "element only": int((fe & ~fv).sum()), "VL only": int((~fe & fv).sum()), "both": int((fe & fv).sum()), "both expected if independent": round(fe.sum() * fv.sum() / len(r), 1)})
     return pd.DataFrame(rows)
 def three_panel(name):
@@ -139,7 +139,7 @@ for el in ELEMENTS: three_panel(el)
 code('''
 rows = []
 for el in ELEMENTS:
-    r = CACHE[el][0]; rows.append({"element": el, "FDR<0.10 element": int((r.q_E < .1).sum()), "FDR<0.10 VL": int((r.q_VL < .1).sum()), "FDR<0.10 both": int(((r.q_E < .1) & (r.q_VL < .1)).sum()),
+    r = CACHE[el][0]; rows.append({"element": el, "FDR<0.05 element": int((r.q_E < .05).sum()), "FDR<0.05 VL": int((r.q_VL < .05).sum()), "FDR<0.05 both": int(((r.q_E < .05) & (r.q_VL < .05)).sum()),
                                    "p<0.001 element": int((r.p_E < .001).sum()), "p<0.001 VL": int((r.p_VL < .001).sum()), "p<0.01 both": int(((r.p_E < .01) & (r.p_VL < .01)).sum()), "p<0.01 both (expected if independent)": round((r.p_E < .01).sum() * (r.p_VL < .01).sum() / len(r), 1)})
 T1 = pd.DataFrame(rows).set_index("element"); display(T1); T1.to_csv(f"{OUT}/1_element_vs_VL_counts.csv")
 ''')
@@ -196,7 +196,7 @@ for rt in RATIOS: three_panel(rt)
 code('''
 rows = []
 for rt in RATIOS:
-    r = CACHE[rt][0]; rows.append({"ratio": rt, "FDR<0.10 ratio": int((r.q_E < .1).sum()), "FDR<0.10 VL": int((r.q_VL < .1).sum()), "FDR<0.10 both": int(((r.q_E < .1) & (r.q_VL < .1)).sum()), "p<0.001 ratio": int((r.p_E < .001).sum()), "p<0.01 both": int(((r.p_E < .01) & (r.p_VL < .01)).sum()), "p<0.01 both (expected if independent)": round((r.p_E < .01).sum() * (r.p_VL < .01).sum() / len(r), 1)})
+    r = CACHE[rt][0]; rows.append({"ratio": rt, "FDR<0.05 ratio": int((r.q_E < .05).sum()), "FDR<0.05 VL": int((r.q_VL < .05).sum()), "FDR<0.05 both": int(((r.q_E < .05) & (r.q_VL < .05)).sum()), "p<0.001 ratio": int((r.p_E < .001).sum()), "p<0.01 both": int(((r.p_E < .01) & (r.p_VL < .01)).sum()), "p<0.01 both (expected if independent)": round((r.p_E < .01).sum() * (r.p_VL < .01).sum() / len(r), 1)})
 T3 = pd.DataFrame(rows).set_index("ratio"); display(T3); T3.to_csv(f"{OUT}/3_ratio_vs_VL_counts.csv")
 T3b = loao_grid(list(RATIOS), lambda n: d[n].values, ncol=3); T3b.to_csv(f"{OUT}/3_leave_one_animal_out_ratios.csv")
 ''')
@@ -243,7 +243,7 @@ code('''
 rows = []
 for v in ELEMENTS + list(RATIOS):
     r = CACHE[v][0]; l = LOAO[v][True]
-    rows.append({"variable": v, "proteins FDR<0.10": int((r.q_E < .1).sum()), "p<0.001 (chance 11)": int((r.p_E < .001).sum()), "VL FDR<0.10 (same model)": int((r.q_VL < .1).sum()),
+    rows.append({"variable": v, "proteins FDR<0.05": int((r.q_E < .05).sum()), "p<0.001 (chance 11)": int((r.p_E < .001).sum()), "VL FDR<0.05 (same model)": int((r.q_VL < .05).sum()),
                  "both p<0.01": int(((r.p_E < .01) & (r.p_VL < .01)).sum()), "both expected": round((r.p_E < .01).sum() * (r.p_VL < .01).sum() / len(r), 1), "unseen-animal Spearman": round(l["r"], 2), "p": round(l["p"], 3)})
 SUMM = pd.DataFrame(rows).set_index("variable"); display(SUMM); SUMM.to_csv(f"{OUT}/SUMMARY.csv")
 shutil.make_archive("results_elements_proteome", "zip", OUT)
