@@ -43,3 +43,7 @@ animal profiles uncorrelated (mean off-diagonal 0.007). The pooled-model Cu sign
   Held-out prediction: Mg rho=0.56 (p=0.023), Cu 0.49 (p=0.033), P 0.31 (p=0.13); others and Ni controls none.
 * Mg and P within-animal slopes correlate r=0.97 across proteins; ~90% positive; mostly intracellular/blood-cell proteins (MYL9, MYL12A, PTK2B, PRKCB, G6PD, S100A9, STAT1/3). Partly explained by global protein level (Mg p<0.001: 166 -> 55) and by red-cell/platelet scores (P q<0.10: 304 -> 0).
 * Min detectable within-animal slope (80% power, p=1e-4): 0.33-0.51 log2 per SD of element.
+
+## Addendum 3 - batch structure (`slide_adjusted.py`)
+One plate / run date / scanner, but 8 microarray slides that are almost nested in animal (5 animals on one slide, DEL5, T544, T623 on two). Slide cannot be separated from animal, so ComBat-style correction is not applicable.
+Within-animal model with a baseline per animal x slide (N=23, 7 groups): p<0.001 counts (chance 11): Mg 166 -> 48, P 162 -> 8, Cu 37 -> 17; slopes remain correlated 0.81-0.99 with the unadjusted ones (lower power, same direction).

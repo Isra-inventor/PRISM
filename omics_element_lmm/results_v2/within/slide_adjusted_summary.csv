@@ -1,0 +1,11 @@
+element,p_lt_0_001_slide_adjusted,q_lt_0_10_slide_adjusted,expected_by_chance,slope_correlation_with_unadjusted
+Na,1,0,11.0,0.9
+Mg,48,0,11.0,0.94
+P,8,0,11.0,0.9
+K,0,0,11.0,0.92
+Ca,1,0,11.0,0.99
+Fe,2,0,11.0,0.84
+Cu,17,0,11.0,0.81
+Zn,0,0,11.0,0.97
+Ni,3,0,11.0,0.81
+Ni_resFe,0,0,11.0,0.68
