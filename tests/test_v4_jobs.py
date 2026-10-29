@@ -5,6 +5,9 @@ import time
 from test_v4_plan import batch_session
 
 
+SLOW = {"params": {"permutations": 99999, "exhaustive_max": 0}}      # a job that runs for a few seconds
+
+
 def wait(client, v, limit=120):
     t = time.time()
     while v["status"] == "running" and time.time() - t < limit:
@@ -51,7 +54,7 @@ def test_server_answers_while_a_job_runs_and_a_killed_job_is_reported(client, is
     import signal
     from backend import jobs
     st = batch_session(tmp_path, "kill")
-    v = client.post(f"/api/sessions/{st.sid}/audit/start", json={}).json()
+    v = client.post(f"/api/sessions/{st.sid}/audit/start", json=SLOW).json()
     j = jobs.get(v["job_id"])
     assert client.get("/api/health").json()["status"] == "ok"
     t = time.time()
@@ -61,3 +64,24 @@ def test_server_answers_while_a_job_runs_and_a_killed_job_is_reported(client, is
     os.kill(j.pid, signal.SIGKILL)                       # what an out-of-memory kill looks like
     v = wait(client, v)
     assert v["status"] == "error" and "signal 9" in v["error"] and "memory" in v["error"]
+
+
+def test_sigterm_is_recorded_and_survived_and_jobs_outlive_the_server(client, isolated, tmp_path):
+    """One SIGTERM is recorded with its sender and the job finishes; a job is still readable from
+    disk after the server forgot it (a restart)."""
+    import os
+    import signal
+    from backend import jobs
+    st = batch_session(tmp_path, "term")
+    v = client.post(f"/api/sessions/{st.sid}/audit/start", json=SLOW).json()
+    j = jobs.get(v["job_id"])
+    t = time.time()
+    import re
+    while not re.match(r"A\d+ ", str(j.progress)) and time.time() - t < 60:
+        time.sleep(0.02)                                 # a check is running: the job is mid-way
+    assert j.status == "running"
+    os.kill(j.pid, signal.SIGTERM)
+    jobs._JOBS.pop(v["job_id"])                         # as if the server had restarted
+    v = wait(client, v)
+    assert v["status"] == "done" and v["result"]["run_id"]
+    assert v["signals"][0]["from_pid"] == os.getpid() and "python" in v["signals"][0]["from_command"]

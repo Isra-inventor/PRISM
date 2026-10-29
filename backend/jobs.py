@@ -66,77 +66,140 @@ def start(kind, fn, user_errors=()):
     return job
 
 
+def _jobs_dir():
+    from pathlib import Path
+    from prism import store
+    d = Path(store.root()) / "_jobs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _alive(pid):
+    import os
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, TypeError, ValueError):
+        return False
+    try:                                  # a zombie (finished, not yet reaped) is not alive
+        with open(f"/proc/{int(pid)}/stat") as f:
+            return f.read().split(")")[-1].split()[0] != "Z"
+    except OSError:
+        return True
+
+
+def _read_file(job_id):
+    import json
+    p = _jobs_dir() / f"{job_id}.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except ValueError:
+        return None
+
+
+def _file_view(d):
+    import time as _t
+    end = d.get("finished") or _t.time()
+    v = {"job_id": d["job_id"], "kind": d.get("kind"), "status": d.get("status"), "progress": d.get("progress"),
+         "elapsed_s": round(end - (d.get("started") or end), 1), "result": d.get("result"), "error": d.get("error")}
+    sig = d.get("signals") or []
+    if sig:
+        v["signals"] = sig
+        if v["status"] == "running":
+            v["progress"] = f"{v['progress']} (ignored a stop request from: {sig[-1]['from_command'][:80]})"
+    return v
+
+
+class ProcJob:
+    """A job run by prism.jobrun in its own process; its truth is the status file on disk."""
+
+    def __init__(self, job_id, kind, proc):
+        self.id, self.kind, self.proc, self.pid = job_id, kind, proc, proc.pid
+        self.exit_note = None
+
+    @property
+    def status(self):
+        return self.view()["status"]
+
+    @property
+    def progress(self):
+        return self.view()["progress"]
+
+    def view(self):
+        d = _read_file(self.id) or {"job_id": self.id, "kind": self.kind, "status": "running", "progress": "starting"}
+        if d.get("status") == "running" and self.exit_note:
+            d = dict(d, status="error", error=self.exit_note, progress="finished")
+        return _file_view(d)
+
+
 def start_process(kind, session_id, args=None):
-    """Run prism.jobrun in a child process; a thread follows its progress and collects the result."""
+    """Run prism.jobrun in its own process and session. Its status file survives a server restart."""
     import json
     import os
     import subprocess
     import sys
-    import tempfile
     from pathlib import Path
     from prism import store
-    job = Job(kind)
+    job_id = "j" + uuid.uuid4().hex[:12]
+    d = _jobs_dir()
     project = Path(__file__).resolve().parent.parent
-    fd, out = tempfile.mkstemp(prefix=f"prism-{kind}-", suffix=".json")
-    os.close(fd)
-    cmd = [sys.executable, "-m", "prism.jobrun", "--root", str(store.root()), "--out", out, kind, session_id,
-           json.dumps(args or {})]
+    cmd = [sys.executable, "-m", "prism.jobrun", "--root", str(store.root()), "--job-file", str(d / f"{job_id}.json"),
+           "--job-id", job_id, kind, session_id, json.dumps(args or {})]
     env = dict(os.environ, PYTHONUNBUFFERED="1")
     env["PYTHONPATH"] = str(project) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
-    proc = subprocess.Popen(cmd, cwd=str(project), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace")
-    job.pid = proc.pid
-    err_tail = []
-
-    def read_err():
-        for line in proc.stderr:
-            err_tail.append(line.rstrip())
-            del err_tail[:-40]
-            print(f"[PRISM job {job.id}] {line.rstrip()}", flush=True)
+    log = open(d / f"{job_id}.log", "w", encoding="utf-8")
+    proc = subprocess.Popen(cmd, cwd=str(project), env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                            start_new_session=True)
+    log.close()
+    job = ProcJob(job_id, kind, proc)
+    print(f"[PRISM] {kind} job {job_id} started (pid {proc.pid}); log: {d / (job_id + '.log')}", flush=True)
 
     def follow():
-        refused = None
-        try:
-            for line in proc.stdout:
-                if line.startswith("\x1ePRISM-JOB progress "):
-                    job.progress = line[len("\x1ePRISM-JOB progress "):].strip()
-                elif line.startswith("\x1ePRISM-JOB refused "):
-                    refused = line[len("\x1ePRISM-JOB refused "):].strip()
-                else:
-                    print(line.rstrip(), flush=True)
-            code = proc.wait()
-            te.join(timeout=5)
-            if code == 0:
-                with open(out, encoding="utf-8") as f:
-                    job.result = json.load(f)
-                job.status = "done"
-            elif code == 3:
-                job.error, job.status = refused or f"{kind} was refused.", "error"
+        code = proc.wait()
+        st_ = _read_file(job_id) or {}
+        if st_.get("status") == "running":            # ended without writing its outcome
+            if code < 0:
+                job.exit_note = (f"The {kind} process was stopped by signal {-code}"
+                                 + (" (most likely the machine ran out of memory)" if code == -9 else "")
+                                 + f". See {d / (job_id + '.log')}.")
             else:
-                last = next((l for l in reversed(err_tail) if l.strip()), "")
-                if code < 0 or code in (137, -9):
-                    why = (f"the {kind} process was stopped by signal {-code if code < 0 else 9}"
-                           + (" - most likely the machine ran out of memory" if code in (-9, 137) else ""))
-                else:
-                    why = f"the {kind} process failed (exit code {code})"
-                job.error, job.status = f"{why}. {last}".strip(), "error"
-        except Exception as e:
-            job.error, job.status = f"Internal error while following the {kind} job: {e}", "error"
-        finally:
-            job.finished = time.time()
-            job.progress = "finished"
-            try:
-                os.unlink(out)
-            except OSError:
-                pass
+                job.exit_note = f"The {kind} process ended with exit code {code}. See {d / (job_id + '.log')}."
+        tail = ""
+        try:
+            tail = (d / f"{job_id}.log").read_text(encoding="utf-8", errors="replace").strip()[-2000:]
+        except OSError:
+            pass
+        print(f"[PRISM] {kind} job {job_id} finished (exit {code}){chr(10) + tail if tail and code else ''}",
+              flush=True)
 
-    te = threading.Thread(target=read_err, daemon=True)
-    te.start()
-    threading.Thread(target=follow, name=f"prism-{kind}-{job.id}", daemon=True).start()
+    threading.Thread(target=follow, name=f"prism-{kind}-{job_id}", daemon=True).start()
     with _LOCK:
-        _JOBS[job.id] = job
+        _JOBS[job_id] = job
     return job
 
 
 def get(job_id):
-    return _JOBS.get(job_id)
+    """A job of this server, or one started before a restart (read from its status file)."""
+    j = _JOBS.get(job_id)
+    if j is not None:
+        return j
+    if not job_id or not all(c.isalnum() for c in job_id):
+        return None
+    d = _read_file(job_id)
+    if d is None:
+        return None
+    if d.get("status") == "running" and not _alive(d.get("pid")):
+        d = dict(d, status="error", progress="finished",
+                 error="The job process is no longer running and did not record an outcome "
+                       f"(see {_jobs_dir() / (job_id + '.log')}).")
+    return _Snapshot(d)
+
+
+class _Snapshot:
+    def __init__(self, d):
+        self.d = d
+        self.status = d.get("status")
+
+    def view(self):
+        return _file_view(self.d)
