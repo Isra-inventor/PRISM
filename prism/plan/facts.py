@@ -22,11 +22,11 @@ def latest_run(st, did, state_id):
     return rid
 
 
-def ensure_run(st, did, state_id, who="plan", progress=None):
+def ensure_run(st, did, state_id, who="plan"):
     rid = latest_run(st, did, state_id)
     if rid is None:
-        man = engine.run(st, datasets=[did], state=state_id, who=who, progress=progress) \
-            if state_id != state_mod.root_id(st, did) else engine.run(st, datasets=[did], who=who, progress=progress)
+        man = engine.run(st, datasets=[did], state=state_id, who=who) if state_id != state_mod.root_id(st, did) \
+            else engine.run(st, datasets=[did], who=who)
         rid = man["run_id"]
     return rid
 
@@ -172,7 +172,7 @@ def unit_facts(st, did, assay, F, P, intake, state_meta, items):
     return f
 
 
-def collect(st, run_audit=True, who="plan", progress=None):
+def collect(st, run_audit=True, who="plan"):
     """-> {"units": [facts...], "runs": {did: run_id}, "intake": {...}}."""
     items = ov.load(st)
     from ..audit import params as params_mod
@@ -182,7 +182,7 @@ def collect(st, run_audit=True, who="plan", progress=None):
         did = d["dataset_id"]
         head = state_mod.head(st, did)
         meta = state_mod.meta(st, did, head)
-        rid = ensure_run(st, did, head, who, progress) if run_audit else latest_run(st, did, head)
+        rid = ensure_run(st, did, head, who) if run_audit else latest_run(st, did, head)
         out["runs"][did], out["states"][did] = rid, head
         if rid is None:
             continue
@@ -201,7 +201,7 @@ def collect(st, run_audit=True, who="plan", progress=None):
         for sid in chain[1:]:
             r_ = latest_run(st, did, sid)
             if r_ is None and sid == chain[-1] and run_audit:
-                r_ = ensure_run(st, did, sid, who, progress)
+                r_ = ensure_run(st, did, sid, who)
             if r_ is None:
                 continue
             _, older = findings_of(st, r_, did)

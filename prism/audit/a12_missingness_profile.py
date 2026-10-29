@@ -157,23 +157,8 @@ def nan_batch_tests(R, var, subj, params, key):
     perm = stats.Permuter(codes, sub, params["a12_feature_permutations"], 0, params["seed"], key)
     P = perm.matrix()
     ge = np.zeros(len(obs))
-    # all permutations at once, in chunks: (features x n) @ (n x chunk*k) one-hot
-    m_tot_t = Rt.sum(1, keepdims=True)
-    tol = 1e-12 * np.maximum(1.0, np.abs(obs))
-    chunk = max(1, int(4e6 // max(1, Rt.shape[0] * k)))
-    for c0 in range(0, len(P), chunk):
-        Pc = P[c0:c0 + chunk]
-        pc = len(Pc)
-        OH = np.zeros((n, pc * k))
-        OH[np.repeat(np.arange(n)[None, :], pc, 0).ravel(), (np.arange(pc)[:, None] * k + Pc).ravel()] = 1
-        nl = OH.sum(0)                                        # level sizes per permutation (constant)
-        mm = Rt @ OH                                          # features x (pc * k)
-        E = m_tot_t * nl[None, :] / n
-        E2 = (n - m_tot_t) * nl[None, :] / n
-        with np.errstate(divide="ignore", invalid="ignore"):
-            terms = (mm - E) ** 2 * (1 / np.where(E > 0, E, np.nan) + 1 / np.where(E2 > 0, E2, np.nan))
-        stat = np.nansum(terms.reshape(Rt.shape[0], pc, k), axis=2)
-        ge += (stat >= (obs - tol)[:, None]).sum(1)
+    for row in P:
+        ge += chi2(row) >= obs - 1e-12 * np.maximum(1.0, np.abs(obs))
     pv = (1 + ge) / (1 + len(P))
     qv = stats.bh(pv)
     q = np.array([x if x is not None else np.nan for x in qv], float)

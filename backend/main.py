@@ -44,42 +44,6 @@ FRONTEND_DIR = PROJECT_DIR / "frontend"
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s - %(message)s")
 app = FastAPI(title="PRISM Step 0 - Schema recognition")
 
-
-from starlette.exceptions import HTTPException as _StarletteHTTPException  # noqa: E402
-
-
-@app.exception_handler(_StarletteHTTPException)
-async def _http_error(request, exc):
-    """FastAPI answers a request whose body it could not read with 'There was an error parsing the
-    body' and hides why. Say why (the cause it chains), and log it."""
-    from fastapi.responses import JSONResponse
-    detail = exc.detail
-    cause = exc.__cause__ or exc.__context__
-    if exc.status_code == 400 and detail == "There was an error parsing the body" and cause is not None:
-        name = type(cause).__name__
-        if name == "ClientDisconnect":
-            why = ("the upload was cut off before it reached the server (the connection dropped, or a proxy or "
-                   "port forwarder in between stopped it). Try again; for large files run the server on the same "
-                   "machine as the browser.")
-        elif "MultiPart" in name or "multipart" in str(cause).lower():
-            why = f"the uploaded form was incomplete or malformed ({name}: {cause})"
-        elif isinstance(cause, OSError):
-            why = f"the server could not store the upload in its temporary folder ({name}: {cause})"
-        else:
-            why = f"{name}: {cause}"
-        detail = f"The server could not read the upload: {why}"
-        print(f"[PRISM] {request.method} {request.url.path}: {detail}", flush=True)
-    return JSONResponse(status_code=exc.status_code, content={"detail": detail}, headers=getattr(exc, "headers", None))
-
-
-@app.exception_handler(Exception)
-async def _unexpected(request, exc):
-    """A bug must still answer in JSON, so the page can show what failed (not '{}')."""
-    import traceback
-    from fastapi.responses import JSONResponse
-    print(f"[PRISM] {request.method} {request.url.path} failed:\n{traceback.format_exc()}", flush=True)
-    return JSONResponse(status_code=500, content={"detail": f"Internal error: {type(exc).__name__}: {exc}"})
-
 _ok, _why = llm.available()
 if _ok:
     llm.say(f"AI provider: {llm.provider_name()}; models tried in order: {', '.join(llm.model_list())}")

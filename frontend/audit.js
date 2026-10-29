@@ -25,50 +25,10 @@
   async function api(path, body, method) {
     const opts = { method: method || (body === undefined ? "GET" : "POST"), headers: {} };
     if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
-    let r;
-    try { r = await fetch(path, opts); } catch (e) { throw new Error(`Could not reach the server (${e.message}). Is it still running?`); }
-    const text = await r.text();
-    let j = null;
-    try { j = text ? JSON.parse(text) : {}; } catch (_) { j = null; }
-    if (!r.ok) {
-      if (j && typeof j.detail === "string") throw new Error(j.detail);
-      if (j && j.detail) throw new Error(JSON.stringify(j.detail));
-      throw new Error(`The server answered HTTP ${r.status}${text ? `: ${text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300)}` : ""}` +
-        (r.status === 502 || r.status === 504 ? " (a proxy timeout: the job may still be running)" : ""));
-    }
-    if (j === null) throw new Error(`The server answered with something that is not JSON: ${text.slice(0, 200)}`);
+    const r = await fetch(path, opts);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail || j));
     return j;
-  }
-  // a long job: start it, then poll; onProgress(text, seconds) shows what is running. Poll errors
-  // from a proxy (502/503/504) or a dropped connection are retried for a while: the job runs in
-  // its own process on the server and keeps going.
-  const transient = (e) => /HTTP 50[234]|Could not reach the server/.test(e.message);
-  async function serverAlive() {
-    try { const r = await fetch("/api/health", { cache: "no-store" }); return r.ok; } catch (_) { return false; }
-  }
-  async function job(path, body, onProgress) {
-    let v;
-    try { v = await api(path, body); }
-    catch (e) {
-      if (!transient(e)) throw e;
-      throw new Error((await serverAlive())
-        ? "The proxy in front of the server timed out on the request that starts the job. Reload the page and try again."
-        : "The PRISM server is not answering. Look at the terminal where uvicorn runs (did it stop?), restart it, and reload the page.");
-    }
-    let fails = 0;
-    while (v.status === "running") {
-      if (onProgress) onProgress(v.progress, v.elapsed_s);
-      await new Promise((res) => setTimeout(res, 1000));
-      try { v = await api(`/api/jobs/${v.job_id}`); fails = 0; }
-      catch (e) {
-        if (!transient(e) || ++fails > 90) {
-          throw new Error(fails > 90 ? "The PRISM server has not answered for 90 seconds. Look at the terminal where uvicorn runs." : e.message);
-        }
-        if (onProgress) onProgress(`${v.progress} (waiting for the server…)`, v.elapsed_s + fails);
-      }
-    }
-    if (v.status === "error") throw new Error(v.error || "The job failed.");
-    return v.result;
   }
   const box = () => $("panel-audit");
   function hideOthers() {
@@ -194,8 +154,7 @@
     if (btn) { btn.disabled = true; btn.textContent = "Running…"; }
     const prev = CUR ? CUR.manifest.run_id : null;
     try {
-      const man = await job(`/api/sessions/${SID}/audit/start`, { params }, (what, sec) => {
-        const b = $("audit-run"); if (b) b.textContent = `Running · ${what} · ${Math.round(sec)} s`; });
+      const man = await api(`/api/sessions/${SID}/audit/run`, { params });
       let diff = null;
       if (prev) {
         const cmp = await api(`/api/sessions/${SID}/audit/${man.run_id}/compare/${prev}`).catch(() => null);
@@ -303,10 +262,7 @@
   async function loadPlan() {
     const body = $("audit-plan-body");
     if (!body) return;
-    try {
-      PLAN = await job(`/api/sessions/${SID}/plan/start`, {}, (what, sec) => body.replaceChildren(
-        el("p", { class: "item-sub", text: `Building the plan · ${what} · ${Math.round(sec)} s` })));
-    } catch (e) { body.replaceChildren(el("p", { class: "alert alert-error", text: e.message })); return; }
+    try { PLAN = await api(`/api/sessions/${SID}/plan`); } catch (e) { body.replaceChildren(el("p", { class: "item-sub", text: e.message })); return; }
     const actions = PLAN.entries.filter((e) => !e.checkpoint);
     POS = Math.min(POS, Math.max(0, actions.length - 1));
     renderPlan();
@@ -344,8 +300,7 @@
   async function approve(e, i, btn) {
     btn.disabled = true; btn.textContent = "Running…";
     try {
-      const out = await job(`/api/sessions/${SID}/plan/${encodeURIComponent(e.entry_id)}/approve/start`, { candidate: i },
-        (what, sec) => { btn.textContent = `${what} · ${Math.round(sec)} s`; });
+      const out = await api(`/api/sessions/${SID}/plan/${encodeURIComponent(e.entry_id)}/approve`, { candidate: i });
       if (out.run_id) await show(out.run_id);
       const d = $("audit-plan"); if (d) d.classList.remove("hidden");
       POS += 1;

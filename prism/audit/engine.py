@@ -45,9 +45,6 @@ BATTERY = {"C0": None,   # the full battery
            "C2": ("A3", "A4", "A6", "A7", "A8", "A12")}
 
 
-CODES = {a: c for a, c, _ in REGISTRY}
-
-
 class AuditError(Exception):
     pass
 
@@ -104,9 +101,7 @@ def _resolve_state(st, state, datasets):
     return {did: m}, datasets or [did], m["checkpoint"]
 
 
-def run(st, factors=None, datasets=None, params=None, who="user", state=None, progress=None):
-    """progress: optional callable(text), told which check is running (for the web page)."""
-    say = progress or (lambda text: None)
+def run(st, factors=None, datasets=None, params=None, who="user", state=None):
     t0 = time.time()
     states, datasets, checkpoint = _resolve_state(st, state, datasets)
     if not factors and checkpoint and BATTERY.get(checkpoint):
@@ -141,7 +136,6 @@ def run(st, factors=None, datasets=None, params=None, who="user", state=None, pr
     ledger = Ledger(rdir / "ledger.jsonl")
     timings = {}
     t = time.time()
-    say("reading the data")
     merged, ctxs = context.build(st, items, P, datasets, states)
     timings["load"] = round(time.time() - t, 3)
     index = []
@@ -150,7 +144,6 @@ def run(st, factors=None, datasets=None, params=None, who="user", state=None, pr
     for c in ctxs:
         for u in c.units:
             for aid in [a for a in audit_ids if a != "A10"]:
-                say(f"{aid} {CODES.get(aid, '')} · {c.dataset_id}/{u.unit_id}")
                 t = time.time()
                 f = mods[aid].run(u, c, P, results).to_json()
                 f["state_id"], f["checkpoint"] = c.state["state_id"], c.state.get("checkpoint", "C0")

@@ -33,17 +33,13 @@
     if (body instanceof FormData) opts.body = body;
     else if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
     const r = await fetch(path, opts);
-    const text = await r.text();
-    let j = null;
-    try { j = text ? JSON.parse(text) : {}; } catch (_) { j = null; }
+    const j = await r.json().catch(() => ({}));
     if (!r.ok) {
-      const d = j && j.detail;
-      const e = new Error(typeof d === "string" ? d : d?.message || (d ? JSON.stringify(d)
-        : `The server answered HTTP ${r.status}${text ? `: ${text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300)}` : ""}`));
+      const d = j.detail;
+      const e = new Error(typeof d === "string" ? d : d?.message || JSON.stringify(d || j));
       e.errors = d?.errors || [];
       throw e;
     }
-    if (j === null) throw new Error(`The server answered with something that is not JSON: ${text.slice(0, 200)}`);
     return j;
   }
   const store = { get: () => { try { return localStorage.getItem(KEY); } catch (_) { return null; } },
@@ -173,9 +169,8 @@
       if (rep.mode === "seeded_wizard") { show($("panel-upload"), false); await window.PRISM_APP.loadStep0(rep.step0_session_id); }
       else await showReview(rep.dataset_id);
     } catch (e) {
-      $("imp-error").replaceChildren(...[el("div", { text: e.message }),
-        e.errors?.length ? el("ul", {}, e.errors.slice(0, 20).map((x) => el("li", {}, el("code", { text: x.path }), " ", x.message))) : null]
-        .filter(Boolean));
+      $("imp-error").replaceChildren(el("div", { text: e.message }),
+        e.errors?.length ? el("ul", {}, e.errors.slice(0, 20).map((x) => el("li", {}, el("code", { text: x.path }), " ", x.message))) : null);
       show($("imp-error"));
     } finally { $("imp-go").disabled = false; }
   });
