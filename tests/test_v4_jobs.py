@@ -44,3 +44,17 @@ def test_unexpected_errors_are_json(client, isolated, tmp_path, monkeypatch):
     c = TestClient(main.app, raise_server_exceptions=False)
     r = c.get(f"/api/sessions/{st.sid}/audit")
     assert r.status_code == 500 and "synthetic failure" in r.json()["detail"]
+
+
+def test_server_answers_while_a_job_runs_and_a_killed_job_is_reported(client, isolated, tmp_path):
+    import os
+    import signal
+    from backend import jobs
+    st = batch_session(tmp_path, "kill")
+    v = client.post(f"/api/sessions/{st.sid}/audit/start", json={}).json()
+    j = jobs.get(v["job_id"])
+    assert client.get("/api/health").json()["status"] == "ok"
+    time.sleep(0.3)
+    os.kill(j.pid, signal.SIGKILL)                       # what an out-of-memory kill looks like
+    v = wait(client, v)
+    assert v["status"] == "error" and "signal 9" in v["error"] and "memory" in v["error"]

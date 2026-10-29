@@ -39,13 +39,33 @@
     if (j === null) throw new Error(`The server answered with something that is not JSON: ${text.slice(0, 200)}`);
     return j;
   }
-  // a long job: start it, then poll; onProgress(text, seconds) shows what is running
+  // a long job: start it, then poll; onProgress(text, seconds) shows what is running. Poll errors
+  // from a proxy (502/503/504) or a dropped connection are retried for a while: the job runs in
+  // its own process on the server and keeps going.
+  const transient = (e) => /HTTP 50[234]|Could not reach the server/.test(e.message);
+  async function serverAlive() {
+    try { const r = await fetch("/api/health", { cache: "no-store" }); return r.ok; } catch (_) { return false; }
+  }
   async function job(path, body, onProgress) {
-    let v = await api(path, body);
+    let v;
+    try { v = await api(path, body); }
+    catch (e) {
+      if (!transient(e)) throw e;
+      throw new Error((await serverAlive())
+        ? "The proxy in front of the server timed out on the request that starts the job. Reload the page and try again."
+        : "The PRISM server is not answering. Look at the terminal where uvicorn runs (did it stop?), restart it, and reload the page.");
+    }
+    let fails = 0;
     while (v.status === "running") {
       if (onProgress) onProgress(v.progress, v.elapsed_s);
       await new Promise((res) => setTimeout(res, 1000));
-      v = await api(`/api/jobs/${v.job_id}`);
+      try { v = await api(`/api/jobs/${v.job_id}`); fails = 0; }
+      catch (e) {
+        if (!transient(e) || ++fails > 90) {
+          throw new Error(fails > 90 ? "The PRISM server has not answered for 90 seconds. Look at the terminal where uvicorn runs." : e.message);
+        }
+        if (onProgress) onProgress(`${v.progress} (waiting for the server…)`, v.elapsed_s + fails);
+      }
     }
     if (v.status === "error") throw new Error(v.error || "The job failed.");
     return v.result;

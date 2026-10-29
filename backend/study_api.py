@@ -476,31 +476,24 @@ def _user_errors():
 def audit_start(sid: str, req: AuditRun):
     """Start an audit run in the background; poll GET /api/jobs/{job_id}."""
     from backend import jobs
-    from prism.audit import engine
-    st = _load(sid)
-    j = jobs.start("audit", lambda progress: engine.run(st, req.factors, req.datasets, req.params or {}, who="user",
-                                                       state=req.state, progress=progress), _user_errors())
-    return j.view()
+    _load(sid)
+    return jobs.start_process("audit", sid, {"factors": req.factors, "datasets": req.datasets,
+                                             "params": req.params or {}, "state": req.state}).view()
 
 
 @router.post("/api/sessions/{sid}/plan/start")
 def plan_start(sid: str):
     from backend import jobs
-    from prism.audit.report import _trim_plan
-    from prism.plan import engine as pe
-    st = _load(sid)
-    j = jobs.start("plan", lambda progress: _trim_plan(pe.build(st, progress=progress)), _user_errors())
-    return j.view()
+    _load(sid)
+    return jobs.start_process("plan", sid).view()
 
 
 @router.post("/api/sessions/{sid}/plan/{entry_id}/approve/start")
 def approve_start(sid: str, entry_id: str, req: Approval):
     from backend import jobs
-    from prism.plan import engine as pe
-    st = _load(sid)
-    j = jobs.start("approve", lambda progress: pe.approve(st, entry_id, req.candidate or 0, req.user or "user",
-                                                         progress=progress), _user_errors())
-    return j.view()
+    _load(sid)
+    return jobs.start_process("approve", sid, {"entry_id": entry_id, "candidate": req.candidate or 0,
+                                               "user": req.user or "user"}).view()
 
 
 @router.get("/api/jobs/{job_id}")
