@@ -54,7 +54,10 @@ def test_server_answers_while_a_job_runs_and_a_killed_job_is_reported(client, is
     v = client.post(f"/api/sessions/{st.sid}/audit/start", json={}).json()
     j = jobs.get(v["job_id"])
     assert client.get("/api/health").json()["status"] == "ok"
-    time.sleep(0.3)
+    t = time.time()
+    while j.progress == "starting" and j.status == "running" and time.time() - t < 60:
+        time.sleep(0.05)                                 # the child is working before it is killed
+    assert j.status == "running"
     os.kill(j.pid, signal.SIGKILL)                       # what an out-of-memory kill looks like
     v = wait(client, v)
     assert v["status"] == "error" and "signal 9" in v["error"] and "memory" in v["error"]
