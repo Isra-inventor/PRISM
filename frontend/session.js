@@ -173,8 +173,9 @@
       if (rep.mode === "seeded_wizard") { show($("panel-upload"), false); await window.PRISM_APP.loadStep0(rep.step0_session_id); }
       else await showReview(rep.dataset_id);
     } catch (e) {
-      $("imp-error").replaceChildren(el("div", { text: e.message }),
-        e.errors?.length ? el("ul", {}, e.errors.slice(0, 20).map((x) => el("li", {}, el("code", { text: x.path }), " ", x.message))) : null);
+      $("imp-error").replaceChildren(...[el("div", { text: e.message }),
+        e.errors?.length ? el("ul", {}, e.errors.slice(0, 20).map((x) => el("li", {}, el("code", { text: x.path }), " ", x.message))) : null]
+        .filter(Boolean));
       show($("imp-error"));
     } finally { $("imp-go").disabled = false; }
   });
