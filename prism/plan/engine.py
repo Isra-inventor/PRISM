@@ -385,9 +385,11 @@ def notes(F, RULES):
     return out
 
 
-def build(st, who="user", run_audit=True):
+def build(st, who="user", run_audit=True, progress=None):
     RULES, ORDER = rules(), order()
-    col = facts_mod.collect(st, run_audit=run_audit, who="plan")
+    col = facts_mod.collect(st, run_audit=run_audit, who="plan", progress=progress)
+    if progress:
+        progress("evaluating the rules")
     P = col["params"]
     entries, skipped, gates, nts, hand, questions = [], [], [], [], [], []
     for F in col["units"]:
@@ -432,7 +434,7 @@ def _find(plan, entry_id):
     return e
 
 
-def approve(st, entry_id, candidate=0, user="user", params=None):
+def approve(st, entry_id, candidate=0, user="user", params=None, progress=None):
     """Approve one candidate of a plan entry: run the op on the dataset's current state, then re-run
     the checkpoint battery on the new state. -> {"decision", "state", "run_id"}."""
     plan = load(st)
@@ -458,6 +460,8 @@ def approve(st, entry_id, candidate=0, user="user", params=None):
         assay = e["assay"]
         if assay and c["op"] not in ("remove_samples",):
             p.setdefault("assay", assay.split("_B")[0] if "_B" in assay else assay)
+        if progress:
+            progress(f"applying {c['op']}")
         try:
             m = exec_apply(st, e["dataset"], c["op"], p, approval, step=e["step"])
         except ExecutorError as ex:
@@ -466,7 +470,9 @@ def approve(st, entry_id, candidate=0, user="user", params=None):
             _record(st, decision)
             raise PlanError(str(ex))
         out["state"] = {k: m[k] for k in ("state_id", "label", "checkpoint", "scale", "counts")}
-        man = audit_engine.run(st, state=m["state_id"], who="plan")
+        if progress:
+            progress(f"{c['op']} applied; re-running the {m['checkpoint']} checks")
+        man = audit_engine.run(st, state=m["state_id"], who="plan", progress=progress)
         out["run_id"] = man["run_id"]
         decision["state_id"], decision["run_id"] = m["state_id"], man["run_id"]
     else:

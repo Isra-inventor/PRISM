@@ -13,6 +13,7 @@ typing_extensions>=4.7
 numpy>=1.21,<1.22; python_version < "3.8"   # the Tier 1 audit (prism/)
 numpy>=1.21; python_version >= "3.8"
 pytest>=7   # tests only
+httpx>=0.23  # tests only (the FastAPI test client)
 # v4: registry/rules files and the missingness detection curve
 pyyaml>=5.4
 scipy>=1.7,<1.8; python_version < "3.8"

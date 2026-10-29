@@ -313,7 +313,7 @@ def permanova_rows(K, P, k):
     for j in range(k):
         m = (P == j).astype(float)               # perms x n
         cnt = m.sum(1)
-        quad = np.einsum("pi,ij,pj->p", m, K, m)
+        quad = ((m @ K) * m).sum(1)             # BLAS; einsum here was the slowest step
         ssa += np.where(cnt > 0, quad / np.maximum(cnt, 1), 0)
     ssw = sst - ssa
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -327,7 +327,7 @@ def permanova_numeric_rows(K, Xp):
     sst = float(np.trace(K))
     Xc = Xp - Xp.mean(1, keepdims=True)
     den = (Xc ** 2).sum(1)
-    ssa = np.einsum("pi,ij,pj->p", Xc, K, Xc) / np.where(den > 0, den, 1)
+    ssa = ((Xc @ K) * Xc).sum(1) / np.where(den > 0, den, 1)
     ssw = sst - ssa
     with np.errstate(divide="ignore", invalid="ignore"):
         F = ssa / (ssw / (n - 2))

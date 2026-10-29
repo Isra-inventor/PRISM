@@ -456,3 +456,57 @@ def state_audit(sid: str, state_id: str, run_id: str):
             raise e.AuditError(f"Run {run_id} was not made at state {state_id}.")
         return b
     return _audit(sid, fn)
+
+
+# ---------------------------------------------------------------- background jobs (long runs)
+
+
+def _user_errors():
+    from prism.audit import engine, overrides
+    from prism.executor import ExecutorError
+    from prism.executor.state import StateError
+    from prism.plan.engine import PlanError
+    from prism.plan.intake import IntakeError
+    from prism import store
+    return (engine.AuditError, overrides.OverrideError, ExecutorError, StateError, PlanError, IntakeError,
+            store.SessionError)
+
+
+@router.post("/api/sessions/{sid}/audit/start")
+def audit_start(sid: str, req: AuditRun):
+    """Start an audit run in the background; poll GET /api/jobs/{job_id}."""
+    from backend import jobs
+    from prism.audit import engine
+    st = _load(sid)
+    j = jobs.start("audit", lambda progress: engine.run(st, req.factors, req.datasets, req.params or {}, who="user",
+                                                       state=req.state, progress=progress), _user_errors())
+    return j.view()
+
+
+@router.post("/api/sessions/{sid}/plan/start")
+def plan_start(sid: str):
+    from backend import jobs
+    from prism.audit.report import _trim_plan
+    from prism.plan import engine as pe
+    st = _load(sid)
+    j = jobs.start("plan", lambda progress: _trim_plan(pe.build(st, progress=progress)), _user_errors())
+    return j.view()
+
+
+@router.post("/api/sessions/{sid}/plan/{entry_id}/approve/start")
+def approve_start(sid: str, entry_id: str, req: Approval):
+    from backend import jobs
+    from prism.plan import engine as pe
+    st = _load(sid)
+    j = jobs.start("approve", lambda progress: pe.approve(st, entry_id, req.candidate or 0, req.user or "user",
+                                                         progress=progress), _user_errors())
+    return j.view()
+
+
+@router.get("/api/jobs/{job_id}")
+def job_status(job_id: str):
+    from backend import jobs
+    j = jobs.get(job_id)
+    if j is None:
+        raise HTTPException(404, "Unknown job (the server may have restarted): run it again.")
+    return j.view()

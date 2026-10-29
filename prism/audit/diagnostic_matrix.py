@@ -125,17 +125,25 @@ def pairwise_corr(Y):
         with np.errstate(invalid="ignore", divide="ignore"):
             R = np.corrcoef(Y.T)
         return np.where(np.isfinite(R), R, np.nan), np.full((n, n), Y.shape[0], dtype=int)
-    R = np.full((n, n), np.nan)
-    N = np.zeros((n, n), dtype=int)
-    for i in range(n):
-        for j in range(i, n):
-            m = ok[:, i] & ok[:, j]
-            N[i, j] = N[j, i] = int(m.sum())
-            if m.sum() >= 3:
-                a, b = Y[m, i], Y[m, j]
-                sa, sb = a.std(), b.std()
-                if sa > 0 and sb > 0:
-                    R[i, j] = R[j, i] = float(((a - a.mean()) * (b - b.mean())).mean() / (sa * sb))
+    # pairwise-complete Pearson for every pair at once: sums over the features both samples observe
+    M = ok.astype(float)
+    import warnings
+    with warnings.catch_warnings(), np.errstate(invalid="ignore"):
+        warnings.simplefilter("ignore", RuntimeWarning)       # a sample with no observed value
+        mu = np.nanmean(np.where(ok, Y, np.nan), axis=0, keepdims=True)
+    Z = np.where(ok, Y - np.where(np.isfinite(mu), mu, 0.0), 0.0)        # a constant per sample: less cancellation
+    N = (M.T @ M).round().astype(int)
+    Sx = Z.T @ M                       # Sx[i, j]: sum of sample i over the features shared with j
+    Sxx = (Z * Z).T @ M
+    Sxy = Z.T @ Z
+    with np.errstate(invalid="ignore", divide="ignore"):
+        Nf = np.where(N > 0, N, 1).astype(float)
+        cov = Sxy - Sx * Sx.T / Nf
+        vx = Sxx - Sx ** 2 / Nf
+        vy = vx.T
+        R = cov / np.sqrt(vx * vy)
+    good = (N >= 3) & (vx > 1e-12 * np.maximum(Sxx, 1)) & (vy > 1e-12 * np.maximum(Sxx.T, 1)) & np.isfinite(R)
+    R = np.where(good, np.clip(R, -1.0, 1.0), np.nan)
     return R, N
 
 

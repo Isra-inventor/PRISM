@@ -65,6 +65,11 @@ class Block:
         for i, r in enumerate(rows):
             if len(r) - 1 != m:
                 raise LoadError(f"{self.path.name}: row {i + 2} has {len(r) - 1} values for {m} samples.")
+            try:                     # fast path: every cell is a plain number or empty
+                X[i] = np.array([v if v.strip() else "nan" for v in r[1:]], dtype=float)
+                continue
+            except ValueError:
+                pass
             for j, v in enumerate(r[1:]):
                 x, b = _num(v)
                 X[i, j] = x

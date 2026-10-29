@@ -33,13 +33,17 @@
     if (body instanceof FormData) opts.body = body;
     else if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
     const r = await fetch(path, opts);
-    const j = await r.json().catch(() => ({}));
+    const text = await r.text();
+    let j = null;
+    try { j = text ? JSON.parse(text) : {}; } catch (_) { j = null; }
     if (!r.ok) {
-      const d = j.detail;
-      const e = new Error(typeof d === "string" ? d : d?.message || JSON.stringify(d || j));
+      const d = j && j.detail;
+      const e = new Error(typeof d === "string" ? d : d?.message || (d ? JSON.stringify(d)
+        : `The server answered HTTP ${r.status}${text ? `: ${text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300)}` : ""}`));
       e.errors = d?.errors || [];
       throw e;
     }
+    if (j === null) throw new Error(`The server answered with something that is not JSON: ${text.slice(0, 200)}`);
     return j;
   }
   const store = { get: () => { try { return localStorage.getItem(KEY); } catch (_) { return null; } },

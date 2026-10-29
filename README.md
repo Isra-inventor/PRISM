@@ -337,6 +337,10 @@ python -m prism evidence check                                # every rule, thre
 
 ## API
 
+Long operations run as background jobs: `POST /api/sessions/{id}/audit/start`, `POST .../plan/start` and
+`POST .../plan/{entry}/approve/start` return a `job_id` at once; poll `GET /api/jobs/{job_id}` for `status`,
+`progress` and the `result` (or the `error`). The page does this, so a long audit cannot time out behind a proxy.
+
 | Method | Path | |
 |---|---|---|
 | GET | `/api/vocabulary` | All vocabularies, definitions and history questions (the single source of truth) |

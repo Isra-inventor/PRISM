@@ -57,8 +57,12 @@
     if (body instanceof FormData) opts.body = body;
     else if (body !== undefined) { opts.headers["Content-Type"] = "application/json"; opts.body = JSON.stringify(body); }
     const r = await fetch(API + path, opts);
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(typeof j.detail === "string" ? j.detail : (JSON.stringify(j.detail || j) || `HTTP ${r.status}`));
+    const text = await r.text();
+    let j = null;
+    try { j = text ? JSON.parse(text) : {}; } catch (_) { j = null; }
+    if (!r.ok) throw new Error(j && typeof j.detail === "string" ? j.detail : j && j.detail ? JSON.stringify(j.detail)
+      : `The server answered HTTP ${r.status}${text ? `: ${text.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300)}` : ""}`);
+    if (j === null) throw new Error(`The server answered with something that is not JSON: ${text.slice(0, 200)}`);
     return j;
   }
 

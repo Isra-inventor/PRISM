@@ -44,6 +44,15 @@ FRONTEND_DIR = PROJECT_DIR / "frontend"
 logging.basicConfig(level=logging.INFO, format="%(levelname)s:     %(name)s - %(message)s")
 app = FastAPI(title="PRISM Step 0 - Schema recognition")
 
+
+@app.exception_handler(Exception)
+async def _unexpected(request, exc):
+    """A bug must still answer in JSON, so the page can show what failed (not '{}')."""
+    import traceback
+    from fastapi.responses import JSONResponse
+    print(f"[PRISM] {request.method} {request.url.path} failed:\n{traceback.format_exc()}", flush=True)
+    return JSONResponse(status_code=500, content={"detail": f"Internal error: {type(exc).__name__}: {exc}"})
+
 _ok, _why = llm.available()
 if _ok:
     llm.say(f"AI provider: {llm.provider_name()}; models tried in order: {', '.join(llm.model_list())}")
