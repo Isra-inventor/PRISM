@@ -13,14 +13,22 @@ Built one step at a time. What exists so far:
     ai.check()                              #         is the key working
     g = prism.propose_groups(table)         # step 4: the AI groups and labels the columns; code checks it
     g.summary(), g.columns(), g.rejected    #         look at the proposal
+
+    s = prism.start(table)                  # steps 2-4 in one call -> a Schema to confirm
+    s.todo()                                # what is still open (steps 5-9)
+    s.review(); s.save(folder)              # step 10: schema.json + output files
+    s = prism.load("schema.json", table)    #          reuse a saved schema
 """
 
 from .ai import AIError, MockAI, connect
 from .digest import digest, show
 from .grouping import Group, Grouping, propose_groups
 from .layout import Layout, propose_layout
+from .outputs import load
+from .schema import Schema, start
 from .table import Table, read
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 __all__ = ["read", "Table", "propose_layout", "Layout", "digest", "show", "connect", "MockAI", "AIError",
-           "propose_groups", "Grouping", "Group", "__version__"]
+           "propose_groups", "Grouping", "Group",
+           "start", "Schema", "load", "__version__"]

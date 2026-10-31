@@ -31,6 +31,9 @@ from .table import MISSING, Table
 EXAMPLE_MAX_UNIQUE_RATIO = 0.5  # text columns with more distinct values than this share send no values
 TOP_VALUES = 12                 # at most this many example values per column
 TOP_SHAPES = 3
+# Starts of protein IDs that usually mark decoys and contaminants. Only counted (a fact), so the AI
+# can propose a flag even for ID columns whose values are never sent.
+KNOWN_PREFIXES = ("REV__", "rev_", "CON__", "contam_", "DECOY_", "decoy_", "Cont_")
 
 
 def name_template(name: str) -> str:
@@ -82,6 +85,9 @@ def column_facts(table: Table, name: str, examples: bool = True) -> dict:
         for value, count in counts.items():
             shapes[_shape(value)] += count
         d["value_shapes"] = [{"shape": s, "count": c} for s, c in shapes.most_common(TOP_SHAPES)]
+        starts = {p: sum(c for v, c in counts.items() if v.startswith(p)) for p in KNOWN_PREFIXES}
+        if any(starts.values()):
+            d["rows_starting_with"] = {p: n for p, n in starts.items() if n}
         if examples and d["unique_ratio"] <= EXAMPLE_MAX_UNIQUE_RATIO:
             d["values"] = [{"value": v, "count": c} for v, c in counts.most_common(TOP_VALUES)]
             if len(counts) > TOP_VALUES:

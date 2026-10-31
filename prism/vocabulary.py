@@ -26,6 +26,9 @@ VOCABULARY = {
     "in_supported_scope": ["yes", "no", "unsure"],
     "omics_family": ["proteomics", "metabolomics", "lipidomics", "transcriptomics", "epigenomics", "genomics",
                      "microbiome", "other", "unknown"],
+    "sample_type": ["study", "qc", "blank", "pool", "calibrator", "reference", "other"],
+    "yes_no_unsure": ["yes", "no", "not_sure"],
+    "time_unit": ["minutes", "hours", "days", "weeks", "months", "years", "visit_index"],
     "provenance": ["computed", "ai_proposed_confirmed", "ai_proposed_corrected", "user_set"],
 }
 
@@ -47,6 +50,12 @@ DEFINITIONS = {
              "decides which variable is the research outcome.",
     "covariate": "Any other sample characteristic (age, sex, BMI, clinical values ...).",
     "other": "Sample information that fits none of the above.",
+    "study": "A study sample (from a subject or experimental unit), as opposed to the types below.",
+    "qc": "A quality-control sample (e.g. a pooled QC or a platform QC).",
+    "blank": "A blank or buffer injection / well with no sample.",
+    "pool": "A pool of study samples run for monitoring.",
+    "calibrator": "A calibrator sample used by the platform for scaling.",
+    "reference": "A reference or bridging sample shared across plates or batches.",
     "samples_in_columns": "Each row is one feature; each sample has its own column.",
     "samples_in_rows": "Each row is one sample; each feature has its own column.",
     "long": "Each row is one (feature, sample) pair with a single value column.",

@@ -47,7 +47,14 @@ class Group:
     marks_rows_as_suspect: bool = False
     confidence: float = 0.0
     evidence: str = ""
-    origin: str = "ai_proposed"      # ai_proposed | merged_ai | unmentioned
+    origin: str = "ai_proposed"      # ai_proposed | merged_ai | unmentioned | split | sample_info
+    # who decided: ai_proposed (not looked at yet) | ai_proposed_confirmed | ai_proposed_corrected |
+    # user_set | none (nobody: a column the AI left out)
+    provenance: str = "ai_proposed"
+    flagged_values: list[str] = field(default_factory=list)    # feature annotations: values that flag a row
+    flagged_prefixes: list[str] = field(default_factory=list)  # ... or text the value starts with
+    keep: bool = True                 # value groups: written to the outputs
+    zero_means: str | None = None     # value groups: "not_detected" or "zero" (asked when there are zeros)
 
 
 @dataclass
@@ -126,6 +133,9 @@ def _clean(raw: dict, columns: list[str]) -> tuple[Group, list[dict]]:
         notes.append({"group_id": gid, "reason": f"audit_kind {audit_kind!r} is not allowed; set to 'other'."})
         audit_kind = "other"
     suspect = bool(raw.get("marks_rows_as_suspect")) and role == "feature_annotation"
+    can_flag = role in ("feature_annotation", "feature_id")
+    flagged_values = [str(v) for v in raw.get("flagged_values") or []] if can_flag else []
+    flagged_prefixes = [str(v) for v in raw.get("flagged_prefixes") or []] if can_flag else []
     try:
         conf = min(max(float(raw.get("confidence") or 0), 0.0), 1.0)
     except (TypeError, ValueError):
@@ -133,7 +143,8 @@ def _clean(raw: dict, columns: list[str]) -> tuple[Group, list[dict]]:
     return Group(id=str(gid), columns=columns, role=role, label=raw.get("label") or "",
                  assay_label=raw.get("assay_label") if role == "value" else None, family=raw.get("family"),
                  audit_kind=audit_kind, marks_rows_as_suspect=suspect, confidence=conf,
-                 evidence=raw.get("evidence") or ""), notes
+                 evidence=raw.get("evidence") or "", flagged_values=flagged_values,
+                 flagged_prefixes=flagged_prefixes), notes
 
 
 def check_answer(table: Table, answer: dict) -> tuple[dict, list[Group], list[dict], list[dict]]:
@@ -196,7 +207,7 @@ def check_answer(table: Table, answer: dict) -> tuple[dict, list[Group], list[di
         if c not in claimed:
             groups[f"_u{position[c]}"] = Group(id="", columns=[c], role=UNRESOLVED, label="",
                                                evidence="Not placed in any group by the AI: choose what this column is.",
-                                               origin="unmentioned")
+                                               origin="unmentioned", provenance="none")
 
     # 4. file order, renumbered g1, g2, ...; columns in file order inside each group
     ordered = sorted(groups.items(), key=lambda kv: min(position[c] for c in kv[1].columns))

@@ -11,8 +11,15 @@ that runs in Google Colab; the website will use it later.
 | 1 | Read a table exactly as written and describe its columns (`prism.read`) | done |
 | 2 | Which columns are row IDs, measurements, annotations; the measurements as numbers (`prism.propose_layout`) | done |
 | 3 | The AI connection (Gemini) and the digest: what the AI may see about a table, never data rows (`prism.digest`, `prism.connect`) | done |
-| 4 | The AI proposes column groups and labels; code checks every column is claimed once, unmentioned ones become unresolved (`prism.propose_groups`) | done, for review |
-| 5+ | Confirmation steps (layout, feature ID, annotations, values, samples, sample info, design, history, review), provenance, `schema.json` and output files | later |
+| 4 | The AI proposes column groups and labels; code checks every column is claimed once, unmentioned ones become unresolved (`prism.propose_groups`) | done |
+| 5 | Confirm or correct the groups and the layout: `s.confirm`, `s.set`, `s.split`, `s.merge` (`prism/schema.py`) | done, for review |
+| 6 | Protein ID (checked for missing and repeated IDs) and flagged rows: controls, other species, decoys, contaminants (`prism/features.py`) | done, for review |
+| 7 | Value blocks and assays, what zeros mean, samples and sample types (QC, blank, pool, calibrator); Olink long tables (`prism/values.py`) | done, for review |
+| 8 | Sample-information file, subject and time point (from a column or the sample names), computed design facts (`prism/design.py`) | done, for review |
+| 9 | Processing history: 5 questions per assay, with hints from the numbers (`prism/history.py`) | done, for review |
+| 10 | Review, save `schema.json` + output folder, reload a saved schema (`prism/outputs.py`) | done, for review |
+| 11 | Audit | next |
+| 12-14 | Preprocessing plan, apply and report, website | later |
 
 The previous version (website, v1 to v4) is in the Git history at commit `c0e8a83`.
 
@@ -26,7 +33,7 @@ The previous version (website, v1 to v4) is in the Git history at commit `c0e8a8
    - Generate it and copy it (it starts with `github_pat_`).
 2. **Store it in Colab (once).** In a Colab notebook, click the key icon (**Secrets**) in the left
    bar → **Add new secret** → name `GITHUB_TOKEN`, value the token → switch on **Notebook access**.
-3. **Open a notebook from `notebooks/`** (`01_read_a_table`, `02_columns_and_layout`, `03_ai_connection_and_digest`, `04_ai_groups_the_columns`) in Colab (File → Upload notebook, or open it from GitHub)
+3. **Open a notebook from `notebooks/`** (`01_read_a_table`, `02_columns_and_layout`, `03_ai_connection_and_digest`, `04_ai_groups_the_columns`, `05_schema_wizard`) in Colab (File → Upload notebook, or open it from GitHub)
    and run the cells. It installs PRISM from GitHub and reads a file from your Google Drive.
 
 From step 3 on, PRISM needs a Gemini key (https://aistudio.google.com/apikey). If it is not in Colab

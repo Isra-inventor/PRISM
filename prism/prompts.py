@@ -112,6 +112,10 @@ what the statistics suggest, e.g. "RFU, apparently raw linear scale (median 2.1e
   that identify each row; names, formulas and database IDs of a feature are feature_annotation.
   Every annotation group gets its OWN specific label; a shared descriptor goes in `family`
   (e.g. "plasma QC metric"). Value groups name their assay_label.
+- flagged_values / flagged_prefixes: for a column with marks_rows_as_suspect true, the values
+  (exactly as listed in the digest) or the starting text that mark a row as suspect. For a
+  feature_id column, flagged_prefixes may name decoy / contaminant starts listed in its
+  rows_starting_with fact. Leave both empty when you cannot see the values.
 - propose_merge: only if two of your own groups turn out to be one family.
 - assays: one entry per assay (a file can hold several), each with in_supported_scope against
   the scope above. feature_identity lists YOUR group_ids
@@ -133,7 +137,8 @@ def response_schema() -> dict:
         "group_id": s(), "columns": names, "templates": names,
         "role": s(enum=v["column_role"]), "assay_label": s(nullable=True), "label": s(),
         "family": s(nullable=True), "audit_kind": s(enum=v["audit_kind"], nullable=True),
-        "marks_rows_as_suspect": b(nullable=True), "confidence": n, "evidence": s(),
+        "marks_rows_as_suspect": b(nullable=True), "flagged_values": names, "flagged_prefixes": names,
+        "confidence": n, "evidence": s(),
     }, "required": ["group_id", "role", "label", "confidence", "evidence"]}
     assay = {"type": "OBJECT", "properties": {
         "assay_label": s(), "omics_type": s(), "omics_family": s(enum=v["omics_family"]),
