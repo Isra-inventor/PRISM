@@ -35,9 +35,9 @@ def metabolomics_like(tmp_path, n_samp=20, n_feat=150, seed=1):
     return p
 
 
-def test_features_in_rows_finds_the_samples(tmp_path):
+def test_samples_in_columns_finds_the_samples(tmp_path):
     layout = prism.propose_layout(prism.read(somascan_like(tmp_path)))
-    assert layout.orientation == "features_in_rows"
+    assert layout.orientation == "samples_in_columns"
     assert layout.id_column == "SeqId"
     # every numeric column is proposed; numeric annotations are moved by the user
     assert layout.measurement_columns == ["Kd", "LoD", "CV"] + [f"S{j:02d}" for j in range(12)]

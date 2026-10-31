@@ -35,8 +35,20 @@ def test_mock_ai_records_questions():
 def test_no_key_explains_where_to_put_it(monkeypatch):
     for k in ai_module.KEY_NAMES:
         monkeypatch.delenv(k, raising=False)
+    monkeypatch.setattr(ai_module.getpass, "getpass", lambda prompt: "")
     with pytest.raises(prism.AIError, match="GEMINI_API_KEY"):
         prism.connect()
+
+
+def test_asks_once_then_remembers(monkeypatch):
+    for k in ai_module.KEY_NAMES:
+        monkeypatch.setenv(k, "x")      # so pytest removes what connect() sets afterwards
+        monkeypatch.delenv(k)
+    asked = []
+    monkeypatch.setattr(ai_module.getpass, "getpass", lambda prompt: asked.append(1) or "typed-key")
+    assert prism.connect(verbose=False).key == "typed-key"
+    assert prism.connect(verbose=False).key == "typed-key"
+    assert len(asked) == 1
 
 
 def test_key_from_environment(monkeypatch):

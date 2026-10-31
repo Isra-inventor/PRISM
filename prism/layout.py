@@ -2,7 +2,7 @@
 
 A table can be laid out two ways:
 
-    features_in_rows   one row per protein / metabolite; samples are columns     (e.g. SomaScan export)
+    samples_in_columns   one row per protein / metabolite; samples are columns     (e.g. SomaScan export)
     samples_in_rows    one row per sample; proteins / metabolites are columns    (e.g. many metabolomics exports)
 
 propose_layout(table) makes a proposal, with a reason for every decision:
@@ -79,8 +79,8 @@ class Layout:
         for n in (measurements or []) + (annotations or []) + ([id_column] if id_column else []):
             if n not in all_names:
                 raise KeyError(f"No column named '{n}'.")
-        if orientation and orientation not in ("features_in_rows", "samples_in_rows"):
-            raise ValueError("orientation is 'features_in_rows' or 'samples_in_rows'.")
+        if orientation and orientation not in ("samples_in_columns", "samples_in_rows"):
+            raise ValueError("orientation is 'samples_in_columns' or 'samples_in_rows'.")
         meas = [c for c in self.measurement_columns if c not in (annotations or [])]
         meas += [c for c in (measurements or []) if c not in meas]
         idc = id_column if id_column is not None else self.id_column
@@ -108,10 +108,10 @@ class Layout:
         return values
 
     def annotations(self) -> pd.DataFrame:
-        """The annotation columns, one row per feature (features_in_rows) or per sample (samples_in_rows)."""
+        """The annotation columns, one row per feature (samples_in_columns) or per sample (samples_in_rows)."""
         out = self.table.data[self.annotation_columns].copy()
         out.index = self._row_names()
-        out.index.name = "feature" if self.orientation == "features_in_rows" else "sample"
+        out.index.name = "feature" if self.orientation == "samples_in_columns" else "sample"
         return out
 
     def describe(self) -> str:
@@ -151,8 +151,8 @@ def propose_layout(table: Table) -> Layout:
         reasons.append(f"Samples in rows: there are {len(numeric)} numeric columns but only {n_rows} rows; "
                        "a table with many more measured variables than rows usually has one row per sample.")
     else:
-        orientation = "features_in_rows"
-        reasons.append(f"Features in rows: {n_rows} rows against {len(numeric)} numeric columns; "
+        orientation = "samples_in_columns"
+        reasons.append(f"Samples in columns: {n_rows} rows against {len(numeric)} numeric columns; "
                        "one row per protein or metabolite is the usual export.")
 
     # 2. the ID column (a text column preferred: names, not running numbers)
@@ -161,7 +161,7 @@ def propose_layout(table: Table) -> Layout:
     candidates = [n for n in numeric if n != id_column]
 
     # 3. measurement columns
-    if orientation == "features_in_rows":
+    if orientation == "samples_in_columns":
         measurements = candidates
         reasons.append(f"{len(measurements)} numeric column(s) are proposed as the samples. Numeric annotation "
                        "columns (a CV, a detection limit, a reference value ...) look the same by type: check the "

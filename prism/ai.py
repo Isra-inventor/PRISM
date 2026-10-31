@@ -6,9 +6,12 @@ changes data. Everything it proposes is shown to you to confirm or correct, and 
 records which answers came from the AI and which from you.
 
 The key is a Gemini API key from Google AI Studio (https://aistudio.google.com/apikey).
-In Colab, store it in Secrets as GEMINI_API_KEY; connect() finds it there.
+connect() looks for it in this order: the key you pass, the environment (GEMINI_API_KEY), Colab
+Secrets (GEMINI_API_KEY). If none is there, it asks you to paste it once (hidden as you type) and
+remembers it until the notebook restarts; every later step uses it without asking. To never be
+asked again, save it in Colab Secrets.
 
-    ai = prism.connect()        # finds the key, checks nothing yet
+    ai = prism.connect()        # finds or asks for the key, checks nothing yet
     ai.check()                  # one tiny call: is the key working, which model answered
 
 Every call is temperature 0 (the same question gives the same answer as far as the model
@@ -18,6 +21,7 @@ If a model is unavailable or overloaded, the next model in MODELS is tried.
 
 from __future__ import annotations
 
+import getpass
 import json
 import os
 import time
@@ -198,10 +202,27 @@ class MockAI:
         return "Mock AI (no network)."
 
 
-def connect(key: str | None = None, models: list[str] | None = None, verbose: bool = True) -> Gemini:
-    """A Gemini connection. key: leave it out to use GEMINI_API_KEY from Colab Secrets or the environment."""
-    found = find_key(key)
+SAVE_TIP = ("To not be asked in a new session: in Colab, key icon (Secrets) -> Add new secret -> "
+            "name GEMINI_API_KEY -> switch on Notebook access.")
+
+
+def ask_for_key() -> str | None:
+    """Ask once, hidden input. The key is kept in this Python session only (not written to any file)."""
+    print("PRISM needs a Gemini API key (free at https://aistudio.google.com/apikey).")
+    try:
+        key = getpass.getpass("Paste your Gemini API key and press Enter: ").strip()
+    except (EOFError, OSError):          # no way to type (a script, not a notebook)
+        return None
+    if key:
+        os.environ["GEMINI_API_KEY"] = key   # later connect() calls find it here and do not ask again
+        print("Key kept for this session. " + SAVE_TIP)
+    return key or None
+
+
+def connect(key: str | None = None, models: list[str] | None = None, verbose: bool = True,
+            ask: bool = True) -> Gemini:
+    """A Gemini connection. key: leave it out to find it (environment, Colab Secrets) or be asked once."""
+    found = find_key(key) or (ask_for_key() if ask else None)
     if not found:
-        raise AIError("No Gemini key found. Get one at https://aistudio.google.com/apikey, then in Colab: "
-                      "key icon (Secrets) -> Add new secret -> name GEMINI_API_KEY -> switch on Notebook access.")
+        raise AIError("No Gemini key. Get one at https://aistudio.google.com/apikey. " + SAVE_TIP)
     return Gemini(key=found, models=list(models or MODELS), verbose=verbose)

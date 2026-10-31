@@ -11,13 +11,16 @@ Built one step at a time. What exists so far:
     prism.show(d)                           #         print it
     ai = prism.connect()                    #         Gemini, key from Colab Secrets (GEMINI_API_KEY)
     ai.check()                              #         is the key working
+    g = prism.propose_groups(table)         # step 4: the AI groups and labels the columns; code checks it
+    g.summary(), g.columns(), g.rejected    #         look at the proposal
 """
 
 from .ai import AIError, MockAI, connect
 from .digest import digest, show
+from .grouping import Group, Grouping, propose_groups
 from .layout import Layout, propose_layout
 from .table import Table, read
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __all__ = ["read", "Table", "propose_layout", "Layout", "digest", "show", "connect", "MockAI", "AIError",
-           "__version__"]
+           "propose_groups", "Grouping", "Group", "__version__"]

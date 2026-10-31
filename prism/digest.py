@@ -111,14 +111,18 @@ def _template_entry(table: Table, template: str, names: list[str]) -> dict:
     return entry
 
 
+def numeric_templates(table: Table) -> dict[str, list[str]]:
+    """Name template -> its columns, for templates shared by two or more numeric columns."""
+    by_template: dict[str, list[str]] = {}
+    for c in table.columns:
+        if c.kind == "numeric":
+            by_template.setdefault(name_template(c.name), []).append(c.name)
+    return {t: names for t, names in by_template.items() if len(names) >= 2}
+
+
 def digest(table: Table, layout: Layout | None = None, examples: bool = True) -> dict:
     """Everything the AI will see about this table. layout: the step-2 proposal, sent as a hint."""
-    kinds = {c.name: c.kind for c in table.columns}
-    by_template: dict[str, list[str]] = {}
-    for name in table.data.columns:
-        if kinds[name] == "numeric":
-            by_template.setdefault(name_template(name), []).append(name)
-    merged = {t: names for t, names in by_template.items() if len(names) >= 2}
+    merged = numeric_templates(table)
     in_template = {n for names in merged.values() for n in names}
 
     d = {
