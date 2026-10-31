@@ -2,8 +2,8 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .venv/
-.env
-backend/logs/*.jsonl
-backend/sessions/
-backend/cache/
-tests/data/
+*.egg-info/
+build/
+.ipynb_checkpoints/
+# your own data stays off GitHub
+data/

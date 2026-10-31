@@ -1,8 +1,13 @@
-"""PRISM beyond Step 0: sessions of several datasets, schema import, merging and the Tier 1 audit.
+"""PRISM: recognize, audit and preprocess omics abundance tables.
 
-Everything here is deterministic: no LLM is called in import, merge or audit. The Step 0
-wizard (backend/) produces each dataset's output folder; the audit reads only those folders
-plus overrides.json. Python 3.7+, numpy only.
+Built one step at a time. What exists so far:
+
+    import prism
+    table = prism.read("my_file.csv")   # step 1: read a table exactly as written, and describe it
+    table                               # in a notebook, shows the summary
 """
 
+from .table import Table, read
+
 __version__ = "0.1.0"
+__all__ = ["read", "Table", "__version__"]
