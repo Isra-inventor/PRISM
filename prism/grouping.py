@@ -76,6 +76,10 @@ class Grouping:
         return pd.DataFrame([{"column": c, "group": where[c].id, "role": where[c].role, "label": where[c].label}
                              for c in self.table.data.columns])
 
+    def out_of_scope(self) -> list[dict]:
+        """Assays the AI marked as outside PRISM's current scope (proteomics), or unsure."""
+        return [a for a in self.assays if a.get("in_supported_scope") != "yes"]
+
     def unresolved(self) -> list[Group]:
         return [g for g in self.groups if g.role == UNRESOLVED]
 
@@ -92,7 +96,9 @@ class Grouping:
         n_cols = sum(len(g.columns) for g in self.groups)
         return (f"{len(self.groups)} groups over {n_cols} columns; layout {self.layout.get('value')} "
                 f"(confidence {self.layout.get('confidence')}); {len(self.unresolved())} unresolved; "
-                f"{len(self.rejected)} item(s) rejected by code")
+                f"{len(self.rejected)} item(s) rejected by code"
+                + "".join(f"; NOT IN SCOPE ({a.get('in_supported_scope')}): {a.get('assay_label')}, "
+                          f"{a.get('scope_reason') or 'no reason given'}" for a in self.out_of_scope()))
 
     def __repr__(self) -> str:
         return f"<prism.Grouping {self.describe()}>"
@@ -210,6 +216,8 @@ def check_answer(table: Table, answer: dict) -> tuple[dict, list[Group], list[di
         a = dict(a)
         if a.get("omics_family") not in VOCABULARY["omics_family"]:
             a["omics_family"] = "unknown"
+        if a.get("in_supported_scope") not in VOCABULARY["in_supported_scope"]:
+            a["in_supported_scope"] = "unsure"
         ids = a.get("feature_identity") or []
         a["feature_identity"] = [new_id[i] for i in ids if i in new_id]
         for i in ids:

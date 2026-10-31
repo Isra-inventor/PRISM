@@ -1,4 +1,4 @@
-"""PRISM: recognize, audit and preprocess omics abundance tables.
+"""PRISM: recognize, audit and preprocess proteomics abundance tables (other omics: out of scope for now).
 
 Built one step at a time. What exists so far:
 

@@ -6,6 +6,15 @@ free text, written by the AI or by you, and are never listed here.
 """
 
 SCHEMA_VERSION = "0.4.1"
+
+# What PRISM's later steps (audit, preprocessing advice) support. Files outside it are still
+# recognized and described, but their assay is marked in_supported_scope "no" or "unsure".
+# Widening the scope later means editing this text.
+SCOPE = ("Proteomics only: protein-level abundance tables, one value per protein and sample. "
+         "Affinity platforms (SomaScan RFU, Olink NPX) and mass-spectrometry tool outputs (MaxQuant "
+         "proteinGroups, DIA-NN pg_matrix, Spectronaut, FragPipe combined_protein), including paired "
+         "and longitudinal designs. Peptide-, precursor- or PSM-level tables: 'unsure' (they need "
+         "summarising to proteins first). Metabolomics, lipidomics, transcriptomics and other omics: 'no'.")
 UNRESOLVED = "unresolved"
 
 VOCABULARY = {

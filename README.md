@@ -1,6 +1,7 @@
 # PRISM
 
-Recognize, audit and preprocess omics abundance tables. Rebuilt step by step as a Python package
+Recognize, audit and preprocess **proteomics** abundance tables (SomaScan, Olink, MaxQuant, DIA-NN,
+Spectronaut, FragPipe protein-level outputs). Other omics are recognized but marked out of scope for now. Rebuilt step by step as a Python package
 that runs in Google Colab; the website will use it later.
 
 ## Steps

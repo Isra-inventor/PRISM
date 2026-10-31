@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "prism-omics"
 version = "0.4.0"
-description = "PRISM: recognize, audit and preprocess omics abundance tables, step by step."
+description = "PRISM: recognize, audit and preprocess proteomics abundance tables, step by step."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

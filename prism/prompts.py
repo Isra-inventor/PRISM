@@ -1,7 +1,7 @@
 """What PRISM tells the AI: the briefing (adapted from the old website's briefing.md) and the
 instructions for the grouping question. Kept in one file so you can read exactly what is asked."""
 
-from .vocabulary import VOCABULARY
+from .vocabulary import SCOPE, VOCABULARY
 
 BRIEFING = """# PRISM Step 0 briefing
 
@@ -41,6 +41,27 @@ only), and columns that mark rows as suspect (decoys, contaminants, controls, no
 - Names with "group", "arm", "cohort", "status", "treatment", "condition" are likely `group`.
 - `covariate` for other sample characteristics (age, sex, BMI, clinical values).
 
+## Proteomics exports you may meet (recognition hints, not facts about this file)
+- SomaScan (aptamer affinity proteomics): features in rows or in columns; a SeqId like
+  "10000-28" identifies each aptamer; annotations such as Target, TargetFullName, UniProt,
+  EntrezGeneSymbol, Organism, Type, Dilution, Units; values are RFU (relative fluorescence units,
+  linear scale, several orders of magnitude). Rows whose Type is not "Protein" (hybridization
+  controls, spuriomers, non-biotin, non-human ...) or whose Organism is not the study species
+  are candidates for marks_rows_as_suspect. Per-aptamer numeric columns (Kd, limit of detection,
+  CVs, reference RFU) are feature_annotation.
+- Olink: values are NPX (log2 scale, so negative values are normal); often long format
+  (SampleID, OlinkID, UniProt, Assay, Panel, PlateID, QC_Warning, LOD, NPX), sometimes wide.
+- MaxQuant proteinGroups.txt: Protein IDs, Majority protein IDs, Gene names, peptide counts,
+  Score, Q-value; per-sample families "Intensity <s>", "LFQ intensity <s>", "iBAQ <s>",
+  "MS/MS count <s>"; flag columns "Reverse", "Potential contaminant", "Only identified by site"
+  (value "+") mark rows as suspect. Zero means not detected.
+- DIA-NN pg_matrix: Protein.Group, Protein.Ids, Protein.Names, Genes,
+  First.Protein.Description, then one column per run, often named by its file path.
+- Spectronaut: PG.ProteinGroups, PG.Genes, per-run "... .PG.Quantity" columns.
+- FragPipe combined_protein.tsv: Protein, Protein ID, Gene, then "<s> Intensity",
+  "<s> MaxLFQ Intensity", "<s> Spectral Count" per sample.
+- Protein IDs starting with "REV__", "rev_", "CON__" or "contam_" are decoys or contaminants.
+
 ## Situations to watch for (illustrations, not an allow-list)
 - Numeric annotation columns next to the sample columns in a samples-in-columns export (a CV, a
   limit of detection, a dissociation constant Kd, a reference value): one value per feature, so
@@ -57,6 +78,11 @@ only), and columns that mark rows as suspect (decoys, contaminants, controls, no
 def system_prompt() -> str:
     v = VOCABULARY
     return f"""{BRIEFING}
+## Current scope of PRISM's later steps
+{SCOPE}
+Anything else must still be recognized and described, but its assay gets in_supported_scope
+"no" (or "unsure") with a short scope_reason.
+
 ## Closed fields (use exactly these values; code branches on them)
 - layout: {v['layout']}
 - role: {v['column_role']}
@@ -87,7 +113,8 @@ what the statistics suggest, e.g. "RFU, apparently raw linear scale (median 2.1e
   Every annotation group gets its OWN specific label; a shared descriptor goes in `family`
   (e.g. "plasma QC metric"). Value groups name their assay_label.
 - propose_merge: only if two of your own groups turn out to be one family.
-- assays: one entry per assay (a file can hold several). feature_identity lists YOUR group_ids
+- assays: one entry per assay (a file can hold several), each with in_supported_scope against
+  the scope above. feature_identity lists YOUR group_ids
   whose values identify each feature; [] when feature names are column headers."""
 
 
@@ -112,7 +139,7 @@ def response_schema() -> dict:
         "assay_label": s(), "omics_type": s(), "omics_family": s(enum=v["omics_family"]),
         "source_software": s(nullable=True), "in_supported_scope": s(enum=v["in_supported_scope"]),
         "scope_reason": s(nullable=True), "feature_identity": names, "confidence": n, "evidence": s(),
-    }, "required": ["assay_label", "omics_type", "omics_family", "confidence", "evidence"]}
+    }, "required": ["assay_label", "omics_type", "omics_family", "in_supported_scope", "confidence", "evidence"]}
     return {"type": "OBJECT", "properties": {
         "layout": {"type": "OBJECT", "properties": {"value": s(enum=v["layout"]), "confidence": n, "evidence": s()},
                    "required": ["value", "confidence", "evidence"]},

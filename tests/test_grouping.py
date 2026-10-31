@@ -26,7 +26,7 @@ GOOD = {
         group("f", "value", "RFU per sample", ["QC_01"], ["S#"], assay_label="SomaScan"),
     ],
     "assays": [{"assay_label": "SomaScan", "omics_type": "aptamer proteomics", "omics_family": "proteomics",
-                "feature_identity": ["a"], "confidence": 0.9, "evidence": "SeqId"}],
+                "in_supported_scope": "yes", "feature_identity": ["a"], "confidence": 0.9, "evidence": "SeqId"}],
 }
 
 
@@ -80,3 +80,14 @@ def test_closed_fields_and_merge(tmp_path):
     merged = [x for x in g.groups if x.origin == "merged_ai"][0]
     assert merged.columns == ["S01", "S02", "S03"]
     assert any("zzz" in r["reason"] for r in g.rejected)
+
+
+def test_scope_is_proteomics(tmp_path):
+    ai = prism.MockAI(GOOD)
+    g = prism.propose_groups(soma(tmp_path), ai=ai)
+    assert "Proteomics only" in ai.questions[0]["system"] and g.out_of_scope() == []
+    answer = dict(GOOD, assays=[{"assay_label": "Metabolon", "omics_type": "untargeted metabolomics",
+                                 "omics_family": "metabolomics", "in_supported_scope": "no",
+                                 "scope_reason": "not proteomics", "confidence": 0.9, "evidence": ""}])
+    g = prism.propose_groups(soma(tmp_path), ai=prism.MockAI(answer))
+    assert g.out_of_scope()[0]["assay_label"] == "Metabolon" and "NOT IN SCOPE" in g.describe()
