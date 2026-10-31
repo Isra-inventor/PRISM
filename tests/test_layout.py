@@ -7,7 +7,7 @@ import prism
 
 
 def somascan_like(tmp_path, n_feat=300, n_samp=12, seed=0):
-    """Proteins in rows: text and numeric annotation columns, then correlated sample columns."""
+    """Proteins in rows: text and numeric annotation columns, then the sample columns."""
     rng = np.random.default_rng(seed)
     level = rng.normal(8, 1.5, n_feat)                                  # each protein's abundance (log scale)
     lines = ["SeqId,Target,UniProt,Kd,LoD,CV," + ",".join(f"S{j:02d}" for j in range(n_samp))]
@@ -39,12 +39,15 @@ def test_features_in_rows_finds_the_samples(tmp_path):
     layout = prism.propose_layout(prism.read(somascan_like(tmp_path)))
     assert layout.orientation == "features_in_rows"
     assert layout.id_column == "SeqId"
+    # every numeric column is proposed; numeric annotations are moved by the user
+    assert layout.measurement_columns == ["Kd", "LoD", "CV"] + [f"S{j:02d}" for j in range(12)]
+    assert set(layout.annotation_columns) == {"Target", "UniProt"}
+    assert any("set(annotations=" in r for r in layout.reasons)
+    layout = layout.set(annotations=["Kd", "LoD", "CV"])
     assert layout.measurement_columns == [f"S{j:02d}" for j in range(12)]
-    assert set(layout.annotation_columns) == {"Target", "UniProt", "Kd", "LoD", "CV"}   # numeric annotations too
     X = layout.matrix()
     assert X.shape == (300, 12) and X.index[0] == "1000-0" and np.isnan(X.iloc[5, 3])
     assert layout.annotations().loc["1000-0", "Target"] == "Protein 0"
-    assert any("do not follow the samples" in r for r in layout.reasons)
 
 
 def test_samples_in_rows_is_turned_into_features_x_samples(tmp_path):
@@ -60,8 +63,8 @@ def test_set_corrects_the_proposal(tmp_path):
     layout = prism.propose_layout(prism.read(somascan_like(tmp_path)))
     fixed = layout.set(annotations=["S00"], measurements=["LoD"])
     assert "S00" in fixed.annotation_columns and "LoD" in fixed.measurement_columns
-    assert fixed.measurement_columns.index("LoD") == 0                 # file order is kept
-    assert layout.measurement_columns[0] == "S00"                      # the original proposal is unchanged
+    assert fixed.measurement_columns[:2] == ["Kd", "LoD"]              # file order is kept
+    assert "S00" in layout.measurement_columns                         # the original proposal is unchanged
     assert fixed.reasons[-1].startswith("set by you")
     with pytest.raises(KeyError):
         layout.set(measurements=["nope"])

@@ -16,24 +16,21 @@ It is a proposal, not a decision: Layout.set(...) changes any part, and nothing 
 on a layout you have not looked at. layout.matrix() then returns the measurements as numbers,
 always features x samples, whatever the file's orientation.
 
-How the measurement columns are found (features in rows): numeric columns are not all
-measurements. An export often carries numeric annotations too (a CV, a detection limit, an
-affinity constant). The sample columns of one experiment rise and fall together across the
-features (a high-abundance protein is high in every sample), so they correlate strongly with
-each other; annotation columns do not. PRISM takes the largest group of numeric columns that
-correlate with each other (Spearman r >= MIN_R) as the measurements.
+How the measurement columns are found: every numeric column is proposed as a measurement.
+An export often also carries numeric annotation columns (a CV, a detection limit, an affinity
+constant); their type alone does not tell them apart from samples, so the reasons list them
+and you move them with set(annotations=[...]). With samples in rows, whole-number columns with
+only a few values (a 0/1 group code) are proposed as annotations.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
-import numpy as np
 import pandas as pd
 
 from .table import MISSING, Table
 
-MIN_R = 0.5          # columns correlating at least this much (Spearman) are linked into one block
 CODE_MAX_LEVELS = 5  # a whole-number column with this few distinct values reads as a code (e.g. 0/1 sex)
 
 
@@ -59,36 +56,6 @@ def _pick_id_column(table: Table) -> tuple[str | None, str]:
     else:
         return None, "No column names the rows (text, a value in every row, none repeated), so rows are numbered 1, 2, 3 ..."
     return c.name, f"'{c.name}' names the rows: it has a value in all {n} rows and none repeats."
-
-
-def _correlated_block(table: Table, names: list[str]) -> tuple[list[str], dict]:
-    """The largest group of columns linked by Spearman r >= MIN_R. -> (block, median r of each column to the block)."""
-    if len(names) <= 1:
-        return list(names), {}
-    values = pd.DataFrame({n: _numbers(table.data[n]) for n in names})
-    r = values.corr(method="spearman", min_periods=3).fillna(0).to_numpy()
-    linked = r >= MIN_R
-    seen, best = set(), []
-    for start in range(len(names)):                 # connected groups of the "correlates with" graph
-        if start in seen:
-            continue
-        group, todo = [], [start]
-        seen.add(start)
-        while todo:
-            i = todo.pop()
-            group.append(i)
-            for j in np.flatnonzero(linked[i]):
-                if j not in seen:
-                    seen.add(j)
-                    todo.append(j)
-        if len(group) > len(best):
-            best = group
-    best = sorted(best)
-    med = {}
-    for i, n in enumerate(names):
-        others = [j for j in best if j != i]
-        med[n] = float(np.median(r[i, others])) if others else float("nan")
-    return [names[i] for i in best] if len(best) >= 2 else list(names), med
 
 
 @dataclass
@@ -195,15 +162,10 @@ def propose_layout(table: Table) -> Layout:
 
     # 3. measurement columns
     if orientation == "features_in_rows":
-        block, med = _correlated_block(table, candidates)
-        measurements = block
-        left = [n for n in candidates if n not in block]
-        reasons.append(f"{len(block)} numeric column(s) rise and fall together across the features "
-                       f"(Spearman r >= {MIN_R} with each other): these are the samples.")
-        if left:
-            shown = ", ".join(f"'{n}' (median r {med.get(n, float('nan')):.2f})" for n in left[:8])
-            reasons.append(f"{len(left)} numeric column(s) do not follow the samples and are treated as annotations: "
-                           f"{shown}{' ...' if len(left) > 8 else ''}.")
+        measurements = candidates
+        reasons.append(f"{len(measurements)} numeric column(s) are proposed as the samples. Numeric annotation "
+                       "columns (a CV, a detection limit, a reference value ...) look the same by type: check the "
+                       "list and move them with set(annotations=[...]).")
     else:
         codes = []
         for c in table.columns:
