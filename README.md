@@ -8,7 +8,8 @@ that runs in Google Colab; the website will use it later.
 | Step | What | Status |
 |---|---|---|
 | 1 | Read a table exactly as written and describe its columns (`prism.read`) | done |
-| 2 | … decided together after step 1 | |
+| 2 | Which columns are row IDs, measurements, annotations; the measurements as numbers (`prism.propose_layout`) | done |
+| 3 | … decided together after step 2 | |
 
 The previous version (website, v1 to v4) is in the Git history at commit `c0e8a83`.
 
@@ -22,7 +23,7 @@ The previous version (website, v1 to v4) is in the Git history at commit `c0e8a8
    - Generate it and copy it (it starts with `github_pat_`).
 2. **Store it in Colab (once).** In a Colab notebook, click the key icon (**Secrets**) in the left
    bar → **Add new secret** → name `GITHUB_TOKEN`, value the token → switch on **Notebook access**.
-3. **Open `notebooks/01_read_a_table.ipynb`** in Colab (File → Upload notebook, or open it from GitHub)
+3. **Open a notebook from `notebooks/`** (`01_read_a_table`, `02_columns_and_layout`) in Colab (File → Upload notebook, or open it from GitHub)
    and run the cells. It installs PRISM from GitHub and reads a file from your Google Drive.
 
 Put your data files in Google Drive (for example `MyDrive/PRISM_data/`), not in the repository.
