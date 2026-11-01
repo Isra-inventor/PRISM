@@ -10,3 +10,5 @@ parameters:
   floor_min_observed: {evidence_level: convention}
   floor_tie_share_indicator: {evidence_level: heuristic}
   compositional_cv: {evidence_level: heuristic}
+  abundance_rho_indicator: {evidence_level: heuristic}
+  a12_min_level_n: {evidence_level: convention}

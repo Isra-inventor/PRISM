@@ -4,10 +4,12 @@ import pytest
 import prism
 
 
-def finished(tmp_path, values, extra_header="", types=None, history=None):
+def finished(tmp_path, values, extra_header="", types=None, history=None, plates=None):
+    """A confirmed SomaScan-like schema. values: rows of cell text for samples S1..S(n-1) + QC_1.
+    plates: optional {sample: plate} written as a sample-information file (Plate = batch)."""
     types = types or ("Protein",) * len(values)
-    """A confirmed SomaScan-like schema. values: rows of cell text for samples S1..S5 + QC_1."""
-    header = "SeqId,Type,S1,S2,S3,S4,S5,QC_1"
+    n = len(values[0])
+    header = "SeqId,Type," + ",".join(f"S{j}" for j in range(1, n)) + ",QC_1"
     rows = [f"{1000 + i}-1,{types[i]}," + ",".join(r) for i, r in enumerate(values)]
     p = tmp_path / "soma.csv"
     p.write_text("\n".join([header] + rows) + "\n")
@@ -24,10 +26,22 @@ def finished(tmp_path, values, extra_header="", types=None, history=None):
     def ai(system, prompt, schema):
         if system.startswith("You label the samples"):
             return {"rules": [{"pattern": "QC_*", "sample_type": "qc", "evidence": ""}]}
+        if system.startswith("You describe the columns of a SAMPLE"):
+            return {"columns": [
+                {"column": "Sample", "is_sample_id": True, "audit_kind": "other", "label": "id", "confidence": 1,
+                 "evidence": ""},
+                {"column": "Plate", "is_sample_id": False, "audit_kind": "batch", "label": "plate", "confidence": 1,
+                 "evidence": ""}]}
         return answer
     s = prism.start(prism.read(p), ai=prism.MockAI(ai))
     s.confirm_all(); s.confirm_feature_id(); s.confirm_flags(); s.confirm_values()
-    s.propose_sample_types(); s.confirm_samples(); s.confirm_design()
+    s.propose_sample_types(); s.confirm_samples()
+    if plates:
+        info = tmp_path / "info.csv"
+        info.write_text("Sample,Plate\n" + "".join(f"{k},{v}\n" for k, v in plates.items()))
+        s.add_sample_info(info)
+        s.confirm_sample_info()
+    s.confirm_design()
     for bid, g in s.block_map().items():
         if g.zero_means is None:
             s.set_block(bid, zero_means="not_detected")

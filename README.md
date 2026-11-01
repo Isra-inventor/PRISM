@@ -21,7 +21,8 @@ that runs in Google Colab; the website will use it later.
 | 11 | The audit and the plan follow Build Request v4: steps G1-G7 (global) and S1-S10 (study-dependent) in `prism/registry/steps.yaml`, references in `evidence.yaml` | in progress |
 | G1 | Integrity and structure, audit A1 (`prism/audit/integrity.py`) | done, for review |
 | G2 | Processing history and scale: A2 scale class, A13 declared vs observed vs confirmed, platform notes, the G5/S1 gate (`prism/audit/scale.py`, `processing_state.py`) | done, for review |
-| next | G7 missingness profile (A4, A12), G4 initial assessment (A3, A6, A7), then actions, intake and the plan | one at a time |
+| G7 part 1 | Missingness: A4 (rates, zeros apart, floor ties, abundance dependence) and A12 5.1-5.3 (cell encoding, rates by batch / group / time, batch-wide absence, coverage) (`prism/audit/missingness.py`) | done, for review |
+| next | G7 part 2 (A12 5.4-5.8: detection curve, design tests, feature classes, pattern summary, imputation hand-off), G4 initial assessment, then actions, intake and the plan | one at a time |
 | 12-14 | Preprocessing plan, apply and report, website | later |
 
 The previous version (website, v1 to v4) is in the Git history at commit `c0e8a83`.
@@ -36,7 +37,7 @@ The previous version (website, v1 to v4) is in the Git history at commit `c0e8a8
    - Generate it and copy it (it starts with `github_pat_`).
 2. **Store it in Colab (once).** In a Colab notebook, click the key icon (**Secrets**) in the left
    bar → **Add new secret** → name `GITHUB_TOKEN`, value the token → switch on **Notebook access**.
-3. **Open a notebook from `notebooks/`** (`01_read_a_table`, `02_columns_and_layout`, `03_ai_connection_and_digest`, `04_ai_groups_the_columns`, `05_schema_wizard`, `06_audit_integrity`, `07_audit_scale_processing`) in Colab (File → Upload notebook, or open it from GitHub)
+3. **Open a notebook from `notebooks/`** (`01_read_a_table`, `02_columns_and_layout`, `03_ai_connection_and_digest`, `04_ai_groups_the_columns`, `05_schema_wizard`, `06_audit_integrity`, `07_audit_scale_processing`, `08_audit_missingness_part1`) in Colab (File → Upload notebook, or open it from GitHub)
    and run the cells. It installs PRISM from GitHub and reads a file from your Google Drive.
 
 From step 3 on, PRISM needs a Gemini key (https://aistudio.google.com/apikey). If it is not in Colab

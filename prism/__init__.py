@@ -21,6 +21,7 @@ Built one step at a time. What exists so far:
     a = prism.Audit(s)                      # step 11: the audit, one check at a time
     a.integrity()                           # G1 / A1
     a.scale(); a.processing_state()         # G2 / A2, A13
+    a.missingness(); a.missingness_profile()   # G7 / A4, A12
 """
 
 from .ai import AIError, MockAI, connect
@@ -32,7 +33,7 @@ from .outputs import load
 from .schema import Schema, start
 from .table import Table, read
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 __all__ = ["read", "Table", "propose_layout", "Layout", "digest", "show", "connect", "MockAI", "AIError",
            "propose_groups", "Grouping", "Group",
            "start", "Schema", "load", "Audit", "__version__"]

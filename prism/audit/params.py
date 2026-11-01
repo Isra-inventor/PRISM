@@ -14,6 +14,9 @@ DEFAULTS = {
     "floor_min_observed": 5,           # proteins need this many observed values for floor ties
     "floor_tie_share_indicator": 0.01, # floor ties count as "present" from this share of proteins
     "compositional_cv": 0.001,         # sample sums this constant read as compositional
+    # G7 / A4, A12 missingness
+    "abundance_rho_indicator": -0.1,   # Spearman rho at or below this gets the detection-limit sentence
+    "a12_min_level_n": 3,              # a batch level needs this many samples for batch-wide absence
 }
 
 

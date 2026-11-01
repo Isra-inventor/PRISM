@@ -5,6 +5,8 @@ recommends (that is the plan, later). Steps follow the registry (prism/registry/
     G2  processing history and scale     a.scale()                audit A2
                                          a.processing_state()     audit A13
                                          a.questions(), a.confirm_processing_state(item, value, assay=...)
+    G7  missingness profile              a.missingness()          audit A4
+                                         a.missingness_profile()  audit A12 (part 1: 5.1-5.3)
 
     a = prism.Audit(s)                      # s: a Schema with nothing open
     a = prism.Audit(s, overrides=path)      # with confirmations saved earlier (a.save_overrides(path))
@@ -18,7 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import integrity, processing_state, scale
+from . import integrity, missingness, processing_state, scale
 from .finding import Finding
 from .params import defaults
 
@@ -50,6 +52,14 @@ class Audit:
         if "scale" not in self.results:
             self.scale()
         return self._keep(processing_state.run(self))
+
+    def missingness(self) -> Finding:
+        return self._keep(missingness.run_a4(self))
+
+    def missingness_profile(self) -> Finding:
+        if "floor" not in self.results:
+            self.missingness()
+        return self._keep(missingness.run_a12_part1(self))
 
     def _keep(self, f: Finding) -> Finding:
         self.findings[f.check] = f
@@ -91,6 +101,18 @@ class Audit:
         flagged = set(s.feature_metadata().query("flagged")["feature"])
         study = set(s.samples().query("is_study_sample")["sample"])
         return X.loc[~X.index.isin(flagged), [c for c in X.columns if c in study]]
+
+    def variables(self) -> dict[str, tuple[str, pd.Series]]:
+        """Sample variables with their audit_kind (subject, time, batch, group ...), one value per sample.
+        Subject and time also come from the design (step 8) as 'subject' and 'time'."""
+        s = self.schema
+        t = s.sample_table()
+        out = {c: (k, t[c]) for c, k in s.sample_columns().items() if c in t.columns}
+        if "subject" in t.columns and t["subject"].notna().any():
+            out.setdefault("subject", ("subject_id", t["subject"]))
+        if "time" in t.columns and t["time"].notna().any():
+            out.setdefault("time", ("timepoint", t["time"]))
+        return out
 
     def summary(self) -> pd.DataFrame:
         return pd.DataFrame([{"step": f.step, "audit": k, "title": f.title, "status": f.status}
