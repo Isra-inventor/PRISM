@@ -120,7 +120,7 @@ steps:
     ops: [recode_zero_as_missing]
     evidence: [lazar2016, li_smyth2023, molenberghs2008]
     evidence_level: literature_independent
-    implemented: false
+    implemented: true
     notes: A12. Never imputes. The only op is recode_zero_as_missing, after the user answers the zeros question.
 
   - id: S1

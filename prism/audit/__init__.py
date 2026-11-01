@@ -6,7 +6,7 @@ recommends (that is the plan, later). Steps follow the registry (prism/registry/
                                          a.processing_state()     audit A13
                                          a.questions(), a.confirm_processing_state(item, value, assay=...)
     G7  missingness profile              a.missingness()          audit A4
-                                         a.missingness_profile()  audit A12 (part 1: 5.1-5.3)
+                                         a.missingness_profile()  audit A12 (5.1-5.8)
 
     a = prism.Audit(s)                      # s: a Schema with nothing open
     a = prism.Audit(s, overrides=path)      # with confirmations saved earlier (a.save_overrides(path))
@@ -59,7 +59,7 @@ class Audit:
     def missingness_profile(self) -> Finding:
         if "floor" not in self.results:
             self.missingness()
-        return self._keep(missingness.run_a12_part1(self))
+        return self._keep(missingness.run_a12_part2(self, missingness.run_a12_part1(self)))
 
     def _keep(self, f: Finding) -> Finding:
         self.findings[f.check] = f

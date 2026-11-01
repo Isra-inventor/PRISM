@@ -12,3 +12,12 @@ parameters:
   compositional_cv: {evidence_level: heuristic}
   abundance_rho_indicator: {evidence_level: heuristic}
   a12_min_level_n: {evidence_level: convention}
+  a12_min_partial_features: {evidence_level: heuristic}
+  a12_bootstrap: {evidence_level: convention}
+  a12_b1_negligible: {evidence_level: heuristic}
+  a12_batch_absence_share: {evidence_level: heuristic}
+  a12_low_abundance_fraction: {evidence_level: heuristic}
+  a12_feature_permutations: {evidence_level: convention}
+  seed: {evidence_level: convention}
+  permutations: {evidence_level: convention}
+  exhaustive_max: {evidence_level: convention}
