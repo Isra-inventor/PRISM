@@ -22,4 +22,4 @@ test = ["pytest>=7"]
 include = ["prism*"]
 
 [tool.setuptools.package-data]
-prism = ["registry/*.yaml", "registry/*.json", "audit/*.yaml"]
+prism = ["registry/*.yaml", "registry/*.json", "audit/*.yaml", "rules/*.yaml", "phase2/*.yaml", "ports/probatch/*.md"]

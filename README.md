@@ -1,51 +1,41 @@
 # PRISM
 
 Recognize, audit and preprocess **proteomics** abundance tables (SomaScan, Olink, MaxQuant, DIA-NN,
-Spectronaut, FragPipe protein-level outputs). Other omics are recognized but marked out of scope for now. Rebuilt step by step as a Python package
-that runs in Google Colab; the website will use it later.
+Spectronaut, FragPipe protein-level outputs). Other omics are recognized but marked out of scope for now.
+A Python package that runs in Google Colab; the website will use it later.
 
-## Steps
+**Read [`docs/GUIDE.md`](docs/GUIDE.md)**: every step explained in order, with every threshold and rule.
 
-| Step | What | Status |
+## The steps
+
+| Steps | What | Where |
 |---|---|---|
-| 1 | Read a table exactly as written and describe its columns (`prism.read`) | done |
-| 2 | Which columns are row IDs, measurements, annotations; the measurements as numbers (`prism.propose_layout`) | done |
-| 3 | The AI connection (Gemini) and the digest: what the AI may see about a table, never data rows (`prism.digest`, `prism.connect`) | done |
-| 4 | The AI proposes column groups and labels; code checks every column is claimed once, unmentioned ones become unresolved (`prism.propose_groups`) | done |
-| 5 | Confirm or correct the groups and the layout: `s.confirm`, `s.set`, `s.split`, `s.merge` (`prism/schema.py`) | done, for review |
-| 6 | Protein ID (checked for missing and repeated IDs) and flagged rows: controls, other species, decoys, contaminants (`prism/features.py`) | done, for review |
-| 7 | Value blocks and assays, what zeros mean, samples and sample types (QC, blank, pool, calibrator); Olink long tables (`prism/values.py`) | done, for review |
-| 8 | Sample-information file, subject and time point (from a column or the sample names), computed design facts (`prism/design.py`) | done, for review |
-| 9 | Processing history: 5 questions per assay, with hints from the numbers (`prism/history.py`) | done, for review |
-| 10 | Review, save `schema.json` + output folder, reload a saved schema (`prism/outputs.py`) | done, for review |
-| 11 | The audit and the plan follow Build Request v4: steps G1-G7 (global) and S1-S10 (study-dependent) in `prism/registry/steps.yaml`, references in `evidence.yaml` | in progress |
-| G1 | Integrity and structure, audit A1 (`prism/audit/integrity.py`) | done, for review |
-| G2 | Processing history and scale: A2 scale class, A13 declared vs observed vs confirmed, platform notes, the G5/S1 gate (`prism/audit/scale.py`, `processing_state.py`) | done, for review |
-| G7 | Missingness: A4 (rates, zeros apart, floor ties, abundance dependence) and A12 5.1-5.8 (cell encoding, rates by batch / group / time, batch-wide absence, detection curve, permutation tests against the design, protein classes, pattern summary, imputation hand-off) (`prism/audit/missingness.py`, `stats.py`) | done, for review |
-| G4 part 1 | Diagnostic-matrix policy (v4 section 3); A3 distribution and variance-mean slope, sample-median shift and what it follows; A6 QC repeatability, blanks, run-order drift, per-sample quality, vendor QC columns (`prism/audit/diagnostic.py`, `distribution.py`, `quality.py`) | done, for review |
-| next | G4 part 2: A7 batch structure (PCA / PERMANOVA associations with the sensitivity block, relationship-stratified correlation, samples per batch, coverage), A11 outliers; then actions, intake and the plan | one at a time |
-| 12-14 | Preprocessing plan, apply and report, website | later |
+| 1-4 | Read the file as written; a first layout hint; the digest the AI may see (no data rows); the AI groups and labels the columns, code checks the answer | `prism.read`, `propose_layout`, `digest`, `propose_groups` |
+| 5-10 | The schema wizard: confirm or correct groups, protein ID and flagged rows, value blocks and samples, sample information and design, processing history; save `schema.json` and the output folder | `prism.start`, `prism/schema.py` ... `outputs.py` |
+| 11 | The audit (Build Request v4): G1 integrity, G2 scale and processing state, G4 distributions, QC and batch structure, G7 missingness profile, S4/S5/S10 inputs (outliers, repeated measures, design) | `prism.Audit`, `prism/audit/` |
+| 12 | Intake, the metadata gate, the rule base and the plan; approval runs one action on a new data state and re-audits it | `prism.Study`, `prism/plan/`, `prism/rules/`, `prism/executor/` |
+| 13 | Verification at C2 (before / after, never used to rank methods), replay, saving | `Study.verify`, `replay`, `save` |
+| later | Method selection (imputation is decided there; `prism/phase2/` is the hook), the website | |
 
-The previous version (website, v1 to v4) is in the Git history at commit `c0e8a83`.
+The steps and their properties are in `prism/registry/steps.yaml`; references in `prism/registry/evidence.yaml`.
+The previous website (v1 to v4) is in the Git history at commit `c0e8a83` (v4 package code at `aee0912`).
 
 ## Use it in Google Colab
 
-1. **Make a GitHub token (once).** The repository is private, so Colab needs a token to download it.
-   - Go to GitHub → Settings → Developer settings → Personal access tokens → **Fine-grained tokens** →
-     **Generate new token**.
-   - Repository access: **Only select repositories** → `Isra-inventor/PRISM`.
-   - Permissions → Repository permissions → **Contents: Read-only**. Nothing else.
-   - Generate it and copy it (it starts with `github_pat_`).
-2. **Store it in Colab (once).** In a Colab notebook, click the key icon (**Secrets**) in the left
-   bar → **Add new secret** → name `GITHUB_TOKEN`, value the token → switch on **Notebook access**.
-3. **Open a notebook from `notebooks/`** (`01_read_a_table`, `02_columns_and_layout`, `03_ai_connection_and_digest`, `04_ai_groups_the_columns`, `05_schema_wizard`, `06_audit_integrity`, `07_audit_scale_processing`, `08_audit_missingness`, `09_audit_distribution_quality`) in Colab (File → Upload notebook, or open it from GitHub)
-   and run the cells. It installs PRISM from GitHub and reads a file from your Google Drive.
+1. **Make a GitHub token (once).** GitHub → Settings → Developer settings → Personal access tokens →
+   **Fine-grained tokens** → **Generate new token**. Repository access: **Only select repositories** →
+   `Isra-inventor/PRISM`. Permissions → Repository permissions → **Contents: Read-only**.
+2. **Store it in Colab (once).** Key icon (**Secrets**) in the left bar → **Add new secret** → name
+   `GITHUB_TOKEN` → switch on **Notebook access**.
+3. **Gemini key.** From https://aistudio.google.com/apikey. Save it in Secrets as `GEMINI_API_KEY`, or
+   PRISM asks you once per session.
+4. **Open the notebooks in `notebooks/`** in order (`01` ... `10`). Put your data in Google Drive (for
+   example `MyDrive/PRISM_data/`), not in the repository.
 
-From step 3 on, PRISM needs a Gemini key (https://aistudio.google.com/apikey). If it is not in Colab
-Secrets as `GEMINI_API_KEY`, PRISM asks you to paste it once per session; save it in Secrets to
-never be asked.
+## Licensing
 
-Put your data files in Google Drive (for example `MyDrive/PRISM_data/`), not in the repository.
+Undecided: see `LICENSING.md`. `prism/ports/probatch/` is derived from proBatch (GPL-3) and kept apart;
+`PRISM_DISABLE_PORTS=1` runs PRISM without it. Nothing is to be published until the license is decided.
 
 ## Run the tests (on any computer with Python 3.10+)
 
