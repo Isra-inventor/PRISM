@@ -70,7 +70,7 @@ def run(audit) -> Finding:
     for bid in s.block_map():
         cls = audit.results["scale"][bid]
         linear = cls == "continuous_linear"
-        full = s.matrix(bid, numbers=True)
+        full = audit.full_matrix(bid)
         A = full.loc[~full.index.isin(flagged_ids)]
         m = {"sample_types": types.reindex(A.columns).value_counts().to_dict()}
         qc = [c for c in A.columns if types.get(c) in ("qc", "pool")]

@@ -39,12 +39,16 @@ BATTERY = ("integrity", "scale", "processing_state", "distribution", "quality", 
 
 class Audit:
 
-    def __init__(self, schema, overrides=None, params: dict | None = None):
+    def __init__(self, schema, overrides=None, params: dict | None = None, state=None, state_id: str | None = None,
+                 checkpoint: str = "C0", root: bool = True):
+        """state / state_id: audit a data state (after approved ops) instead of the schema's data.
+        root: whether this state is S0 (A13 describes the uploaded data, so it runs on S0 only)."""
         open_items = schema.todo()
         if len(open_items):
             raise ValueError(f"The schema still has {len(open_items)} open item(s) (s.todo()): the audit needs every "
                              "decision made first.")
         self.schema = schema
+        self.state, self.state_id, self.checkpoint, self.is_root = state, state_id, checkpoint, root
         self.params = {**defaults(), **(params or {})}
         self.findings: dict[str, Finding] = {}
         self.results: dict = {}                    # facts one audit hands to another (e.g. the scale class)
@@ -63,7 +67,23 @@ class Audit:
     def processing_state(self) -> Finding:
         if "scale" not in self.results:
             self.scale()
+        if not self.is_root:
+            f = Finding("A13", "Processing state", step="G2")
+            f.say("not_applicable", "The processing state describes the uploaded data (S0); this state has PRISM "
+                                    "ops, so A13 is read from S0.")
+            return self._keep(f)
         return self._keep(processing_state.run(self))
+
+    def effective_scale(self) -> str:
+        """linear | log2 | unknown, from the confirmed processing state (A13): what G5 and S1 build on."""
+        f = self.findings.get("A13") or self.processing_state()
+        rows = [r for r in f.measures.get("items", []) if r["item"] == "log_transformed"]
+        eff = {r["effective"] for r in rows}
+        if eff == {"no"}:
+            return "linear"
+        if eff == {"yes"}:
+            return "log2"
+        return "unknown"
 
     def distribution(self) -> Finding:
         if "scale" not in self.results:
@@ -156,10 +176,16 @@ class Audit:
 
     # ---------------------------------------------------------------- data and display
 
+    def full_matrix(self, block: str) -> pd.DataFrame:
+        """All proteins and samples of a block, as numbers: from the state if one is audited."""
+        if self.state is not None:
+            return self.state.block(block).frame()
+        return self.schema.matrix(block, numbers=True)
+
     def audit_matrix(self, block: str) -> pd.DataFrame:
         """The audit set: study samples, unflagged proteins."""
         s = self.schema
-        X = s.matrix(block, numbers=True)
+        X = self.full_matrix(block)
         flagged = set(s.feature_metadata().query("flagged")["feature"])
         study = set(s.samples().query("is_study_sample")["sample"])
         return X.loc[~X.index.isin(flagged), [c for c in X.columns if c in study]]
@@ -186,11 +212,16 @@ class Audit:
         if block not in self.results.get("scale", {}):
             self.scale()
         X = self.audit_matrix(block)
-        Y, info = scale.diagnostic_y(X.to_numpy(dtype=float), self.results["scale"][block])
+        if self.state is not None and self.state.scale in ("log2", "arcsinh"):
+            Y, info = X.to_numpy(dtype=float).copy(), {"transform": "none", "reason": f"the state is on a "
+                                                                                     f"{self.state.scale} scale"}
+        else:
+            Y, info = scale.diagnostic_y(X.to_numpy(dtype=float), self.results["scale"][block])
         return pd.DataFrame(Y, index=X.index, columns=X.columns), info
 
     def summary(self) -> pd.DataFrame:
-        return pd.DataFrame([{"step": f.step, "audit": k, "title": f.title, "status": f.status}
+        return pd.DataFrame([{"step": f.step, "audit": k, "title": f.title, "status": f.status,
+                              "checkpoint": self.checkpoint, "state": (self.state_id or "S0")[:12]}
                              for k, f in self.findings.items()])
 
     def __repr__(self) -> str:

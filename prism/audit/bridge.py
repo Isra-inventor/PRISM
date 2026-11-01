@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import math
+
 import numpy as np
 
 from . import stats
@@ -419,3 +421,23 @@ def fmt(v):
     if isinstance(v, int) and abs(v) >= 10000:
         return f"{v:,}"
     return str(v)
+def clean(obj):
+    """JSON-safe: numpy scalars to Python, NaN/inf to None, floats rounded to 10 significant digits."""
+    if isinstance(obj, dict):
+        return {str(k): clean(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [clean(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return clean(obj.tolist())
+    if isinstance(obj, (np.bool_, bool)):
+        return bool(obj)
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (float, np.floating)):
+        x = float(obj)
+        if not math.isfinite(x):
+            return None
+        return float(f"{x:.10g}")
+    return obj
+
+

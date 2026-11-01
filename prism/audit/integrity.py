@@ -54,7 +54,8 @@ def run(audit) -> Finding:
                 method="exact counts on the values as written in the file, all samples and all proteins")
     blocks = {}
     for bid in s.block_map():
-        text, X = s.matrix(bid), s.matrix(bid, numbers=True)
+        X = audit.full_matrix(bid)
+        text = s.matrix(bid) if audit.state is None else X.notna().astype(str).where(X.notna(), "")
         m = {"n_proteins": X.shape[0], "n_samples": X.shape[1]}
 
         bad = (text != "") & X.isna()

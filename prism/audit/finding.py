@@ -37,8 +37,11 @@ class Finding:
     def say(self, status: str, sentence: str) -> None:
         """Add a sentence; the finding's status is the worst of its sentences."""
         self.sentences.append((status, sentence))
+        neutral = ("not_applicable", "insufficient_data", "insufficient_metadata", "partial")
         if ORDER[status] > ORDER[self.status]:
             self.status = status
+        elif all(st in neutral for st, _ in self.sentences):
+            self.status = status            # nothing but "could not assess": say so, not "ok"
 
     # ---- the calls of the audits ported from the v4 build (bridge.py) ----
 

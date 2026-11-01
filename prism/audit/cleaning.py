@@ -19,7 +19,7 @@ MAX_IDS = 5000
 
 def candidates(audit, block: str) -> dict:
     s = audit.schema
-    full = s.matrix(block, numbers=True)
+    full = audit.full_matrix(block)
     types = s.samples().set_index("sample")["sample_type"]
     study = [c for c in full.columns if types.get(c) == "study"]
     blanks = [c for c in full.columns if types.get(c) == "blank"]
