@@ -1,0 +1,12 @@
+# Evidence level of every audit parameter (prism/audit/params.py). prism.registry.check() fails
+# when a parameter has no entry here. Levels: literature_independent, expert_guidance,
+# convention, heuristic, unverified.
+parameters:
+  sentinel_share: {evidence_level: heuristic}
+  sentinel_min_cells: {evidence_level: convention}
+  min_observed: {evidence_level: convention}
+  median_scaling_mad: {evidence_level: heuristic}
+  narrow_median_spread: {evidence_level: heuristic}
+  floor_min_observed: {evidence_level: convention}
+  floor_tie_share_indicator: {evidence_level: heuristic}
+  compositional_cv: {evidence_level: heuristic}

@@ -1,0 +1,41 @@
+# Platform notes (Build Request v4, section 4.2). Editable. A note is shown next to a processing-
+# state mismatch; it never overrides your answer or the evidence. None of these was checked against
+# vendor documentation by PRISM: verify_with_vendor_documentation is true for each.
+notes:
+  - id: somascan_vendor_normalized
+    platform: SomaScan
+    detect:
+      feature_columns_any: [SeqId, SeqIdVersion, SomaId]
+      text_any: [somascan, somalogic, somamer, rfu]
+    items: [normalized]
+    text: >-
+      SomaScan data come out of the vendor pipeline already normalized (hybridization normalization,
+      plate scaling, calibration, then median or ANML normalization); a declared normalized: no for
+      such a file is likely wrong, unless it is the raw (unnormalized) export.
+    verify_with_vendor_documentation: true
+    evidence: [somascan_vendor_docs]
+    evidence_level: unverified
+  - id: olink_npx_log2
+    platform: Olink
+    detect:
+      feature_columns_any: [OlinkID]
+      text_any: [olink, npx]
+    items: [log_transformed, normalized]
+    text: >-
+      Olink NPX values are on a log2 scale and normalized by the vendor software, as commonly
+      described; a declared log_transformed: no or normalized: no for NPX data is likely wrong.
+    verify_with_vendor_documentation: true
+    evidence: []
+    evidence_level: unverified
+  - id: maxquant_lfq_normalized
+    platform: MaxQuant
+    detect:
+      feature_columns_any: [Majority protein IDs]
+      text_any: [lfq intensity, maxlfq]
+    items: [normalized]
+    text: >-
+      MaxQuant "LFQ intensity" values come from the MaxLFQ algorithm, which includes a normalization
+      step, as commonly described; raw "Intensity" columns do not. Check which block this is.
+    verify_with_vendor_documentation: true
+    evidence: []
+    evidence_level: unverified

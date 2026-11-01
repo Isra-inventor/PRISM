@@ -4,7 +4,8 @@ import pytest
 import prism
 
 
-def finished(tmp_path, values, extra_header="", types=("Protein",) * 6):
+def finished(tmp_path, values, extra_header="", types=None, history=None):
+    types = types or ("Protein",) * len(values)
     """A confirmed SomaScan-like schema. values: rows of cell text for samples S1..S5 + QC_1."""
     header = "SeqId,Type,S1,S2,S3,S4,S5,QC_1"
     rows = [f"{1000 + i}-1,{types[i]}," + ",".join(r) for i, r in enumerate(values)]
@@ -30,8 +31,8 @@ def finished(tmp_path, values, extra_header="", types=("Protein",) * 6):
     for bid, g in s.block_map().items():
         if g.zero_means is None:
             s.set_block(bid, zero_means="not_detected")
-    s.answer_history(normalized="no", log_transformed="no", imputed="no", batch_corrected="no",
-                     features_or_samples_removed_before_upload="no")
+    s.answer_history(**{**dict(normalized="no", log_transformed="no", imputed="no", batch_corrected="no",
+                                features_or_samples_removed_before_upload="no"), **(history or {})})
     assert s.todo().empty, s.todo()
     return s
 

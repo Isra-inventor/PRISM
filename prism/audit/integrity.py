@@ -1,4 +1,4 @@
-"""Audit 11.1: integrity. Is the data sound enough to compute anything on?
+"""G1 / A1: integrity. Is the data sound enough to compute anything on?
 
 Runs on ALL samples and ALL proteins (QC and flagged ones included), block by block:
 
@@ -28,11 +28,6 @@ import pandas as pd
 
 from .finding import Finding
 
-PARAMS = {
-    "sentinel_share": 0.01,     # heuristic: one non-zero value covering at least 1% of cells
-    "sentinel_min_cells": 3,    # ... and at least this many cells (so tiny tables do not trigger it)
-    "min_observed": 3,          # proteins with fewer observed values are reported as sparse
-}
 
 
 def _identical(frame: pd.DataFrame) -> list[list[str]]:
@@ -54,7 +49,8 @@ def _examples(items, n=5) -> str:
 
 def run(audit) -> Finding:
     s = audit.schema
-    f = Finding("11.1", "Integrity", feeds=["every later check", "feature filtering"],
+    PARAMS = audit.params
+    f = Finding("A1", "Integrity", step="G1", feeds=["every later check", "feature filtering"],
                 method="exact counts on the values as written in the file, all samples and all proteins")
     blocks = {}
     for bid in s.block_map():

@@ -24,8 +24,9 @@ ORDER = {"ok": 0, "not_applicable": 0, "note": 1, "problem": 2}
 
 @dataclass
 class Finding:
-    check: str
+    check: str                     # audit id: A1, A2, A13 ...
     title: str
+    step: str = ""                 # registry step: G1, G2 ... (prism/registry/steps.yaml)
     status: str = "ok"
     sentences: list[tuple[str, str]] = field(default_factory=list)    # (status, sentence)
     measures: dict = field(default_factory=dict)
@@ -42,12 +43,12 @@ class Finding:
         return pd.DataFrame(self.sentences, columns=["status", "finding"])
 
     def __repr__(self) -> str:
-        lines = [f"[{self.check}] {self.title}: {self.status.upper()}"]
+        lines = [f"[{self.step} / {self.check}] {self.title}: {self.status.upper()}"]
         lines += [f"  {s:>7}  {t}" for s, t in self.sentences]
         return "\n".join(lines)
 
     def _repr_html_(self) -> str:
         colour = {"ok": "#2e7d32", "note": "#b26a00", "problem": "#c62828", "not_applicable": "#666"}
         items = "".join(f"<li><b style='color:{colour[s]}'>{s}</b> {t}</li>" for s, t in self.sentences)
-        return (f"<p><b>{self.check} {self.title}</b>: <b style='color:{colour[self.status]}'>{self.status}</b></p>"
+        return (f"<p><b>{self.step} / {self.check} {self.title}</b>: <b style='color:{colour[self.status]}'>{self.status}</b></p>"
                 f"<ul>{items}</ul><p style='color:#666'>Method: {self.method}</p>")

@@ -1,0 +1,178 @@
+# PRISM bibliography and evidence keys (Build Request v4, section 8.5).
+# One entry per reference. `verified` and `what_was_verified` record what the user stated in
+# Build Request v4 (section 8.5); nothing here was checked against the source by PRISM's code.
+# Titles, volumes and pages marked `citation_checked: false` were filled from memory by the
+# assistant and must be checked before publication. Do not invent entries: a rule that needs a
+# citation not listed here adds it with verified: false.
+#
+# what_was_verified: read_in_full | abstract_only | partly_read | not_read
+
+references:
+  cuklina2021:
+    citation: "Cuklina J, Lee CH, Williams EG, et al. Diagnostics and correction of batch effects in large-scale proteomic studies: a tutorial. Mol Syst Biol. 2021;17:e10240."
+    verified: true
+    what_was_verified: read_in_full
+    citation_checked: true
+    used_for: [G4, G5, S1, S2, S10, R2-R13, the proBatch port]
+  lazar2016:
+    citation: "Lazar C, Gatto L, Ferro M, Bruley C, Burger T. Accounting for the multiple natures of missing values in label-free quantitative proteomics data sets to compare imputation strategies. J Proteome Res. 2016;15:1116-1125."
+    verified: true
+    what_was_verified: abstract_only
+    citation_checked: false
+    used_for: [imputation_catalog, G7]
+  webb_robertson2015:
+    citation: "Webb-Robertson BJ, et al. Review, evaluation, and discussion of the challenges of missing value imputation for mass spectrometry-based label-free global proteomics. J Proteome Res. 2015;14:1993."
+    verified: true
+    what_was_verified: abstract_only
+    citation_checked: false
+    used_for: [imputation_catalog]
+  kong2022:
+    citation: "Kong W, Hui HWH, Peng H, Goh WWB. Dealing with missing values in proteomics data. Proteomics. 2022;22:2200092."
+    verified: true
+    what_was_verified: partly_read
+    citation_checked: false
+    used_for: [imputation_catalog]
+  hui2023:
+    citation: "Hui HWH, Kong W, Peng H, Goh WWB. The importance of batch sensitization in missing value imputation. Sci Rep. 2023;13:3003."
+    verified: true
+    what_was_verified: abstract_only
+    citation_checked: false
+    used_for: [imputation_catalog, ordering note D2]
+  hui_chan_goh2025:
+    citation: "Hui HWH, Chan, Goh WWB. Brief Bioinform. 2025;26:bbaf168. (title not recorded)"
+    verified: true
+    what_was_verified: abstract_only
+    citation_checked: false
+    used_for: [imputation_catalog caveat, M-R3]
+  vanderaa_gatto2023:
+    citation: "Vanderaa C, Gatto L. Revisiting the thorny issue of missing values in single-cell proteomics. arXiv:2304.06654. 2023."
+    verified: true
+    what_was_verified: abstract_only
+    citation_checked: false
+    used_for: [imputation_catalog caveat]
+  li_smyth2023:
+    citation: "Li M, Smyth GK. Neither random nor censored: estimating intensity-dependent probabilities for missing values in label-free proteomics. Bioinformatics. 2023;39:btad200."
+    verified: true
+    what_was_verified: abstract_only
+    citation_checked: true
+    used_for: [A12.4, methods_registry]
+  wei2018:
+    citation: "Wei R, Wang J, Su M, et al. Missing value imputation approach for mass spectrometry-based metabolomics data. Sci Rep. 2018;8:663."
+    verified: true
+    what_was_verified: abstract_only
+    citation_checked: false
+    used_for: [imputation_catalog, methods_registry]
+  molenberghs2008:
+    citation: "Molenberghs G, Beunckens C, Sotto C, Kenward MG. Every missingness not at random model has a missingness at random counterpart with equal fit. J R Stat Soc B. 2008;70:371-388."
+    verified: true
+    what_was_verified: abstract_only
+    citation_checked: false
+    used_for: [A12.7 wording rule]
+  valikangas2018:
+    citation: "Valikangas T, Suomi T, Elo LL. A systematic evaluation of normalization methods in quantitative label-free proteomics. Brief Bioinform. 2018;19:1-11."
+    verified: true
+    what_was_verified: abstract_only
+    citation_checked: false
+    used_for: [S1, pairing for R2-R3]
+  vandenberg2006:
+    citation: "van den Berg RA, Hoefsloot HCJ, Westerhuis JA, Smilde AK, van der Werf MJ. Centering, scaling, and transformations: improving the biological information content of metabolomics data. BMC Genomics. 2006;7:142."
+    verified: true
+    what_was_verified: abstract_only
+    citation_checked: false
+    used_for: [G5, S7]
+  matzke2011:
+    citation: "Matzke MM, et al. Improved quality control processing of peptide-centric LC-MS proteomics data. Bioinformatics. 2011;27:2866."
+    verified: true
+    what_was_verified: abstract_only
+    citation_checked: false
+    used_for: [S4]
+  nygaard2016:
+    citation: "Nygaard V, Rodland EA, Hovig E. Methods that remove batch effects while retaining group differences may lead to exaggerated confidence in downstream analyses. Biostatistics. 2016;17:29-39."
+    verified: true
+    what_was_verified: abstract_only
+    citation_checked: false
+    used_for: [S2, R10, R12]
+  leek2010:
+    citation: "Leek JT, Scharpf RB, Bravo HC, et al. Tackling the widespread and critical impact of batch effects in high-throughput data. Nat Rev Genet. 2010;11:733-739."
+    verified: true
+    what_was_verified: abstract_only
+    citation_checked: false
+    used_for: [S2, pairing for R4-R13]
+  msqrob2_docs:
+    citation: "msqrob2 package documentation, Bioconductor package page (hurdle workflow)."
+    verified: true
+    what_was_verified: partly_read
+    citation_checked: false
+    used_for: [methods_registry]
+  dunn2011:
+    citation: "Dunn WB, Broadhurst D, Begley P, et al. Procedures for large-scale metabolic profiling of serum and plasma using gas chromatography and liquid chromatography coupled to mass spectrometry. Nat Protoc. 2011;6:1060-1083."
+    verified: false
+    what_was_verified: not_read
+    citation_checked: false
+    used_for: [G6, G-R5]
+  gandolfo_speed2018:
+    citation: "Gandolfo LC, Speed TP. RLE plots: visualizing unwanted variation in high dimensional data. PLoS One. 2018;13:e0191629."
+    verified: false
+    what_was_verified: not_read
+    citation_checked: false
+    used_for: [A3 RLE, G4]
+  anderson2001:
+    citation: "Anderson MJ. A new method for non-parametric multivariate analysis of variance. Austral Ecol. 2001;26:32-46."
+    verified: false
+    what_was_verified: not_read
+    citation_checked: false
+    used_for: [A7 PERMANOVA]
+  robert_escoufier1976:
+    citation: "Robert P, Escoufier Y. A unifying tool for linear multivariate statistical methods: the RV-coefficient. Appl Stat. 1976;25:257-265."
+    verified: false
+    what_was_verified: not_read
+    citation_checked: false
+    used_for: [A10, S8]
+  iglewicz1993:
+    citation: "Iglewicz B, Hoaglin DC. How to Detect and Handle Outliers. ASQC Quality Press; 1993."
+    verified: false
+    what_was_verified: not_read
+    citation_checked: false
+    used_for: [A11 modified z cutoff, S4]
+  broadhurst2018:
+    citation: "Broadhurst D, Goodacre R, Reinke SN, et al. Guidelines and considerations for the use of system suitability and quality control samples in mass spectrometry assays applied in untargeted clinical metabolomic studies. Metabolomics. 2018;14:72."
+    verified: false
+    what_was_verified: not_read
+    citation_checked: false
+    used_for: [rsd_levels]
+  meng1994:
+    citation: "Meng XL. Multiple-imputation inferences with uncongenial sources of input. Stat Sci. 1994;9:538-558."
+    verified: false
+    what_was_verified: not_read
+    citation_checked: false
+    used_for: [imputation-model compatibility, Phase 2]
+  johnson2007:
+    citation: "Johnson WE, Li C, Rabinovic A. Adjusting batch effects in microarray expression data using empirical Bayes methods. Biostatistics. 2007;8:118-127."
+    verified: false
+    what_was_verified: not_read
+    citation_checked: false
+    used_for: [batch_combat]
+  somascan_vendor_docs:
+    citation: "SomaLogic SomaScan data standardization documentation (vendor; hybridization normalization, plate scaling, calibration, median or ANML normalization)."
+    verified: false
+    what_was_verified: not_read
+    citation_checked: false
+    used_for: [platform_notes, A13]
+  naguider:
+    citation: "NAguideR (Wang S, et al. Nucleic Acids Res. 2020); read on the OUP page only."
+    verified: false
+    what_was_verified: not_read
+    citation_checked: false
+    used_for: [imputation_catalog background]
+  prostar_pov_mec:
+    citation: "Prostar POV/MEC classification of missing values (DAPAR/Prostar documentation)."
+    verified: false
+    what_was_verified: not_read
+    citation_checked: false
+    used_for: [A12.6 background]
+  imputation_criteria_biorxiv2023:
+    citation: "2023 bioRxiv study of imputation criteria (as referenced in Build Request v4, section 5.8; full citation not recorded)."
+    verified: false
+    what_was_verified: not_read
+    citation_checked: false
+    used_for: [imputation_catalog caveat]

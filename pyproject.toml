@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prism-omics"
-version = "0.6.0"
+version = "0.7.0"
 description = "PRISM: recognize, audit and preprocess proteomics abundance tables, step by step."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
     "pandas>=2.0",
+    "pyyaml>=6",
 ]
 
 [project.optional-dependencies]
@@ -18,3 +19,6 @@ test = ["pytest>=7"]
 
 [tool.setuptools.packages.find]
 include = ["prism*"]
+
+[tool.setuptools.package-data]
+prism = ["registry/*.yaml", "registry/*.json", "audit/*.yaml"]
