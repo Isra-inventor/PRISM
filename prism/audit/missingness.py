@@ -40,7 +40,6 @@ import pandas as pd
 
 from .finding import Finding
 from .processing_state import floor_ties
-from .scale import diagnostic_log
 
 
 def spearman(x: np.ndarray, y: np.ndarray) -> tuple[float | None, int]:
@@ -106,7 +105,7 @@ def run_a4(audit) -> Finding:
             f.say("ok", f"{bid}: {n_tied} of {eligible} proteins have floor ties (below the "
                         f"{100 * p['floor_tie_share_indicator']:.0f}% indicator).")
 
-        Y = diagnostic_log(X)[0]
+        Y = audit.diagnostic(bid)[0].to_numpy()
         keep = ~R & ~S
         with np.errstate(invalid="ignore"):
             mean_y = np.where(keep.sum(1) > 0, np.where(keep, Y, 0).sum(1) / np.maximum(keep.sum(1), 1), np.nan)
@@ -384,7 +383,7 @@ def run_a12_part2(audit, f: Finding) -> Finding:
         Xd = audit.audit_matrix(bid)
         X = Xd.to_numpy(dtype=float)
         R = np.isnan(X)
-        Y = diagnostic_log(X)[0]
+        Y = audit.diagnostic(bid)[0].to_numpy()
         m = f.measures[bid]
         subject = None if subj_series is None else \
             subj_series.reindex(Xd.columns).fillna("").astype(str).str.strip().tolist()

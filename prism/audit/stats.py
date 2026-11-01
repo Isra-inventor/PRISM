@@ -261,6 +261,36 @@ class Permuter:
 # ------------------------------------------------------------------ multivariate
 
 
+# ------------------------------------------------------------------ multivariate
+
+
+def complete_features(Y):
+    """Rows of Y observed in every sample (PCA and distances need complete data)."""
+    return Y[np.isfinite(Y).all(1)]
+
+
+def pca(Y, k):
+    """PCA of feature-centered Y (features x samples) by SVD. -> scores (n x k), variance shares."""
+    Yc = Y - Y.mean(1, keepdims=True)
+    U, s, Vt = np.linalg.svd(Yc.T, full_matrices=False)     # samples x features
+    k = max(0, min(k, len(s)))
+    scores = U[:, :k] * s[:k]
+    total = float((s ** 2).sum())
+    # sign convention: the largest absolute loading-free score of each PC is positive (deterministic)
+    for j in range(k):
+        i = int(np.argmax(np.abs(scores[:, j])))
+        if scores[i, j] < 0:
+            scores[:, j] *= -1
+    return scores, (s[:k] ** 2 / total if total > 0 else np.zeros(k))
+
+
+def ols_slope(x, y):
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    xc = x - x.mean()
+    d = float(xc @ xc)
+    return float(xc @ (y - y.mean())) / d if d > 0 else float("nan")
+
+
 # ------------------------------------------------------------------ one association test (v3 §6.1)
 
 
@@ -281,6 +311,8 @@ def association(response, values, numeric: bool, subject, params: dict, key: str
         subj = np.array([s if s else f"_sample{i}" for i, s in enumerate(subj)])
     y = response[ok]
     used = [vals[i] for i in np.where(ok)[0]]
+    if len(used) < 4:
+        return dict(row, status="insufficient_data", reason="fewer than 4 samples with a value")
     if numeric:
         x = np.array([float(v) for v in used])
         if len(y) < 4 or len(set(x.tolist())) < 2:

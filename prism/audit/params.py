@@ -23,6 +23,15 @@ DEFAULTS = {
     "a12_batch_absence_share": 0.01,   # batch-wide absence above this share reads as batch-associated
     "a12_low_abundance_fraction": 0.3333,  # "lowest third" of proteins by mean observed log2 value
     "a12_feature_permutations": 999,   # per-protein missing-indicator tests: Monte Carlo permutations
+    # G4 / A3, A6 and the diagnostic matrix (Build Request v4, section 3)
+    "bootstrap": 999,                  # A3 bootstrap resamples
+    "sample_median_spread_mad": 0.1,   # MAD (log2) of sample medians above this reads as "medians differ"
+    "rsd_levels": [20, 30],            # QC RSD levels, percent
+    "run_order_rho_indicator": 0.3,    # |Spearman rho| of sample medians with run order reported from here
+    "qc_drift_share": 0.2,             # share of proteins with |rho| > 0.5 against run order in QC samples
+    "diag_min_features": 20,           # complete_features(100) needs this many proteins, else q = 75, 50
+    "diag_min_share": 0.1,             # ... and this share of all proteins
+    "diag_sample_missing_max": 0.5,    # for q < 100, samples missing more than this share are dropped
     # shared by every permutation test (v3 section 6.1)
     "seed": 0,
     "permutations": 999,

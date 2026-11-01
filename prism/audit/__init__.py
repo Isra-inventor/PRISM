@@ -5,6 +5,8 @@ recommends (that is the plan, later). Steps follow the registry (prism/registry/
     G2  processing history and scale     a.scale()                audit A2
                                          a.processing_state()     audit A13
                                          a.questions(), a.confirm_processing_state(item, value, assay=...)
+    G4  initial assessment               a.distribution()         audit A3
+        (part 1)                         a.quality()              audit A6
     G7  missingness profile              a.missingness()          audit A4
                                          a.missingness_profile()  audit A12 (5.1-5.8)
 
@@ -20,7 +22,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import integrity, missingness, processing_state, scale
+from . import distribution, integrity, missingness, processing_state, quality, scale
 from .finding import Finding
 from .params import defaults
 
@@ -52,6 +54,16 @@ class Audit:
         if "scale" not in self.results:
             self.scale()
         return self._keep(processing_state.run(self))
+
+    def distribution(self) -> Finding:
+        if "scale" not in self.results:
+            self.scale()
+        return self._keep(distribution.run(self))
+
+    def quality(self) -> Finding:
+        if "scale" not in self.results:
+            self.scale()
+        return self._keep(quality.run(self))
 
     def missingness(self) -> Finding:
         return self._keep(missingness.run_a4(self))
@@ -107,12 +119,25 @@ class Audit:
         Subject and time also come from the design (step 8) as 'subject' and 'time'."""
         s = self.schema
         t = s.sample_table()
-        out = {c: (k, t[c]) for c, k in s.sample_columns().items() if c in t.columns}
+        out = {}
+        for c, k in s.sample_columns().items():
+            if c in t.columns:
+                v = t[c].fillna("").astype(str).str.strip()
+                if (v != "").any():                 # an empty column is no variable
+                    out[c] = (k, t[c])
         if "subject" in t.columns and t["subject"].notna().any():
             out.setdefault("subject", ("subject_id", t["subject"]))
         if "time" in t.columns and t["time"].notna().any():
             out.setdefault("time", ("timepoint", t["time"]))
         return out
+
+    def diagnostic(self, block: str) -> tuple[pd.DataFrame, dict]:
+        """The audit set on the diagnostic scale (log2 only for linear data, from A2). Never saved."""
+        if block not in self.results.get("scale", {}):
+            self.scale()
+        X = self.audit_matrix(block)
+        Y, info = scale.diagnostic_y(X.to_numpy(dtype=float), self.results["scale"][block])
+        return pd.DataFrame(Y, index=X.index, columns=X.columns), info
 
     def summary(self) -> pd.DataFrame:
         return pd.DataFrame([{"step": f.step, "audit": k, "title": f.title, "status": f.status}

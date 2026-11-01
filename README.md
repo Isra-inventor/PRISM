@@ -22,7 +22,8 @@ that runs in Google Colab; the website will use it later.
 | G1 | Integrity and structure, audit A1 (`prism/audit/integrity.py`) | done, for review |
 | G2 | Processing history and scale: A2 scale class, A13 declared vs observed vs confirmed, platform notes, the G5/S1 gate (`prism/audit/scale.py`, `processing_state.py`) | done, for review |
 | G7 | Missingness: A4 (rates, zeros apart, floor ties, abundance dependence) and A12 5.1-5.8 (cell encoding, rates by batch / group / time, batch-wide absence, detection curve, permutation tests against the design, protein classes, pattern summary, imputation hand-off) (`prism/audit/missingness.py`, `stats.py`) | done, for review |
-| next | G4 initial assessment (A3, A6, A7 with the diagnostic-matrix policy), then actions, intake and the plan | one at a time |
+| G4 part 1 | Diagnostic-matrix policy (v4 section 3); A3 distribution and variance-mean slope, sample-median shift and what it follows; A6 QC repeatability, blanks, run-order drift, per-sample quality, vendor QC columns (`prism/audit/diagnostic.py`, `distribution.py`, `quality.py`) | done, for review |
+| next | G4 part 2: A7 batch structure (PCA / PERMANOVA associations with the sensitivity block, relationship-stratified correlation, samples per batch, coverage), A11 outliers; then actions, intake and the plan | one at a time |
 | 12-14 | Preprocessing plan, apply and report, website | later |
 
 The previous version (website, v1 to v4) is in the Git history at commit `c0e8a83`.
@@ -37,7 +38,7 @@ The previous version (website, v1 to v4) is in the Git history at commit `c0e8a8
    - Generate it and copy it (it starts with `github_pat_`).
 2. **Store it in Colab (once).** In a Colab notebook, click the key icon (**Secrets**) in the left
    bar → **Add new secret** → name `GITHUB_TOKEN`, value the token → switch on **Notebook access**.
-3. **Open a notebook from `notebooks/`** (`01_read_a_table`, `02_columns_and_layout`, `03_ai_connection_and_digest`, `04_ai_groups_the_columns`, `05_schema_wizard`, `06_audit_integrity`, `07_audit_scale_processing`, `08_audit_missingness`) in Colab (File → Upload notebook, or open it from GitHub)
+3. **Open a notebook from `notebooks/`** (`01_read_a_table`, `02_columns_and_layout`, `03_ai_connection_and_digest`, `04_ai_groups_the_columns`, `05_schema_wizard`, `06_audit_integrity`, `07_audit_scale_processing`, `08_audit_missingness`, `09_audit_distribution_quality`) in Colab (File → Upload notebook, or open it from GitHub)
    and run the cells. It installs PRISM from GitHub and reads a file from your Google Drive.
 
 From step 3 on, PRISM needs a Gemini key (https://aistudio.google.com/apikey). If it is not in Colab

@@ -62,6 +62,14 @@ def diagnostic_log(X: np.ndarray) -> tuple[np.ndarray, dict]:
     return np.log2(X + c), {"transform": "log2(x + c)", "c": c}
 
 
+def diagnostic_y(X: np.ndarray, scale_class: str) -> tuple[np.ndarray, dict]:
+    """The copy diagnostics run on: log2 (see diagnostic_log) only when A2 found a linear scale;
+    log-like and signed values are used as they are (taking log2 of log values would be a mistake)."""
+    if scale_class == "continuous_linear":
+        return diagnostic_log(X)
+    return X.copy(), {"transform": "none", "reason": f"A2 class {scale_class}: used as it is"}
+
+
 def classify(X: np.ndarray, params: dict) -> tuple[str, dict]:
     obs = X[np.isfinite(X)]
     ev = {"n_observed": int(obs.size)}
@@ -95,7 +103,9 @@ def classify(X: np.ndarray, params: dict) -> tuple[str, dict]:
 
 def median_scaling(X: np.ndarray, cut: float) -> dict | None:
     """MAD of log2 per-protein medians (positive medians only); below cut: a shared median."""
-    with np.errstate(invalid="ignore"):
+    import warnings
+    with np.errstate(invalid="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)      # proteins with no value give NaN, as intended
         med = np.nanmedian(X, axis=1)
     med = med[np.isfinite(med) & (med > 0)]
     if med.size < 3:

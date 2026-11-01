@@ -4,12 +4,14 @@ import pytest
 import prism
 
 
-def finished(tmp_path, values, extra_header="", types=None, history=None, plates=None):
-    """A confirmed SomaScan-like schema. values: rows of cell text for samples S1..S(n-1) + QC_1.
-    plates: optional {sample: plate} written as a sample-information file (Plate = batch)."""
+def finished(tmp_path, values, extra_header="", types=None, history=None, plates=None, n_qc=1, run_order=None):
+    """A confirmed SomaScan-like schema. values: rows of cell text for samples S1..S(n-n_qc) + QC_1..QC_n_qc.
+    plates / run_order: optional {sample: value} written as a sample-information file
+    (Plate = batch, RunOrder = run_order)."""
     types = types or ("Protein",) * len(values)
     n = len(values[0])
-    header = "SeqId,Type," + ",".join(f"S{j}" for j in range(1, n)) + ",QC_1"
+    header = "SeqId,Type," + ",".join(f"S{j}" for j in range(1, n - n_qc + 1)) + "," + \
+        ",".join(f"QC_{j}" for j in range(1, n_qc + 1))
     rows = [f"{1000 + i}-1,{types[i]}," + ",".join(r) for i, r in enumerate(values)]
     p = tmp_path / "soma.csv"
     p.write_text("\n".join([header] + rows) + "\n")
@@ -18,7 +20,8 @@ def finished(tmp_path, values, extra_header="", types=None, history=None, plates
                           "confidence": 1, "evidence": ""},
                          {"group_id": "b", "role": "feature_annotation", "label": "type", "columns": ["Type"],
                           "marks_rows_as_suspect": True, "flagged_values": ["Control"], "confidence": 1, "evidence": ""},
-                         {"group_id": "c", "role": "value", "label": "RFU", "templates": ["S#"], "columns": ["S2", "QC_1"],
+                         {"group_id": "c", "role": "value", "label": "RFU", "templates": ["S#"] + (["QC_#"] if n_qc > 1 else []),
+                          "columns": ["S2"] + (["QC_1"] if n_qc == 1 else []),
                           "assay_label": "SomaScan", "confidence": 1, "evidence": ""}],
               "assays": [{"assay_label": "SomaScan", "omics_type": "x", "omics_family": "proteomics",
                           "in_supported_scope": "yes", "feature_identity": ["a"], "confidence": 1, "evidence": ""}]}
@@ -31,14 +34,18 @@ def finished(tmp_path, values, extra_header="", types=None, history=None, plates
                 {"column": "Sample", "is_sample_id": True, "audit_kind": "other", "label": "id", "confidence": 1,
                  "evidence": ""},
                 {"column": "Plate", "is_sample_id": False, "audit_kind": "batch", "label": "plate", "confidence": 1,
-                 "evidence": ""}]}
+                 "evidence": ""},
+                {"column": "RunOrder", "is_sample_id": False, "audit_kind": "run_order", "label": "run order",
+                 "confidence": 1, "evidence": ""}]}
         return answer
     s = prism.start(prism.read(p), ai=prism.MockAI(ai))
     s.confirm_all(); s.confirm_feature_id(); s.confirm_flags(); s.confirm_values()
     s.propose_sample_types(); s.confirm_samples()
-    if plates:
+    if plates or run_order:
+        names = list(dict.fromkeys(list(plates or {}) + list(run_order or {})))
         info = tmp_path / "info.csv"
-        info.write_text("Sample,Plate\n" + "".join(f"{k},{v}\n" for k, v in plates.items()))
+        info.write_text("Sample,Plate,RunOrder\n" + "".join(
+            f"{k},{(plates or {}).get(k, '')},{(run_order or {}).get(k, '')}\n" for k in names))
         s.add_sample_info(info)
         s.confirm_sample_info()
     s.confirm_design()

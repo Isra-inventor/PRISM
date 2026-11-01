@@ -31,7 +31,7 @@ import numpy as np
 import yaml
 
 from .finding import Finding
-from .scale import classify, diagnostic_log, median_scaling
+from .scale import classify, diagnostic_y, median_scaling
 
 ITEMS = ("log_transformed", "normalized", "imputed", "batch_corrected", "features_or_samples_removed_before_upload")
 NOT_ASSESSED = ("batch_corrected", "features_or_samples_removed_before_upload")
@@ -67,7 +67,7 @@ def platform_notes(schema) -> list[dict]:
 def evidence(X: np.ndarray, cls: str, params: dict) -> dict:
     ms = median_scaling(X, params["median_scaling_mad"])
     tied, eligible = floor_ties(X, params["floor_min_observed"])
-    Y = diagnostic_log(X)[0]
+    Y = diagnostic_y(X, cls)[0]
     with np.errstate(invalid="ignore"):
         smed = np.nanmedian(Y - np.nanmedian(Y, axis=1, keepdims=True), axis=0)
     smed = smed[np.isfinite(smed)]
@@ -91,6 +91,9 @@ def assess(item: str, dec: str, ev: dict, p: dict) -> tuple[list[str], str]:
     if item == "log_transformed":
         log_like = ev["scale_class"] in LOG_LIKE
         s = [f"A2 scale class: {ev['scale_class']}."]
+        if ev.get("a3_slope"):
+            b, (lo, hi) = ev["a3_slope"]["slope"], ev["a3_slope"]["ci95"]
+            s.append(f"A3 slope of log SD on log mean b = {b:.2f} (95% CI {lo:.2f} to {hi:.2f}).")
         if ev["scale_class"] not in LOG_LIKE + ("continuous_linear",) or dec not in ("yes", "no"):
             return s, "not_assessed"
         return s, "matches" if (dec == "yes") == log_like else "does_not_match"
@@ -132,6 +135,7 @@ def run(audit) -> Finding:
         X = audit.audit_matrix(bid).to_numpy(dtype=float)
         cls = audit.results.get("scale", {}).get(bid) or classify(X, audit.params)[0]
         ev = evidence(X, cls, audit.params)
+        ev["a3_slope"] = audit.results.get("a3_slope", {}).get(bid)
         hist = s.history_answers.get(assay, {})
         for item in ITEMS:
             dec = _declared(hist.get(item))
