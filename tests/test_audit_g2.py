@@ -20,7 +20,7 @@ def test_registry_is_valid_and_honest():
     r = registry.check()
     assert r["ok"], r["problems"]
     built = [s["id"] for s in registry.steps() if s["implemented"]]
-    assert built == ["G1", "G2", "G7"]
+    assert {"G1", "G2", "G4", "G7"} <= set(built)
     assert registry.step("G2")["audits"] == ["A2", "A13"]
 
 

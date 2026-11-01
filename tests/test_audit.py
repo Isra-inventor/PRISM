@@ -4,10 +4,16 @@ import pytest
 import prism
 
 
-def finished(tmp_path, values, extra_header="", types=None, history=None, plates=None, n_qc=1, run_order=None):
+def finished(tmp_path, values, extra_header="", types=None, history=None, plates=None, n_qc=1, run_order=None,
+             info=None):
     """A confirmed SomaScan-like schema. values: rows of cell text for samples S1..S(n-n_qc) + QC_1..QC_n_qc.
     plates / run_order: optional {sample: value} written as a sample-information file
-    (Plate = batch, RunOrder = run_order)."""
+    (Plate = batch, RunOrder = run_order). info: more columns, {name: (audit_kind, {sample: value})}."""
+    info = dict(info or {})
+    if plates:
+        info["Plate"] = ("batch", plates)
+    if run_order:
+        info["RunOrder"] = ("run_order", run_order)
     types = types or ("Protein",) * len(values)
     n = len(values[0])
     header = "SeqId,Type," + ",".join(f"S{j}" for j in range(1, n - n_qc + 1)) + "," + \
@@ -30,24 +36,24 @@ def finished(tmp_path, values, extra_header="", types=None, history=None, plates
         if system.startswith("You label the samples"):
             return {"rules": [{"pattern": "QC_*", "sample_type": "qc", "evidence": ""}]}
         if system.startswith("You describe the columns of a SAMPLE"):
-            return {"columns": [
-                {"column": "Sample", "is_sample_id": True, "audit_kind": "other", "label": "id", "confidence": 1,
-                 "evidence": ""},
-                {"column": "Plate", "is_sample_id": False, "audit_kind": "batch", "label": "plate", "confidence": 1,
-                 "evidence": ""},
-                {"column": "RunOrder", "is_sample_id": False, "audit_kind": "run_order", "label": "run order",
-                 "confidence": 1, "evidence": ""}]}
+            return {"columns": [{"column": "Sample", "is_sample_id": True, "audit_kind": "other", "label": "id",
+                                 "confidence": 1, "evidence": ""}] +
+                    [{"column": c, "is_sample_id": False, "audit_kind": k, "label": c, "confidence": 1, "evidence": ""}
+                     for c, (k, _) in info.items()]}
         return answer
     s = prism.start(prism.read(p), ai=prism.MockAI(ai))
     s.confirm_all(); s.confirm_feature_id(); s.confirm_flags(); s.confirm_values()
     s.propose_sample_types(); s.confirm_samples()
-    if plates or run_order:
-        names = list(dict.fromkeys(list(plates or {}) + list(run_order or {})))
-        info = tmp_path / "info.csv"
-        info.write_text("Sample,Plate,RunOrder\n" + "".join(
-            f"{k},{(plates or {}).get(k, '')},{(run_order or {}).get(k, '')}\n" for k in names))
-        s.add_sample_info(info)
+    if info:
+        names = list(dict.fromkeys(k for _, vals in info.values() for k in vals))
+        path = tmp_path / "info.csv"
+        path.write_text("Sample," + ",".join(info) + "\n" + "".join(
+            k + "," + ",".join(str(vals.get(k, "")) for _, vals in info.values()) + "\n" for k in names))
+        s.add_sample_info(path)
         s.confirm_sample_info()
+    d = s.design()
+    if d["time"]["source"] != "none":
+        s.set_design(time_unit="weeks")
     s.confirm_design()
     for bid, g in s.block_map().items():
         if g.zero_means is None:

@@ -7,6 +7,11 @@ recommends (that is the plan, later). Steps follow the registry (prism/registry/
                                          a.questions(), a.confirm_processing_state(item, value, assay=...)
     G4  initial assessment               a.distribution()         audit A3
         (part 1)                         a.quality()              audit A6
+        (part 2)                         a.batch_structure()      audit A7 (also S10)
+    G3  cleaning candidates              a.cleaning_candidates()  flags only
+    S4  sample exclusion (input)         a.outliers()             audit A11
+    S5  repeated measures                a.repeated_measures()    audit A8
+    S10 design                           a.dimensionality()       audit A5
     G7  missingness profile              a.missingness()          audit A4
                                          a.missingness_profile()  audit A12 (5.1-5.8)
 
@@ -22,9 +27,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import distribution, integrity, missingness, processing_state, quality, scale
+from . import (batch, cleaning, dimensionality, distribution, integrity, missingness, outliers,
+               processing_state, quality, repeated, scale)
 from .finding import Finding
 from .params import defaults
+
+
+BATTERY = ("integrity", "scale", "processing_state", "distribution", "quality", "missingness", "missingness_profile",
+           "batch_structure", "repeated_measures", "dimensionality", "outliers")
 
 
 class Audit:
@@ -64,6 +74,46 @@ class Audit:
         if "scale" not in self.results:
             self.scale()
         return self._keep(quality.run(self))
+
+    def batch_structure(self) -> Finding:
+        self._need_scale()
+        return self._keep(batch.run(self))
+
+    def repeated_measures(self) -> Finding:
+        self._need_scale()
+        return self._keep(repeated.run(self))
+
+    def outliers(self) -> Finding:
+        self._need_scale()
+        return self._keep(outliers.run(self))
+
+    def dimensionality(self) -> Finding:
+        self._need_scale()
+        if "median_icc" not in self.results and "A8" not in self.findings:
+            self.repeated_measures()
+        return self._keep(dimensionality.run(self))
+
+    def cleaning_candidates(self) -> dict:
+        """G3: candidate classes of technical records to remove (flags only), per block."""
+        out = {bid: cleaning.candidates(self, bid) for bid in self.schema.block_map()}
+        self.results["g3"] = out
+        return out
+
+    def run_all(self) -> pd.DataFrame:
+        """The full battery (checkpoint C0: A1 to A13) and the G3 candidates, in order."""
+        for name in BATTERY:
+            getattr(self, name)()
+        self.cleaning_candidates()
+        return self.summary()
+
+    def mark_control_protein(self, protein: str) -> None:
+        """Mark a protein as a control (spike-in, internal standard): A7 reports its trend over run order."""
+        self.overrides.append({"kind": "control_feature", "feature": str(protein), "by": "user",
+                               "time": _dt.datetime.now().isoformat(timespec="seconds")})
+
+    def _need_scale(self) -> None:
+        if "scale" not in self.results:
+            self.scale()
 
     def missingness(self) -> Finding:
         return self._keep(missingness.run_a4(self))

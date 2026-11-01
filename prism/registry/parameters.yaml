@@ -29,3 +29,11 @@ parameters:
   diag_min_features: {evidence_level: heuristic}
   diag_min_share: {evidence_level: heuristic}
   diag_sample_missing_max: {evidence_level: heuristic}
+  categorical_max_levels: {evidence_level: convention}
+  time_ordered_max_levels: {evidence_level: convention}
+  max_pcs: {evidence_level: convention}
+  modified_z_cutoff: {evidence_level: heuristic, evidence: [iglewicz1993]}
+  icc_indicator: {evidence_level: heuristic}
+  batch_min_samples: {evidence_level: heuristic, evidence: [cuklina2021]}
+  blank_dominated_ratio: {evidence_level: heuristic}
+  near_duplicate_r: {evidence_level: heuristic}

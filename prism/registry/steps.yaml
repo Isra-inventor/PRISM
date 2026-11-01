@@ -71,7 +71,7 @@ steps:
     ops: []
     evidence: [cuklina2021]
     evidence_level: expert_guidance
-    implemented: false
+    implemented: true
     notes: A report view over A2, A3, A6, A7 plus the relationship-stratified sample correlation (A7).
 
   - id: G5

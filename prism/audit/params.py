@@ -32,6 +32,15 @@ DEFAULTS = {
     "diag_min_features": 20,           # complete_features(100) needs this many proteins, else q = 75, 50
     "diag_min_share": 0.1,             # ... and this share of all proteins
     "diag_sample_missing_max": 0.5,    # for q < 100, samples missing more than this share are dropped
+    # A5, A7, A8, A11, G3 (ported from the v4 build)
+    "categorical_max_levels": 20,      # categorical variables need 2 to this many levels
+    "time_ordered_max_levels": 12,     # time is an ordered factor up to this many values, else numeric
+    "max_pcs": 5,                      # k = min(max_pcs, n - 1)
+    "modified_z_cutoff": 3.5,          # outlier cut-off (Iglewicz and Hoaglin)
+    "icc_indicator": 0.5,              # share of proteins with ICC above this is reported
+    "batch_min_samples": 25,           # quoted in Cuklina et al. 2021 as a suggestion from other work; unverified
+    "blank_dominated_ratio": 0.5,      # G3 flags proteins whose mean blank signal is this share of the study mean
+    "near_duplicate_r": 0.9999,        # samples correlating above this read as near-duplicates
     # shared by every permutation test (v3 section 6.1)
     "seed": 0,
     "permutations": 999,
