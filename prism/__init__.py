@@ -22,7 +22,9 @@ Built one step at a time. What exists so far:
     a.integrity()                           # G1 / A1
     a.scale(); a.processing_state()         # G2 / A2, A13
     a.missingness(); a.missingness_profile()   # G7 / A4, A12
-    a.distribution(); a.quality()           # G4 / A3, A6 (part 1)
+    a.distribution(); a.quality()           # G4 / A3, A6
+    a.run_all()                             # the whole battery (C0)
+    st = prism.Study(s)                     # audit -> intake -> plan -> approve -> verify -> replay
 """
 
 from .ai import AIError, MockAI, connect
@@ -31,10 +33,12 @@ from .digest import digest, show
 from .grouping import Group, Grouping, propose_groups
 from .layout import Layout, propose_layout
 from .outputs import load
+from .plan import Study
 from .schema import Schema, start
 from .table import Table, read
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 __all__ = ["read", "Table", "propose_layout", "Layout", "digest", "show", "connect", "MockAI", "AIError",
            "propose_groups", "Grouping", "Group",
-           "start", "Schema", "load", "Audit", "__version__"]
+           "start", "Schema", "load", "Audit", "Study",
+           "__version__"]

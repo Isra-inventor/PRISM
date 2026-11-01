@@ -37,7 +37,7 @@ def _merge_touch(*ts):
 
 
 def _known_features(data, assay):
-    return {k for b in data.blocks if not assay or b.assay_id == assay for k in b.feature_keys}
+    return {k for b in data.blocks if not assay or assay in (b.assay_id, b.block_id) for k in b.feature_keys}
 
 
 def pre_remove_features(data, p, ctx):
@@ -51,7 +51,7 @@ def pre_remove_features(data, p, ctx):
 def op_remove_features(data, p, ctx):
     ids = set(p["ids"])
     for b in data.blocks:
-        if p.get("assay") and b.assay_id != p["assay"]:
+        if p.get("assay") and p["assay"] not in (b.assay_id, b.block_id):
             continue
         keep = [i for i, k in enumerate(b.feature_keys) if k not in ids]
         b.X = b.X[keep]

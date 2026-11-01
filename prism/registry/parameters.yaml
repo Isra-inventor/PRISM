@@ -37,3 +37,4 @@ parameters:
   batch_min_samples: {evidence_level: heuristic, evidence: [cuklina2021]}
   blank_dominated_ratio: {evidence_level: heuristic}
   near_duplicate_r: {evidence_level: heuristic}
+  neff_ratio_note: {evidence_level: heuristic}

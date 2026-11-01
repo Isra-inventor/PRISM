@@ -1,0 +1,4 @@
+# The typed order of the plan (Build Request v4, section 8.6). Checkpoints are markers: the plan
+# re-runs that checkpoint's audit battery after the entries before it are applied.
+order: [G3, G7-zeros, G7-floor, G5, G6, S1, C1, S2, S3, S4, C2]
+steps_of_groups: {G7-zeros: G7, G7-floor: G7}

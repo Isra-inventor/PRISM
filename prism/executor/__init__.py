@@ -72,6 +72,8 @@ class OpContext:
 def units(data, assay=None):
     """Blocks grouped like the audit's units: an assay whose blocks have disjoint feature keys is
     one unit (blocks share the samples); blocks that share keys are separate units."""
+    if assay and any(b.block_id == assay for b in data.blocks):     # one block (A1B1 ...)
+        return [[b for b in data.blocks if b.block_id == assay]]
     out = []
     aids = []
     for b in data.blocks:

@@ -56,7 +56,7 @@ steps:
     ops: [remove_features]
     evidence: []
     evidence_level: convention
-    implemented: false
+    implemented: true
     notes: Flag first, remove only on approval, one class at a time; always before any other op.
 
   - id: G4
@@ -88,7 +88,7 @@ steps:
     ops: [log_transform]
     evidence: [cuklina2021, vandenberg2006]
     evidence_level: expert_guidance
-    implemented: false
+    implemented: true
     notes: Conditional on G2. Excluded for signed, count, proportion, compositional and already-log data. vsn is out of scope (candidate, implemented false).
 
   - id: G6
@@ -105,7 +105,7 @@ steps:
     ops: [drift_qc_loess]
     evidence: [dunn2011]
     evidence_level: unverified
-    implemented: false
+    implemented: true
     notes: Per-feature LOESS of QC values against run order, applied to all samples. Not the sample-based drift of S2.
 
   - id: G7
@@ -136,7 +136,7 @@ steps:
     ops: [normalize_median, normalize_quantile]
     evidence: [cuklina2021, valikangas2018]
     evidence_level: expert_guidance
-    implemented: false
+    implemented: true
     notes: Decision node median_shift_technical. PQN and other metabolomics normalizations are candidates with implemented false.
 
   - id: S2
@@ -152,7 +152,7 @@ steps:
     ops: [drift_sample_loess, batch_center, batch_combat]
     evidence: [cuklina2021, leek2010, nygaard2016, johnson2007]
     evidence_level: expert_guidance
-    implemented: false
+    implemented: true
     notes: Sample-based LOESS drift, then discrete correction (median/mean centering or ComBat). Decided jointly with missingness (node D2).
 
   - id: S3
@@ -167,7 +167,7 @@ steps:
     ops: [remove_features]
     evidence: []
     evidence_level: convention
-    implemented: false
+    implemented: true
     notes: Group-aware completeness thresholds (100/90/75/50/25 percent) are reported, never chosen.
 
   - id: S4
@@ -182,7 +182,7 @@ steps:
     ops: [remove_samples]
     evidence: [iglewicz1993]
     evidence_level: heuristic
-    implemented: false
+    implemented: true
     notes: Recommendation list only; removal needs an explicit per-sample approval.
 
   - id: S5
@@ -197,7 +197,7 @@ steps:
     ops: []
     evidence: []
     evidence_level: convention
-    implemented: false
+    implemented: true
     notes: design_constraints.json read by S1 to S3; never changes the matrix.
 
   - id: S6
@@ -212,7 +212,7 @@ steps:
     ops: []
     evidence: [lazar2016, wei2018, hui2023, hui_chan_goh2025, vanderaa_gatto2023]
     evidence_level: literature_independent
-    implemented: false
+    implemented: true
     notes: Phase 2 interface only (prism/phase2/imputation.py). Not in any Phase 1 plan; the plan engine cannot reach it.
 
   - id: S7
@@ -242,7 +242,7 @@ steps:
     ops: []
     evidence: [robert_escoufier1976]
     evidence_level: unverified
-    implemented: false
+    implemented: false   # A9 / A10 are not ported: single-assay proteomics files for now
     notes: A10 report only; needs 2 or more datasets.
 
   - id: S9
@@ -257,7 +257,7 @@ steps:
     ops: []
     evidence: []
     evidence_level: heuristic
-    implemented: false
+    implemented: false   # A9 / A10 are not ported: single-assay proteomics files for now
     notes: A9 detection; the rule always returns insufficient evidence for the action.
 
   - id: S10
@@ -272,11 +272,11 @@ steps:
     ops: []
     evidence: [cuklina2021, nygaard2016]
     evidence_level: expert_guidance
-    implemented: false
+    implemented: true
     notes: A7 and A8 interpreted against the intake (contrast, protected variables).
 
 # Candidates listed for completeness; not implemented in this build.
 candidates:
   - {id: vsn, step: G5, name: Variance-stabilizing normalization (vsn), implemented: false, evidence: [], evidence_level: unverified, notes: R-only, out of scope}
-  - {id: arcsinh, step: G5, name: arcsinh with a user-supplied cofactor, implemented: false, evidence: [], evidence_level: convention, notes: no default cofactor; needs justification}
+  - {id: arcsinh, step: G5, name: arcsinh with a user-supplied cofactor, implemented: true, evidence: [], evidence_level: convention, notes: no default cofactor; needs justification}
   - {id: pqn, step: S1, name: Probabilistic quotient normalization, implemented: false, evidence: [], evidence_level: unverified, notes: evidence not verified}

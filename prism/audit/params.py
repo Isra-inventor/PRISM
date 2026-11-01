@@ -41,6 +41,7 @@ DEFAULTS = {
     "batch_min_samples": 25,           # quoted in Cuklina et al. 2021 as a suggestion from other work; unverified
     "blank_dominated_ratio": 0.5,      # G3 flags proteins whose mean blank signal is this share of the study mean
     "near_duplicate_r": 0.9999,        # samples correlating above this read as near-duplicates
+    "neff_ratio_note": 0.5,            # the plan notes when n_eff / n is below this (S5)
     # shared by every permutation test (v3 section 6.1)
     "seed": 0,
     "permutations": 999,
