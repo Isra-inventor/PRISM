@@ -29,7 +29,8 @@ The previous website (v1 to v4) is in the Git history at commit `c0e8a83` (v4 pa
    `GITHUB_TOKEN` → switch on **Notebook access**.
 3. **Gemini key.** From https://aistudio.google.com/apikey. Save it in Secrets as `GEMINI_API_KEY`, or
    PRISM asks you once per session.
-4. **Open the notebooks in `notebooks/`** in order (`01` ... `10`). Put your data in Google Drive (for
+4. **To check everything works, run `notebooks/00_test_everything.ipynb`** (the tests, then a full run on your
+   file). Then open the notebooks in order (`01` ... `10`) to go through each step yourself. Put your data in Google Drive (for
    example `MyDrive/PRISM_data/`), not in the repository.
 
 ## Licensing
